@@ -37,7 +37,7 @@ describe('BannerComponent', () => {
   it('renders star tag, main text, and subtext', () => {
     const lines = new BannerComponent(banner).render(80);
     expect(lines.length).toBe(3);
-    expect(lines[0]).toContain('✦');
+    expect(lines[0]).toContain('✻');
     expect(lines[0]).toContain("What's new:");
     expect(lines[0]).toContain('This is the main banner message');
     expect(lines[1]).toContain('This is a short subtext');
@@ -52,7 +52,7 @@ describe('BannerComponent', () => {
   it('renders without a tag when tag is empty', () => {
     const lines = new BannerComponent(makeBannerState({ mainText: 'Hello' })).render(80);
     expect(lines.length).toBe(2);
-    expect(lines[0]).not.toContain('✦');
+    expect(lines[0]).not.toContain('✻');
     expect(lines[0]).toContain('Hello');
     expect(lines[1]).toBe('');
   });
@@ -107,11 +107,11 @@ describe('BannerComponent', () => {
     const mainRows = lines.slice(0, -1);
     let tagCount = 0;
     for (const line of mainRows) {
-      if (line.includes('✦ New:')) tagCount += 1;
+      if (line.includes('✻ New:')) tagCount += 1;
     }
     expect(tagCount).toBe(1);
     expect(mainRows.length).toBeGreaterThan(1);
-    const firstIndex = lines.findIndex((line) => line.includes('✦ New:'));
+    const firstIndex = lines.findIndex((line) => line.includes('✻ New:'));
     expect(firstIndex).toBe(0);
   });
 
@@ -124,16 +124,16 @@ describe('BannerComponent', () => {
     const subLine = lines[1]!;
     const subStartIndex = subLine.indexOf('This is a short subtext');
     const subIndentVisibleWidth = visibleWidth(subLine.slice(0, subStartIndex));
-    // The subtext starts two columns after the left edge ("✦ "), which aligns
+    // The subtext starts two columns after the left edge ("✻ "), which aligns
     // with the tag text itself rather than the main-text column.
-    expect(subIndentVisibleWidth).toBe(visibleWidth('✦ '));
-    expect(tagPrefixVisibleWidth).toBeGreaterThan(visibleWidth('✦ '));
+    expect(subIndentVisibleWidth).toBe(visibleWidth('✻ '));
+    expect(tagPrefixVisibleWidth).toBeGreaterThan(visibleWidth('✻ '));
   });
 
   it('drops the tag when it does not fit', () => {
     const width = 5;
     const lines = new BannerComponent(banner).render(width);
-    expect(lines[0]).not.toContain('✦');
+    expect(lines[0]).not.toContain('✻');
     expect(lines[0]).not.toContain("What's new");
     for (const line of lines) {
       expect(visibleWidth(line)).toBeLessThanOrEqual(width);
@@ -143,7 +143,7 @@ describe('BannerComponent', () => {
   it('still renders the tag when it fits', () => {
     const width = 40;
     const lines = new BannerComponent(banner).render(width);
-    expect(lines[0]).toContain('✦');
+    expect(lines[0]).toContain('✻');
     expect(lines[0]).toContain("What's new");
     for (const line of lines) {
       expect(visibleWidth(line)).toBeLessThanOrEqual(width);
@@ -167,7 +167,7 @@ describe('BannerComponent', () => {
 
   it('styles tag, main text, and subtext with theme colors', () => {
     const lines = new BannerComponent(banner).render(80);
-    expect(lines[0]).toContain(currentTheme.boldFg('primary', "✦ What's new:"));
+    expect(lines[0]).toContain(currentTheme.boldFg('primary', "✻ What's new:"));
     expect(lines[0]).toContain(
       currentTheme.boldFg('textStrong', 'This is the main banner message for testing purposes.'),
     );
@@ -193,12 +193,12 @@ describe('BannerComponent', () => {
     for (const line of lines) {
       expect(visibleWidth(line)).toBeLessThanOrEqual(width);
     }
-    expect(lines[0]).toContain('✦ New:');
+    expect(lines[0]).toContain('✻ New:');
     const firstLine = lines[0]!;
     const mainTextStart = visibleWidth(firstLine.slice(0, firstLine.indexOf('Line 1')));
     const continuationLine = lines.find((line) => line.includes('lot of'))!;
     expect(visibleWidth(continuationLine.slice(0, continuationLine.indexOf('lot of')))).toBe(mainTextStart);
     const subLine = lines.find((line) => line.includes('Sub text'))!;
-    expect(visibleWidth(subLine.slice(0, subLine.indexOf('Sub text')))).toBe(visibleWidth('✦ '));
+    expect(visibleWidth(subLine.slice(0, subLine.indexOf('Sub text')))).toBe(visibleWidth('✻ '));
   });
 });

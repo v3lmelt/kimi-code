@@ -15,11 +15,11 @@ export const SECONDARY_MODEL_FLAG_ENV = 'KIMI_CODE_EXPERIMENTAL_SECONDARY_MODEL'
 
 export const secondaryModelFlag: FlagDefinitionInput = {
   id: SECONDARY_MODEL_FLAG_ID,
-  title: 'Secondary model for subagents',
+  title: 'Subagent model selection',
   description:
-    'Let newly spawned subagents use a separately configured secondary model by default, with an explicit primary-model override for quality-sensitive tasks.',
+    'Let newly spawned subagents bind to the configured secondary model by default, or to any configured model via the Agent/AgentSwarm model parameter or an agent model_preference.',
   env: SECONDARY_MODEL_FLAG_ENV,
-  default: false,
+  default: true,
   surface: 'core',
 };
 

@@ -422,6 +422,9 @@ export class OpenAILegacyStreamedMessage implements StreamedMessage {
 
         if (chunk.usage) {
           this._usage = extractUsage(chunk.usage) ?? null;
+          if (this._usage !== null) {
+            yield { type: 'usage', usage: { ...this._usage } };
+          }
         }
 
         if (!chunk.choices || chunk.choices.length === 0) {

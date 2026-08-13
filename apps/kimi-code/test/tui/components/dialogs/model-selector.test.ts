@@ -1,5 +1,5 @@
 import type { ModelAlias } from '@moonshot-ai/kimi-code-sdk';
-import { visibleWidth } from '@moonshot-ai/pi-tui';
+import { Container, visibleWidth } from '@moonshot-ai/pi-tui';
 import { describe, expect, it, vi } from 'vitest';
 
 import { ModelSelectorComponent } from '#/tui/components/dialogs/model-selector';
@@ -316,6 +316,33 @@ describe('ModelSelectorComponent', () => {
       onCancel: vi.fn(),
     });
     expect(text(picker)).toContain('Alt+S session-only');
+  });
+
+  it('bumps render version so parent containers do not cache stale output', () => {
+    const picker = new ModelSelectorComponent({
+      models: {
+        first: model('First Model'),
+        second: model('Second Model'),
+      },
+      currentValue: 'first',
+      currentThinkingEffort: 'on',
+      searchable: true,
+      onSelect: vi.fn(),
+      onCancel: vi.fn(),
+    });
+
+    const parent = new Container();
+    parent.addChild(picker);
+
+    const before = parent.render(120).join('\n');
+    expect(before).toContain('❯ First Model');
+    expect(before).not.toContain('❯ Second Model');
+
+    picker.handleInput(DOWN);
+
+    const after = parent.render(120).join('\n');
+    expect(after).toContain('❯ Second Model');
+    expect(after).not.toContain('❯ First Model');
   });
 
   it('renders effort segments with the default effort highlighted', () => {

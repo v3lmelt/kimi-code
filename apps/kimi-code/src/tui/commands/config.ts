@@ -21,6 +21,7 @@ import { PermissionSelectorComponent } from '../components/dialogs/permission-se
 import { SettingsSelectorComponent, type SettingsSelection } from '../components/dialogs/settings-selector';
 import { ThemeSelectorComponent } from '../components/dialogs/theme-selector';
 import { UpdatePreferenceSelectorComponent } from '../components/dialogs/update-preference-selector';
+import { ThinkingDisplaySelectorComponent } from '../components/dialogs/thinking-display-selector';
 import { DEFAULT_TUI_CONFIG, saveTuiConfig, type TuiConfig } from '../config';
 import type { ThemeName } from '#/tui/theme';
 import { currentTheme, isBuiltInTheme, lightColors, loadCustomThemeMerged } from '#/tui/theme';
@@ -58,6 +59,7 @@ export function currentTuiConfig(host: Pick<SlashCommandHost, 'state'>): TuiConf
     editorCommand: host.state.appState.editorCommand,
     disablePasteBurst: host.state.appState.disablePasteBurst ?? DEFAULT_TUI_CONFIG.disablePasteBurst,
     cacheExpiryHint: host.state.appState.cacheExpiryHint ?? DEFAULT_TUI_CONFIG.cacheExpiryHint,
+    hideThinking: host.state.appState.hideThinking ?? DEFAULT_TUI_CONFIG.hideThinking,
     notifications: host.state.appState.notifications,
     upgrade: host.state.appState.upgrade,
     statusLine: host.state.appState.statusLine ?? DEFAULT_TUI_CONFIG.statusLine,
@@ -888,6 +890,51 @@ export async function applyUpdatePreferenceChoice(
   host.showStatus(`Automatic updates ${autoInstall ? 'enabled' : 'disabled'}.`);
 }
 
+export function showThinkingDisplayPicker(host: SlashCommandHost): void {
+  host.mountEditorReplacement(
+    new ThinkingDisplaySelectorComponent({
+      currentValue: host.state.appState.hideThinking === true,
+      onSelect: (hideThinking) => {
+        host.restoreEditor();
+        void applyThinkingDisplayChoice(host, hideThinking);
+      },
+      onCancel: () => {
+        host.restoreEditor();
+      },
+    }),
+  );
+}
+
+export async function applyThinkingDisplayChoice(
+  host: SlashCommandHost,
+  hideThinking: boolean,
+): Promise<void> {
+  if (hideThinking === (host.state.appState.hideThinking === true)) {
+    host.showStatus(`Thinking display already ${hideThinking ? 'hidden' : 'shown'}.`);
+    return;
+  }
+
+  try {
+    await saveTuiConfig({
+      ...currentTuiConfig(host),
+      hideThinking,
+    });
+  } catch (error) {
+    host.showStatus(
+      `Failed to save thinking display setting: ${formatErrorMessage(error)}`,
+      'error',
+    );
+    return;
+  }
+
+  host.setAppState({ hideThinking });
+  host.showStatus(
+    hideThinking
+      ? 'Thinking blocks now collapse to "∴ Thinking…".'
+      : 'Thinking blocks now render inline.',
+  );
+}
+
 async function applyPermissionChoice(host: SlashCommandHost, mode: PermissionMode): Promise<void> {
   if (mode === host.state.appState.permissionMode) {
     host.showStatus(`Permission mode unchanged: ${mode}.`);
@@ -935,6 +982,7 @@ function handleSettingsSelection(host: SlashCommandHost, value: SettingsSelectio
     case 'editor': showEditorPicker(host); return;
     case 'experiments': void showExperimentsPanel(host); return;
     case 'upgrade': showUpdatePreferencePicker(host); return;
+    case 'thinking': showThinkingDisplayPicker(host); return;
     case 'usage': void showUsage(host); return;
   }
 }

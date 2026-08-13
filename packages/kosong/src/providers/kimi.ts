@@ -362,6 +362,9 @@ class KimiStreamedMessage implements StreamedMessage {
         const rawUsage = extractUsageFromChunk(rawChunk);
         if (rawUsage) {
           this._usage = extractUsage(rawUsage) ?? null;
+          if (this._usage !== null) {
+            yield { type: 'usage', usage: { ...this._usage } };
+          }
         }
 
         if (!chunk.choices || chunk.choices.length === 0) {

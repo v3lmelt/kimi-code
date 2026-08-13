@@ -1,4 +1,4 @@
-import type { Component } from "../tui.ts";
+import { bumpVersion, type Component } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 
 /**
@@ -27,6 +27,7 @@ export class Text implements Component {
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		bumpVersion(this);
 	}
 
 	setCustomBgFn(customBgFn?: (text: string) => string): void {
@@ -34,12 +35,14 @@ export class Text implements Component {
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		bumpVersion(this);
 	}
 
 	invalidate(): void {
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		bumpVersion(this);
 	}
 
 	render(width: number): string[] {

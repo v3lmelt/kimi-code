@@ -10,10 +10,10 @@ import type { Component, TUI } from '@moonshot-ai/pi-tui';
 import { highlightLines, langFromPath } from '#/tui/components/media/code-highlight';
 import { renderDiffLinesClustered } from '#/tui/components/media/diff-preview';
 import {
-  BRAILLE_SPINNER_FRAMES,
-  BRAILLE_SPINNER_INTERVAL_MS,
   COMMAND_PREVIEW_LINES,
   RESULT_PREVIEW_LINES,
+  SPINNER_FRAMES,
+  SPINNER_INTERVAL_MS,
   THINKING_PREVIEW_LINES,
 } from '#/tui/constant/rendering';
 import {
@@ -44,7 +44,7 @@ const MAX_SUB_TOOL_CALLS_SHOWN = 4;
 const MAX_SUBAGENT_DESCRIPTION_LENGTH = 60;
 const APPROVED_PLAN_MARKER = '## Approved Plan:';
 const AUTO_APPROVED_PLAN_MARKER = '## Plan (auto-approved, not user-reviewed):';
-const STREAMING_PROGRESS_INTERVAL_MS = 1000;
+const TOOL_BLINK_INTERVAL_MS = 700;
 const PROGRESS_URL_RE = /https?:\/\/\S+/g;
 const ABORTED_MARK = '⊘';
 const MAX_LIVE_OUTPUT_CHARS = 50_000;
@@ -161,12 +161,6 @@ function formatSubagentTokens(usage: TokenUsage | undefined): string | undefined
   return `${formatTokenCount(total)} tok`;
 }
 
-function formatByteSize(bytes: number): string {
-  if (bytes < 1024) return `${String(bytes)} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
-}
-
 function formatElapsed(seconds: number): string {
   if (seconds < 60) return `${String(seconds)}s`;
   const minutes = Math.floor(seconds / 60);
@@ -277,72 +271,6 @@ function unescapeJsonString(s: string): string {
         return ch;
     }
   });
-}
-
-/**
- * Pull the live value of a JSON string field out of partially-streamed
- * arguments, even if the closing quote hasn't arrived yet. Handles the
- * common JSON string escapes so `\n` in a streamed `content` becomes a
- * real newline we can highlight. Returns `undefined` if the field hasn't
- * started streaming yet.
- */
-function extractPartialStringField(text: string, key: string): string | undefined {
-  const opener = new RegExp(`"${key}"\\s*:\\s*"`);
-  const match = opener.exec(text);
-  if (match === null) return undefined;
-  const start = match.index + match[0].length;
-  let out = '';
-  let i = start;
-  while (i < text.length) {
-    const ch = text[i];
-    if (ch === '\\') {
-      const next = text[i + 1];
-      if (next === undefined) return out;
-      switch (next) {
-        case 'n':
-          out += '\n';
-          break;
-        case 't':
-          out += '\t';
-          break;
-        case 'r':
-          out += '\r';
-          break;
-        case 'b':
-          out += '\b';
-          break;
-        case 'f':
-          out += '\f';
-          break;
-        case '"':
-          out += '"';
-          break;
-        case '\\':
-          out += '\\';
-          break;
-        case '/':
-          out += '/';
-          break;
-        case 'u': {
-          if (i + 5 >= text.length) return out;
-          const hex = text.slice(i + 2, i + 6);
-          const code = Number.parseInt(hex, 16);
-          if (Number.isNaN(code)) return out;
-          out += String.fromCodePoint(code);
-          i += 6;
-          continue;
-        }
-        default:
-          out += next;
-      }
-      i += 2;
-      continue;
-    }
-    if (ch === '"') return out;
-    out += ch;
-    i++;
-  }
-  return out;
 }
 
 function parseArgsPreview(value: string): Record<string, unknown> {
@@ -605,7 +533,8 @@ export class ToolCallComponent extends Container {
   private subagentEffort: string | undefined;
   private subagentResultSummary: string | undefined;
   private subagentError: string | undefined;
-  private streamingProgressTimer: ReturnType<typeof setInterval> | undefined;
+  private toolBlinkTimer: ReturnType<typeof setInterval> | undefined;
+  private toolBlinkOn = false;
   private subagentElapsedTimer: ReturnType<typeof setInterval> | undefined;
   private subagentStartedAtMs: number | undefined;
   private subagentEndedAtMs: number | undefined;
@@ -661,7 +590,7 @@ export class ToolCallComponent extends Container {
     this.buildLiveOutputBlock();
     this.buildContent();
     this.buildSubagentBlock();
-    this.syncStreamingProgressTimer();
+    this.syncToolBlinkTimer();
     this.syncSubagentElapsedTimer();
     this.startDetachHintTimer();
   }
@@ -735,7 +664,7 @@ export class ToolCallComponent extends Container {
     this.detachHintVisible = false;
     this.stopDetachHintTimer();
     this.finalizeSubagentElapsedIfNeeded();
-    this.syncStreamingProgressTimer();
+    this.stopToolBlinkTimer();
     this.syncSubagentElapsedTimer();
     this.headerText.setText(this.buildHeader());
     // rebuildBody (not rebuildContent) so the call preview re-renders
@@ -749,7 +678,7 @@ export class ToolCallComponent extends Container {
 
   updateToolCall(toolCall: ToolCallBlockData): void {
     this.toolCall = toolCall;
-    this.syncStreamingProgressTimer();
+    this.syncToolBlinkTimer();
     this.headerText.setText(this.buildHeader());
     this.rebuildBody();
     this.notifySnapshotChange();
@@ -790,7 +719,7 @@ export class ToolCallComponent extends Container {
   }
 
   dispose(): void {
-    this.stopStreamingProgressTimer();
+    this.stopToolBlinkTimer();
     this.stopSubagentElapsedTimer();
     this.stopDetachHintTimer();
   }
@@ -869,6 +798,10 @@ export class ToolCallComponent extends Container {
   setSnapshotListener(cb: (() => void) | undefined): void {
     this.onSnapshotChange = cb;
     if (cb !== undefined) cb();
+  }
+
+  getSubagentStartedAtMs(): number | undefined {
+    return this.subagentStartedAtMs;
   }
 
   getSubagentSnapshot(): ToolCallSubagentSnapshot {
@@ -984,34 +917,34 @@ export class ToolCallComponent extends Container {
     return [this.subagentThinkingText, this.subagentText].filter((s) => s.length > 0).join('\n');
   }
 
-  private isStreamingEditPreview(): boolean {
-    return (
-      this.toolCall.name === 'Edit' &&
-      this.result === undefined &&
-      this.toolCall.streamingArguments !== undefined
-    );
+  /** A tool card blinks its header bullet while executing (no result yet). */
+  private shouldBlinkTool(): boolean {
+    return this.result === undefined && this.toolCall.streamingArguments === undefined;
   }
 
-  private syncStreamingProgressTimer(): void {
-    if (!this.isStreamingEditPreview()) {
-      this.stopStreamingProgressTimer();
+  private syncToolBlinkTimer(): void {
+    if (!this.shouldBlinkTool()) {
+      this.stopToolBlinkTimer();
       return;
     }
-    if (this.ui === undefined || this.streamingProgressTimer !== undefined) return;
-    this.streamingProgressTimer = setInterval(() => {
-      if (!this.isStreamingEditPreview()) {
-        this.stopStreamingProgressTimer();
+    if (this.ui === undefined || this.toolBlinkTimer !== undefined) return;
+    this.toolBlinkTimer = setInterval(() => {
+      if (!this.shouldBlinkTool()) {
+        this.stopToolBlinkTimer();
         return;
       }
-      this.rebuildBody();
+      this.toolBlinkOn = !this.toolBlinkOn;
+      // Only the header bullet changes, so rebuild just the header text and
+      // avoid invalidating the body's per-component render caches.
+      this.headerText.setText(this.buildHeader());
       this.ui?.requestRender();
-    }, STREAMING_PROGRESS_INTERVAL_MS);
+    }, TOOL_BLINK_INTERVAL_MS);
   }
 
-  private stopStreamingProgressTimer(): void {
-    if (this.streamingProgressTimer === undefined) return;
-    clearInterval(this.streamingProgressTimer);
-    this.streamingProgressTimer = undefined;
+  private stopToolBlinkTimer(): void {
+    if (this.toolBlinkTimer === undefined) return;
+    clearInterval(this.toolBlinkTimer);
+    this.toolBlinkTimer = undefined;
   }
 
   /** Only foreground Bash/Agent calls can be detached via Ctrl+B. */
@@ -1074,11 +1007,11 @@ export class ToolCallComponent extends Container {
       // Drives both the braille spinner in the header and the elapsed-seconds
       // refresh. Only the header text changes on a tick, so we avoid rebuilding
       // the body (which would defeat the per-component render caches).
-      this.subagentSpinnerFrame = (this.subagentSpinnerFrame + 1) % BRAILLE_SPINNER_FRAMES.length;
+      this.subagentSpinnerFrame = (this.subagentSpinnerFrame + 1) % SPINNER_FRAMES.length;
       this.headerText.setText(this.buildHeader());
       this.notifySnapshotChange();
       this.ui?.requestRender();
-    }, BRAILLE_SPINNER_INTERVAL_MS);
+    }, SPINNER_INTERVAL_MS);
   }
 
   private stopSubagentElapsedTimer(): void {
@@ -1434,15 +1367,22 @@ export class ToolCallComponent extends Container {
     const isError = result?.is_error ?? false;
     const isTruncated = toolCall.truncated === true && !isFinished;
 
+    // Claude style: the same '● ' bullet at every state, coloured by state
+    // (in-flight text, success green, error red).
     let bullet: string;
     if (isFinished) {
-      bullet = isError ? currentTheme.fg('error', '✗ ') : currentTheme.fg('success', STATUS_BULLET);
+      bullet = isError
+        ? currentTheme.fg('error', STATUS_BULLET)
+        : currentTheme.fg('success', STATUS_BULLET);
     } else if (isTruncated) {
-      bullet = currentTheme.fg('error', '✗ ');
+      bullet = currentTheme.fg('error', STATUS_BULLET);
     } else {
-      // Solid bullet for in-flight tools — the previous marker ↔ blank
-      // toggle caused visible flicker on every re-render.
-      bullet = currentTheme.fg('text', STATUS_BULLET);
+      // Blinking bullet while the tool runs (Claude's ToolUseLoader). The
+      // 500ms timer repaints only the header text, so it never triggers the
+      // full-body re-render flicker the old marker↔blank toggle caused.
+      bullet = this.toolBlinkOn
+        ? currentTheme.fg('text', STATUS_BULLET)
+        : currentTheme.fg('textDim', STATUS_BULLET);
     }
 
     if (toolCall.name === 'ExitPlanMode') {
@@ -1482,17 +1422,13 @@ export class ToolCallComponent extends Container {
     }
 
     if (toolCall.name === 'Bash') {
-      // The command itself is rendered in the body (with a `$` prompt), so the
-      // header only names the action — repeating the command in parentheses
-      // would duplicate the body. Wording mirrors the other label-only headers
-      // (e.g. AskUserQuestion): the whole label takes the tone colour.
-      if (isTruncated) {
-        return `${bullet}${currentTheme.fg('error', 'Truncated')} ${currentTheme.boldFg('primary', 'Bash')}`;
-      }
-      const label = isFinished ? 'Ran a command' : 'Running a command';
-      const tone = isError ? 'error' : 'primary';
+      // Claude style: `● Bash(<command first line>)` — bold tool name, dim
+      // command summary in tight parens. The full `$ command` echo stays in
+      // the body (buildCallPreview owns it across the whole lifecycle).
+      const keyArg = extractKeyArgument(toolCall.name, toolCall.args, this.workspaceDir);
+      const argStr = keyArg ? currentTheme.dim(`(${keyArg})`) : '';
       const chipStr = isFinished && result !== undefined ? this.buildHeaderChip(result) : '';
-      return `${bullet}${currentTheme.boldFg(tone, label)}${chipStr}`;
+      return `${bullet}${currentTheme.bold('Bash')}${argStr}${chipStr}`;
     }
 
     const goalHeader = buildGoalToolHeader({
@@ -1507,20 +1443,19 @@ export class ToolCallComponent extends Container {
       return this.buildSingleSubagentHeader();
     }
 
-    const verb = isFinished ? 'Used' : isTruncated ? 'Truncated' : 'Using';
+    // Claude style: `● Tool(arg)` — state-coloured bullet, bold tool name in
+    // default text, dim summary in tight parens. No Using/Used/Truncated
+    // verbs; the truncated state reads from the error bullet plus the body
+    // note ('Tool call arguments truncated by max_tokens — …').
     const keyArg = extractKeyArgument(toolCall.name, toolCall.args, this.workspaceDir);
     const decoded = decodeMcpToolName(toolCall.name);
-    const verbStyled = isTruncated
-      ? currentTheme.fg('error', verb)
-      : verb;
     const toolLabel =
-      decoded !== null
-        ? `${currentTheme.boldFg('primary', decoded.toolName)}${currentTheme.dim(` · MCP/${decoded.serverName}`)}`
-        : currentTheme.boldFg('primary', toolCall.name);
-    const argStr = keyArg ? currentTheme.dim(` (${keyArg})`) : '';
+      decoded !== null ? currentTheme.bold(decoded.toolName) : currentTheme.bold(toolCall.name);
+    const argStr = keyArg ? currentTheme.dim(`(${keyArg})`) : '';
+    const mcpSuffix = decoded !== null ? currentTheme.dim(` · MCP/${decoded.serverName}`) : '';
     let chipStr = '';
     if (isFinished && result) chipStr = this.buildHeaderChip(result);
-    return `${bullet}${verbStyled} ${toolLabel}${argStr}${chipStr}`;
+    return `${bullet}${toolLabel}${argStr}${mcpSuffix}${chipStr}`;
   }
 
   private buildHeaderChip(result: ToolResultBlockData): string {
@@ -1533,9 +1468,7 @@ export class ToolCallComponent extends Container {
   }
 
   private rebuildContent(): void {
-    while (this.children.length > this.callPreviewEndIndex) {
-      this.children.pop();
-    }
+    this.truncateChildren(this.callPreviewEndIndex);
     this.buildProgressBlock();
     this.buildDetachHintBlock();
     this.buildLiveOutputBlock();
@@ -1544,9 +1477,7 @@ export class ToolCallComponent extends Container {
   }
 
   private rebuildBody(): void {
-    while (this.children.length > 2) {
-      this.children.pop();
-    }
+    this.truncateChildren(2);
     this.buildCallPreview();
     this.callPreviewEndIndex = this.children.length;
     this.buildProgressBlock();
@@ -1830,7 +1761,7 @@ export class ToolCallComponent extends Container {
     if (phase === 'backgrounded') return currentTheme.dim('◐ ');
     // Active (queued / spawning / running): a braille spinner reads as alive
     // where a static bullet looked frozen.
-    const frame = BRAILLE_SPINNER_FRAMES[this.subagentSpinnerFrame] ?? BRAILLE_SPINNER_FRAMES[0];
+    const frame = SPINNER_FRAMES[this.subagentSpinnerFrame] ?? SPINNER_FRAMES[0];
     return currentTheme.fg('primary', `${frame} `);
   }
 
@@ -1969,17 +1900,9 @@ export class ToolCallComponent extends Container {
       );
       return;
     }
-    if (this.result === undefined && this.toolCall.streamingArguments !== undefined) {
-      this.buildStreamingPreview(this.toolCall.streamingArguments);
-      return;
-    }
-    // Cap Edit's diff as soon as args finalize, not only when the result
-    // lands — mirroring Write's writeShouldCap below. Otherwise the render
-    // tick between finalized args (streamingArguments cleared by the
-    // `tool.call.started` payload) and the result draws the full diff, then
-    // snaps back to the cap: a height collapse that triggers pi-tui's full
-    // redraw and wipes scrollback. Streaming frames (streamingArguments set)
-    // still take buildStreamingPreview above and never reach here.
+    // No streaming preview: the card pops in fully-formed at `tool.call.started`.
+    // Until the result lands the body stays empty for Edit (diff appears only
+    // after success); Write still shows its content as soon as args finalize.
     const shouldCap = !this.expanded;
     if (name === 'Write') {
       const content = str(this.toolCall.args['content']);
@@ -2010,6 +1933,9 @@ export class ToolCallComponent extends Container {
         );
       }
     } else if (name === 'Edit') {
+      // Diff appears only after the Edit succeeds — while it runs, the header
+      // (blinking bullet + name + path) is the whole story.
+      if (this.result === undefined) return;
       const oldStr = str(this.toolCall.args['old_string']);
       const newStr = str(this.toolCall.args['new_string']);
       if (oldStr.length === 0 && newStr.length === 0) return;
@@ -2040,74 +1966,6 @@ export class ToolCallComponent extends Container {
         }),
       );
     }
-  }
-
-  /**
-   * Live-rendering during the `tool.call.delta` streaming window.
-   *
-   * For tools we recognise, we reach into the partial JSON (via
-   * `extractPartialStringField`) and render a stable high-signal
-   * preview: Write's `content` as highlighted code, Edit's argument
-   * receive progress, Bash's `$ command`, etc. While args are still
-   * streaming we render from a bounded preview buffer; once the result lands,
-   * the preview snaps to the collapsed cap unless the user has expanded.
-   */
-  private buildStreamingPreview(streamText: string): void {
-    const name = this.toolCall.name;
-    const previewText = streamText.slice(0, STREAMING_ARGS_PREVIEW_MAX_CHARS);
-    if (name === 'Write') {
-      const content = extractPartialStringField(previewText, 'content');
-      if (content === undefined || content.length === 0) return;
-      const filePath =
-        extractPartialStringField(previewText, 'file_path') ??
-        extractPartialStringField(previewText, 'path') ??
-        '';
-      const lang = langFromPath(filePath);
-      const allLines = highlightLines(content, lang);
-      const maxLines = COMMAND_PREVIEW_LINES;
-      const scrollLines =
-        allLines.length > maxLines
-          ? allLines.slice(allLines.length - maxLines)
-          : allLines;
-      for (const [i, line] of scrollLines.entries()) {
-        const originalLineNumber =
-          allLines.length > maxLines
-            ? allLines.length - maxLines + i
-            : i;
-        const lineNum = currentTheme.dim(String(originalLineNumber + 1).padStart(4) + '  ');
-        this.addChild(new Text(lineNum + line, 2, 0));
-      }
-      return;
-    }
-    if (name === 'Edit') {
-      const filePath =
-        extractPartialStringField(previewText, 'file_path') ??
-        extractPartialStringField(previewText, 'path') ??
-        '';
-      const bytes = Buffer.byteLength(previewText, 'utf8');
-      const startedAtMs = this.toolCall.streamingStartedAtMs;
-      const elapsedSeconds =
-        startedAtMs === undefined ? 0 : Math.max(0, Math.floor((Date.now() - startedAtMs) / 1000));
-      const target = filePath.length > 0 ? ` for ${filePath}` : '';
-      const progress = `Preparing changes${target}... ${formatByteSize(bytes)} · ${formatElapsed(
-        elapsedSeconds,
-      )} elapsed`;
-      this.addChild(new Text(currentTheme.dim(progress), 2, 0));
-      return;
-    }
-    if (name === 'Bash') {
-      const cmd = extractPartialStringField(previewText, 'command');
-      if (cmd === undefined || cmd.length === 0) return;
-      this.addChild(
-        new ShellExecutionComponent({
-          command: cmd,
-          showCommand: true,
-          commandPreviewLines: this.expanded ? undefined : COMMAND_PREVIEW_LINES,
-        }),
-      );
-    }
-    // Unknown tools: nothing sensible to stream without a schema, so
-    // leave the body blank and let the header do the talking.
   }
 
   private buildPlanPreview(): void {

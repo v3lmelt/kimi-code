@@ -54,10 +54,10 @@ function makeDialog(): {
 }
 
 describe('ApprovalPanelComponent', () => {
-  it('renders only numeric approval shortcuts in the hint', () => {
+  it('renders the Claude-style footer hint without legacy letter shortcuts', () => {
     const { dialog } = makeDialog();
     const out = strip(dialog.render(80).join('\n'));
-    expect(out).toContain('1/2/3/4 choose');
+    expect(out).toContain('↑↓ navigate · enter confirm · esc cancel');
     expect(out).not.toContain('y/a/n/f');
   });
 
@@ -167,7 +167,7 @@ describe('ApprovalPanelComponent', () => {
     dialog.handleInput('4');
 
     const out = strip(dialog.render(80).join('\n'));
-    expect(out).toContain('▶ 4. Reject with feedback');
+    expect(out).toContain('❯ 4. Reject with feedback');
     expect(out).not.toContain('\n  > ');
   });
 

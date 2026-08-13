@@ -1076,7 +1076,13 @@ describe('GoogleGenAIChatProvider', () => {
 
       const parts = await collectParts(stream);
 
-      expect(parts).toEqual([{ type: 'text', text: 'Hello' }]);
+      expect(parts).toEqual([
+        {
+          type: 'usage',
+          usage: { inputOther: 10, output: 5, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
+        { type: 'text', text: 'Hello' },
+      ]);
       expect(stream.usage).toEqual({
         inputOther: 10,
         output: 5,
@@ -1411,7 +1417,13 @@ describe('GoogleGenAIChatProvider', () => {
       const msg = new GoogleGenAIStreamedMessage(mockStream(), true);
       const parts = await collectParts(msg);
 
-      expect(parts).toEqual([{ type: 'text', text: 'ok' }]);
+      expect(parts).toEqual([
+        {
+          type: 'usage',
+          usage: { inputOther: 5, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
+        { type: 'text', text: 'ok' },
+      ]);
     });
 
     it('end-to-end: provider.generate returns streaming response', async () => {
@@ -1446,6 +1458,10 @@ describe('GoogleGenAIChatProvider', () => {
 
       expect(parts).toEqual([
         { type: 'text', text: 'Hello' },
+        {
+          type: 'usage',
+          usage: { inputOther: 8, output: 4, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
         { type: 'text', text: ' World' },
       ]);
       expect(result.id).toBe('resp-e2e');

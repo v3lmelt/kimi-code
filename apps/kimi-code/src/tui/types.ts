@@ -64,6 +64,16 @@ export interface AppState {
   isReplaying: boolean;
   streamingPhase: 'idle' | 'waiting' | 'thinking' | 'composing' | 'shell';
   streamingStartTime: number;
+  /** Live token counters for the in-flight turn, shown next to the activity
+   * spinner; undefined when no turn is running. `live` holds the current
+   * step's in-flight usage (replaced on each `turn.step.usage` event) and is
+   * folded into the settled totals when the step completes. */
+  turnUsage?: {
+    input: number;
+    output: number;
+    turnStartedAt: number;
+    live?: { input: number; output: number };
+  };
   theme: ThemeName;
   version: string;
   editorCommand: string | null;
@@ -71,6 +81,9 @@ export interface AppState {
   disablePasteBurst?: boolean;
   /** Mirrors the TUI config toggle; defaults to true when absent from older fixtures. */
   cacheExpiryHint?: boolean;
+  /** Mirrors the TUI config toggle; true collapses thinking blocks to a single
+   * "∴ Thinking…" indicator. Defaults to false when absent from older fixtures. */
+  hideThinking?: boolean;
   notifications: NotificationsConfig;
   upgrade: UpgradePreferences;
   /** Footer status line customization from tui.toml; absent means the default layout. */
@@ -134,6 +147,21 @@ export interface BackgroundAgentMetadata {
   readonly model?: string;
   /** Thinking effort, set only for concrete levels (boolean on/off hidden). */
   readonly effort?: string;
+}
+
+/** Live summary of a running agent shown in the footer status area. */
+export interface RunningAgentSummary {
+  readonly id: string;
+  /** Display name, e.g. the subagent profile or task name. */
+  readonly name: string;
+  /** Optional short description of what the agent is doing. */
+  readonly description?: string;
+  /** Latest sub-tool activity inside this agent, e.g. "Using Read (path)". */
+  readonly latestActivity?: string;
+  readonly phase: 'running' | 'waiting' | 'starting';
+  /** Timestamp (ms) when the agent started; footer computes elapsed live. */
+  readonly startedAtMs: number;
+  readonly tokens: number;
 }
 
 export type BackgroundAgentStatusPhase = 'started' | 'completed' | 'failed';

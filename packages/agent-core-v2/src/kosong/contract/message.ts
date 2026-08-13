@@ -11,6 +11,7 @@
  */
 
 import type { Tool } from './tool';
+import type { TokenUsage } from './usage';
 
 export type Role = 'system' | 'user' | 'assistant' | 'tool';
 
@@ -57,7 +58,12 @@ export interface ToolCallPart {
   index?: number | string;
 }
 
-export type StreamedMessagePart = ContentPart | ToolCall | ToolCallPart;
+export interface UsagePart {
+  type: 'usage';
+  usage: TokenUsage;
+}
+
+export type StreamedMessagePart = ContentPart | ToolCall | ToolCallPart | UsagePart;
 
 export interface Message {
   readonly role: Role;
@@ -91,6 +97,10 @@ export function isToolCall(part: StreamedMessagePart): part is ToolCall {
 
 export function isToolCallPart(part: StreamedMessagePart): part is ToolCallPart {
   return part.type === 'tool_call_part';
+}
+
+export function isUsagePart(part: StreamedMessagePart): part is UsagePart {
+  return part.type === 'usage';
 }
 
 export function mergeInPlace(target: StreamedMessagePart, source: StreamedMessagePart): boolean {

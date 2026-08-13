@@ -1,10 +1,11 @@
-import type { Component } from "../tui.ts";
+import { bumpVersion, type Component } from "../tui.ts";
 import { truncateToWidth, visibleWidth } from "../utils.ts";
 
 /**
  * Text component that truncates to fit viewport width
  */
 export class TruncatedText implements Component {
+	version = 0;
 	private text: string;
 	private paddingX: number;
 	private paddingY: number;
@@ -16,7 +17,7 @@ export class TruncatedText implements Component {
 	}
 
 	invalidate(): void {
-		// No cached state to invalidate currently
+		bumpVersion(this);
 	}
 
 	render(width: number): string[] {

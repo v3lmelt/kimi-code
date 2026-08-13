@@ -997,6 +997,9 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             const usage = readObjectField(responseObject, 'usage');
             if (usage !== undefined) {
               this._extractUsage(usage);
+              if (this._usage !== null) {
+                yield { type: 'usage', usage: { ...this._usage } };
+              }
             }
             this._captureFinishReasonFromResponse(responseObject);
             break;

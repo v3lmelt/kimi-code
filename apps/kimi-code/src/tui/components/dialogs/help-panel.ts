@@ -91,11 +91,11 @@ export class HelpPanelComponent extends Container implements Focusable {
   }
 
   override render(width: number): string[] {
-    const accent = (text: string) => currentTheme.fg('primary', text);
+    const rule = (text: string) => currentTheme.fg('border', text);
     const dim = (text: string) => currentTheme.fg('textDim', text);
     const muted = (text: string) => currentTheme.fg('textMuted', text);
-    const kbdColor = (text: string) => currentTheme.fg('warning', text);
-    const slashColor = (text: string) => currentTheme.fg('primary', text);
+    const kbdColor = (text: string) => currentTheme.fg('text', text);
+    const slashColor = (text: string) => currentTheme.fg('text', text);
 
     const shortcuts = this.opts.shortcuts ?? DEFAULT_KEYBOARD_SHORTCUTS;
     const kbdWidth = Math.max(8, ...shortcuts.map((s) => s.keys.length));
@@ -106,8 +106,8 @@ export class HelpPanelComponent extends Container implements Focusable {
     });
     const cmdWidth = Math.max(12, ...cmdLabels.map((l) => l.length));
     const lines: string[] = [
-      accent('─'.repeat(width)),
-      currentTheme.boldFg('primary', ' help ') + muted('· Esc / Enter / q to cancel · ↑↓ scroll'),
+      rule('─'.repeat(width)),
+      currentTheme.boldFg('textStrong', ' help ') + muted('· Esc / Enter / q to cancel · ↑↓ scroll'),
       '',
       // Greeting
       `  ${dim('Sure, Kimi is ready to help! Just send a message to get started.')}`,
@@ -123,7 +123,7 @@ export class HelpPanelComponent extends Container implements Focusable {
         return `    ${slashColor(label.padEnd(cmdWidth))}  ${dim(cmd.description)}`;
       }),
       '',
-      accent('─'.repeat(width)),
+      rule('─'.repeat(width)),
     ];
 
     // Apply scroll windowing — keep the borders visible.

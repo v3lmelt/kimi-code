@@ -15,7 +15,7 @@
  * style changes that genuinely dirty every child (e.g. theme switches).
  */
 
-import { Container } from '@moonshot-ai/pi-tui';
+import { Container, isVersionCacheEnabled } from '@moonshot-ai/pi-tui';
 import type { Component } from '@moonshot-ai/pi-tui';
 
 import { isRenderCacheEnabled } from '#/tui/utils/render-cache';
@@ -23,6 +23,7 @@ import { isRenderCacheEnabled } from '#/tui/utils/render-cache';
 interface TranscriptRenderCache {
   width: number;
   childRefs: Component[];
+  childVersions: (number | undefined)[];
   childRenderRefs: string[][];
   prefixed: string[][];
   out: string[];
@@ -46,6 +47,69 @@ export class GutterContainer extends Container {
     const inner = Math.max(1, width - this.leftPad - this.rightPad);
     const lead = ' '.repeat(this.leftPad);
 
+    if (!isVersionCacheEnabled()) {
+      return this.renderWithReferenceReuse(inner, lead, width);
+    }
+
+    const cache = this.renderCache;
+    const structOk =
+      cache !== undefined &&
+      cache.width === width &&
+      cache.childRefs.length === this.children.length;
+
+    // Fast path: every child's version matches the snapshot → reuse cached output.
+    if (structOk) {
+      let allMatch = true;
+      for (let i = 0; i < this.children.length; i++) {
+        const v = this.children[i]!.version;
+        if (v === undefined || v !== cache.childVersions[i]) {
+          allMatch = false;
+          break;
+        }
+      }
+      if (allMatch) return cache!.out;
+    }
+
+    const childRefs: Component[] = [];
+    const childVersions: (number | undefined)[] = [];
+    const childRenderRefs: string[][] = [];
+    const prefixed: string[][] = [];
+
+    let i = 0;
+    for (const child of this.children) {
+      const v = child.version;
+      childRefs.push(child);
+      childVersions.push(v);
+      let lines: string[];
+      if (
+        structOk &&
+        cache.childRefs[i] === child &&
+        v !== undefined &&
+        v === cache.childVersions[i]
+      ) {
+        // Unchanged versioned child: reuse cached lines + prefix, skip render.
+        lines = cache.childRenderRefs[i]!;
+        childRenderRefs.push(lines);
+        prefixed.push(cache.prefixed[i]!);
+      } else {
+        lines = child.render(inner);
+        childRenderRefs.push(lines);
+        prefixed.push(lines.map((line) => lead + line));
+      }
+      i++;
+    }
+
+    const out: string[] = [];
+    for (const lines of prefixed) {
+      for (const line of lines) out.push(line);
+    }
+
+    this.renderCache = { width, childRefs, childVersions, childRenderRefs, prefixed, out };
+    return out;
+  }
+
+  /** Original reference-reuse path, used when version caching is disabled. */
+  private renderWithReferenceReuse(inner: number, lead: string, width: number): string[] {
     const cache = this.renderCache;
     const cacheValid =
       isRenderCacheEnabled() &&
@@ -54,6 +118,7 @@ export class GutterContainer extends Container {
       cache.childRefs.length === this.children.length;
 
     const childRefs: Component[] = [];
+    const childVersions: (number | undefined)[] = [];
     const childRenderRefs: string[][] = [];
     const prefixed: string[][] = [];
     let allReused = cacheValid;
@@ -62,6 +127,7 @@ export class GutterContainer extends Container {
     for (const child of this.children) {
       const lines = child.render(inner);
       childRefs.push(child);
+      childVersions.push(child.version);
       childRenderRefs.push(lines);
       const reused = cacheValid && cache.childRefs[i] === child && cache.childRenderRefs[i] === lines;
       if (reused) {
@@ -84,7 +150,7 @@ export class GutterContainer extends Container {
     }
 
     if (isRenderCacheEnabled()) {
-      this.renderCache = { width, childRefs, childRenderRefs, prefixed, out };
+      this.renderCache = { width, childRefs, childVersions, childRenderRefs, prefixed, out };
     }
 
     return out;

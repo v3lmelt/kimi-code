@@ -85,6 +85,7 @@ export class GoalQueueManagerComponent extends Container implements Focusable {
     const decoded = printableChar(data);
     if (matchesKey(data, Key.space) || decoded === ' ') {
       this.movingGoalId = this.movingGoalId === selected?.id ? undefined : selected?.id;
+      this.bump();
       return;
     }
 
@@ -197,6 +198,7 @@ export class GoalQueueManagerComponent extends Container implements Focusable {
       pageSize: this.opts.pageSize,
       initialIndex: initialIndex === -1 ? 0 : initialIndex,
       searchable: false,
+      onChange: () => this.bump(),
     });
   }
 }

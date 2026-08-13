@@ -20,7 +20,7 @@ describe('CompactionComponent', () => {
       const lines = component.render(120).map(strip);
       const text = lines.join('\n');
 
-      expect(text).toContain('Compacting context...');
+      expect(text).toContain('Compacting conversation…');
       expect(text).toContain('  keep the recent files only');
     } finally {
       component.dispose();
@@ -34,7 +34,7 @@ describe('CompactionComponent', () => {
       const lines = component.render(120).map(strip);
       const text = lines.join('\n');
 
-      expect(text).toContain('Compacting context... · Tip: ctrl+s: steer mid-turn');
+      expect(text).toContain('Compacting conversation… · Tip: ctrl+s: steer mid-turn');
     } finally {
       component.dispose();
     }
@@ -48,7 +48,7 @@ describe('CompactionComponent', () => {
       const lines = component.render(120).map(strip);
       const text = lines.join('\n');
 
-      expect(text).toContain('Compaction complete');
+      expect(text).toContain('Conversation compacted');
       expect(text).not.toContain('Tip:');
       expect(text).not.toContain('Ctrl-O');
     } finally {
@@ -65,7 +65,7 @@ describe('CompactionComponent', () => {
       const text = lines.join('\n');
 
       expect(text).toContain('Compaction cancelled');
-      expect(text).not.toContain('Compacting context...');
+      expect(text).not.toContain('Compacting conversation…');
     } finally {
       component.dispose();
     }
@@ -78,16 +78,16 @@ describe('CompactionComponent', () => {
       component.markDone(120, 24, 'Keep the src/tui compaction notes.');
       const collapsed = component.render(120).map(strip).join('\n');
 
-      expect(collapsed).toContain('Compaction complete');
+      expect(collapsed).toContain('Conversation compacted');
       expect(collapsed).toContain('120 → 24 tokens');
-      expect(collapsed).toContain('Ctrl-O to show compaction summary');
+      expect(collapsed).toContain('ctrl+o for history');
       expect(collapsed).not.toContain('Keep the src/tui compaction notes.');
 
       component.setExpanded(true);
       const expanded = component.render(120).map(strip).join('\n');
 
-      expect(expanded).toContain('Compaction complete');
-      expect(expanded).toContain('Ctrl-O to hide compaction summary');
+      expect(expanded).toContain('Conversation compacted');
+      expect(expanded).toContain('ctrl+o for history');
       expect(expanded).toContain('Keep the src/tui compaction notes.');
     } finally {
       component.dispose();
@@ -103,9 +103,8 @@ describe('CompactionComponent', () => {
       component.setExpanded(false);
       const text = component.render(120).map(strip).join('\n');
 
-      expect(text).toContain('Compaction complete');
-      expect(text).toContain('Ctrl-O to show compaction summary');
-      expect(text).not.toContain('Ctrl-O to hide compaction summary');
+      expect(text).toContain('Conversation compacted');
+      expect(text).toContain('ctrl+o for history');
       expect(text).not.toContain('Keep the src/tui compaction notes.');
     } finally {
       component.dispose();
@@ -157,7 +156,7 @@ describe('CompactionComponent', () => {
 
     try {
       const headerOf = (): string => {
-        const line = component.render(120).find((l) => strip(l).includes('Compacting context...'));
+        const line = component.render(120).find((l) => strip(l).includes('Compacting conversation…'));
         if (line === undefined) throw new Error('header line not found');
         return line;
       };

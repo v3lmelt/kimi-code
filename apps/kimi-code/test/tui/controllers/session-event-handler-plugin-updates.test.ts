@@ -33,6 +33,7 @@ function makeHost() {
       todoPanel: { getTodos: vi.fn(() => []) },
       transcriptContainer: { addChild: vi.fn() },
       ui: { requestRender: vi.fn() },
+      footer: { setRunningAgents: vi.fn(), setBackgroundCounts: vi.fn() },
     },
     session: {},
     aborted: false,

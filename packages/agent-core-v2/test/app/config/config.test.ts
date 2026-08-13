@@ -1755,6 +1755,27 @@ describe('subagent config section', () => {
       thinking: 'medium',
       displayModel: 'provider/main',
     });
+    expect(resolveSubagentBinding(withModel.config, secondaryModelFlags(), own, 'inherit')).toEqual({
+      model: 'provider/main',
+      thinking: 'medium',
+      displayModel: 'provider/main',
+    });
+    expect(
+      resolveSubagentBinding(withModel.config, secondaryModelFlags(), own, 'provider/other'),
+    ).toEqual({
+      model: 'provider/other',
+      thinking: undefined,
+      displayModel: 'provider/other',
+    });
+    // A concrete alias equal to the caller's model still resolves thinking
+    // naturally rather than inheriting the caller's level.
+    expect(
+      resolveSubagentBinding(withModel.config, secondaryModelFlags(), own, 'provider/main'),
+    ).toEqual({
+      model: 'provider/main',
+      thinking: undefined,
+      displayModel: 'provider/main',
+    });
     withModel.disposables.dispose();
 
     const withEffort = await createConfig(
@@ -1837,7 +1858,7 @@ describe('subagent config section', () => {
       { details: { model: 'provider/bad' } },
     );
 
-    const result = wrapSubagentModelError(cause, 'provider/bad', 'provider/main');
+    const result = wrapSubagentModelError(cause, 'provider/bad', 'provider/main', 'provider/bad');
 
     expect(toErrorPayload(result)).toMatchObject({
       code: ErrorCodes.CONFIG_INVALID,

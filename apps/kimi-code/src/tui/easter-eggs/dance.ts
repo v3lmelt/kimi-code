@@ -17,7 +17,7 @@ import type { ParsedSlashInput } from '../commands/types';
 import { currentTheme } from '../theme';
 
 /** Frame interval for the rainbow flow animation. */
-export const DANCE_FRAME_MS = 110;
+export const DANCE_FRAME_MS = 160;
 /** How long the rainbow flows before settling (fading out, or freezing). */
 export const DANCE_FLOW_MS = 3000;
 

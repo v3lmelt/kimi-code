@@ -181,6 +181,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
       pageSize: opts.pageSize,
       initialIndex: Math.max(selectedIdx, 0),
       searchable: opts.searchable === true,
+      onChange: () => this.bump(),
     });
   }
 
@@ -243,6 +244,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
           }
           if (next !== idx) {
             this.thinkingOverrides.set(selected.alias, segments[next]!);
+            this.bump();
           }
         }
       }
@@ -290,8 +292,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
     hintParts.push('Esc cancel');
 
     const lines: string[] = [
-      currentTheme.fg('primary', '─'.repeat(width)),
-      currentTheme.boldFg('primary', this.opts.title ?? ' Select a model') + titleSuffix,
+      currentTheme.fg('border', '─'.repeat(width)),
+      currentTheme.boldFg('textStrong', this.opts.title ?? ' Select a model') + titleSuffix,
       currentTheme.fg('textMuted', ' ' + hintParts.join(' · ')),
     ];
     if (this.opts.warning !== undefined) {
@@ -327,7 +329,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
         const truncatedName = truncateToWidth(choice.name, nameWidth, '…');
         const namePad = ' '.repeat(Math.max(0, nameWidth - visibleWidth(truncatedName)));
         let line = currentTheme.fg(isSelected ? 'primary' : 'textDim', `  ${pointer} `);
-        line += (isSelected ? currentTheme.boldFg('primary', truncatedName) : currentTheme.fg('text', truncatedName)) + namePad;
+        line += (isSelected ? currentTheme.fg('primary', truncatedName) : currentTheme.fg('text', truncatedName)) + namePad;
         line += '  ' + currentTheme.fg('textMuted', choice.provider);
         if (isCurrent) {
           line += ' ' + currentTheme.fg('success', CURRENT_MARK);
@@ -359,7 +361,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
       lines.push(this.renderThinkingControl(selected));
     }
     lines.push('');
-    lines.push(currentTheme.fg('primary', '─'.repeat(width)));
+    lines.push(currentTheme.fg('border', '─'.repeat(width)));
     return lines.map((line) => truncateToWidth(line, width));
   }
 

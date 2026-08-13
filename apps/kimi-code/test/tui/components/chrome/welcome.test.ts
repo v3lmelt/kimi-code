@@ -102,4 +102,20 @@ describe('WelcomeComponent', () => {
       }
     }
   });
+
+  it('renders the Claude LogoV2 layout: border title, mascot, no right column', () => {
+    const wide = new WelcomeComponent(appState).render(120).join('\n');
+    expect(wide).toContain('Welcome back!');
+    expect(wide).toContain(' Kimi Code ');
+    expect(wide).toContain(' v1.2.3 ');
+    expect(wide).toContain('▐▛███▜▌');
+    expect(wide).toContain('/tmp/project');
+    expect(wide).not.toContain('Tips for getting started');
+    expect(wide).not.toContain("What's new");
+
+    const narrow = new WelcomeComponent(appState).render(80).join('\n');
+    expect(narrow).toContain('Welcome back!');
+    expect(narrow).toContain('▐▛███▜▌');
+    expect(narrow).not.toContain('Tips for getting started');
+  });
 });

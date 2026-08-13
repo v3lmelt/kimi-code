@@ -8,7 +8,6 @@ import {
   matchesKey,
   Key,
   SelectList,
-  visibleWidth,
   type SelectItem,
   type TUI,
 } from '@moonshot-ai/pi-tui';
@@ -168,11 +167,10 @@ export class CustomEditor extends Editor {
   }
 
   constructor(tui: TUI, options: CustomEditorOptions = {}) {
-    // paddingX: 4 reserves column 0 for the left vertical border (│),
-    // column 1 as a single space between border and prompt, column 2 for
-    // the `>` prompt token, and column 3 as the space between prompt and
-    // content. The right side mirrors with 3 padding columns and the right
-    // border at the last column.
+    // paddingX: 4 reserves columns 0-1 as plain spaces (Claude-style: no
+    // left border bar), column 2 for the `❯` prompt token, and column 3 as
+    // the space between prompt and content. The right side mirrors with 4
+    // padding columns.
     const theme = createEditorTheme();
     super(tui, theme, { paddingX: 4, disablePasteBurst: options.disablePasteBurst });
 
@@ -284,8 +282,8 @@ export class CustomEditor extends Editor {
     if (firstContent !== undefined) {
       const withPrompt = injectPromptSymbol(
         firstContent,
-        isBash ? '!' : '>',
-        isBash ? (s) => this.borderColor(s) : undefined,
+        isBash ? '!' : '❯',
+        isBash ? (s) => currentTheme.fg('shellMode', s) : undefined,
       );
       if (withPrompt !== undefined) {
         lines[firstContentIdx] = withPrompt;
@@ -293,11 +291,10 @@ export class CustomEditor extends Editor {
     }
     // `this.borderColor` is pi-tui's per-render paint function. The host may
     // overwrite it (e.g. plan-mode / slash-context highlight via
-    // `editor.borderColor = chalk.hex(primary)`), so we route corners and
-    // side bars through the same hook to stay in sync.
+    // `editor.borderColor = chalk.hex(primary)`), so we route the rules
+    // through the same hook to stay in sync.
     return wrapWithSideBorders(lines, (s) => this.borderColor(s), {
       connectedAbove: this.connectedAbove && !this.borderHighlighted,
-      label: isBash ? ` ${currentTheme.boldFg('shellMode', '! shell mode')} ` : undefined,
     });
   }
 
@@ -686,10 +683,9 @@ function truncateHint(hint: string, maxLen: number): string {
 }
 
 /**
- * Overlay a terminal-style `> ` prompt symbol on the first content line.
- * Column 0 is reserved for the left vertical border (overlaid later by
- * wrapWithSideBorders); column 1 is a single-space gap, so the `>` token
- * lives at column 2 with column 3 separating it from content.
+ * Overlay a Claude-style `❯ ` prompt symbol on the first content line.
+ * Columns 0-1 are plain spaces, so the symbol token lives at column 2 with
+ * column 3 separating it from content.
  * Relies on the editor being configured with `paddingX >= 4` so the line
  * starts with at least four literal spaces. Emits no SGR so the terminal's
  * default foreground colour renders the symbol. Returns `undefined` if the
@@ -697,7 +693,7 @@ function truncateHint(hint: string, maxLen: number): string {
  */
 export function injectPromptSymbol(
   line: string,
-  symbol = '>',
+  symbol = '❯',
   paint?: (s: string) => string,
 ): string | undefined {
   if (line.length < 4) return undefined;
@@ -709,55 +705,28 @@ export function injectPromptSymbol(
 }
 
 /**
- * Post-process pi-tui's editor output to draw a full box around it.
+ * Post-process pi-tui's editor output to repaint its horizontal rules.
  *
- * pi-tui only renders horizontal top/bottom borders; we wrap them with
- * `╭╮╰╯` corners and add vertical `│` bars on each row's outer columns.
- * Horizontal-border rows (those whose first visible char is `─`, including
- * scroll indicators like `── ↑ N more ──`) are stripped of their existing
- * SGR and repainted as a single box-drawn span. Content rows keep their
- * inner SGR intact; only column 0 and the last column are overlaid, and
- * only if they're literal spaces — that protects the cursor-overflow
- * case where the rightmost column is an SGR-tagged inverse cursor.
+ * Claude-style frame: the input sits between a plain top `─` rule and a
+ * plain bottom `─` rule — no `╭╮╰╯` corners and no `│` side bars. Rule
+ * rows (those whose first visible char is `─`, including scroll indicators
+ * like `─── ↑ N more ────`) are stripped of their existing SGR and
+ * repainted as a single span through `paint`. Content rows pass through
+ * untouched, so an SGR-tagged inverse cursor in an outer column is safe.
  *
- * When `options.label` is set, it is overlaid on the left of the top border
- * (e.g. the `! shell mode` badge), replacing the leading dashes. It is only
- * applied to a plain dash run, never to a `↑/↓ N more` scroll indicator.
+ * `connectedAbove` no longer draws `├/┤` junctions: without side bars there
+ * is nothing to join, so a pane connected above (e.g. the queue pane)
+ * simply abuts the same plain rule.
  */
 export function wrapWithSideBorders(
   lines: string[],
   paint: (s: string) => string,
-  options: { readonly connectedAbove?: boolean; readonly label?: string } = {},
+  options: { readonly connectedAbove?: boolean } = {},
 ): string[] {
-  let seenTop = false;
+  void options.connectedAbove;
   return lines.map((line) => {
     const plain = stripSgr(line);
-    if (plain.length > 0 && plain[0] === '─') {
-      const isTop = !seenTop;
-      const leftCorner = seenTop ? '╰' : options.connectedAbove === true ? '├' : '╭';
-      const rightCorner = seenTop ? '╯' : options.connectedAbove === true ? '┤' : '╮';
-      seenTop = true;
-      if (plain.length === 1) return paint(leftCorner);
-      const middle = plain.slice(1, -1);
-      if (isTop && options.label !== undefined && /^─+$/.test(middle)) {
-        const labelWidth = visibleWidth(options.label);
-        if (labelWidth <= middle.length) {
-          return (
-            paint(leftCorner) +
-            options.label +
-            paint('─'.repeat(middle.length - labelWidth)) +
-            paint(rightCorner)
-          );
-        }
-      }
-      return paint(leftCorner + middle + rightCorner);
-    }
-    if (line.length === 0) return line;
-    const firstCh = line[0];
-    const lastCh = line.at(-1);
-    const head = firstCh === ' ' ? paint('│') : (firstCh ?? '');
-    const tail = line.length > 1 && lastCh === ' ' ? paint('│') : (lastCh ?? '');
-    if (line.length === 1) return head;
-    return head + line.slice(1, -1) + tail;
+    if (plain.length > 0 && plain[0] === '─') return paint(plain);
+    return line;
   });
 }

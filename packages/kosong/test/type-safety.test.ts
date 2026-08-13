@@ -6,6 +6,7 @@ import type {
   ThinkPart,
   ToolCall,
   ToolCallPart,
+  UsagePart,
   VideoURLPart,
 } from '#/message';
 import { describe, expect, it } from 'vitest';
@@ -30,6 +31,8 @@ function processPartSafely(part: StreamedMessagePart): string {
       return part.name; // ToolCall.name -> string
     case 'tool_call_part':
       return part.argumentsPart ?? ''; // ToolCallPart.argumentsPart -> string | null
+    case 'usage':
+      return String(part.usage.output); // UsagePart.usage -> TokenUsage
     default: {
       const _exhaustive: never = part;
       throw new Error(`Unknown part type: ${JSON.stringify(_exhaustive)}`);
@@ -113,6 +116,10 @@ describe('exhaustiveness check', () => {
       { type: 'video_url', videoUrl: { url: 'e' } },
       { type: 'function', id: 'f', name: 'g', arguments: null },
       { type: 'tool_call_part', argumentsPart: 'h' },
+      {
+        type: 'usage',
+        usage: { inputOther: 1, output: 2, inputCacheRead: 3, inputCacheCreation: 4 },
+      },
     ];
     for (const part of allParts) {
       expect(typeof processPartSafely(part)).toBe('string');
@@ -160,5 +167,14 @@ describe('type assignability', () => {
     const tcp: ToolCallPart = { type: 'tool_call_part', argumentsPart: null };
     const _part: StreamedMessagePart = tcp;
     expect(_part.type).toBe('tool_call_part');
+  });
+
+  it('UsagePart is assignable to StreamedMessagePart', () => {
+    const usage: UsagePart = {
+      type: 'usage',
+      usage: { inputOther: 1, output: 2, inputCacheRead: 3, inputCacheCreation: 4 },
+    };
+    const _part: StreamedMessagePart = usage;
+    expect(_part.type).toBe('usage');
   });
 });

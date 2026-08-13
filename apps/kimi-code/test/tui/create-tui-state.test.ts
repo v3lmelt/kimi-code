@@ -57,6 +57,7 @@ describe('createTUIState', () => {
     expect(state.editorContainer).toBeDefined();
     expect(state.editor).toBeDefined();
     expect(state.footer).toBeDefined();
+    expect(state.toastContainer).toBeDefined();
     expect(state.todoPanel).toBeDefined();
     expect(state.theme.palette).toBeDefined();
 

@@ -14,6 +14,7 @@ import {
   isContentPart,
   isToolCall,
   isToolCallPart,
+  isUsagePart,
   mergeInPlace,
   type Message,
   type StreamedMessagePart,
@@ -88,6 +89,8 @@ export async function generate(
         await callbacks.onMessagePart(deepCopyPart(part));
         await throwIfAborted(options?.signal, stream);
       }
+
+      if (isUsagePart(part)) continue;
 
       if (
         isToolCallPart(part) &&

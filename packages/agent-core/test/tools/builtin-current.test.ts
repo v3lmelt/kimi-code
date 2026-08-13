@@ -475,10 +475,11 @@ describe('current builtin collaboration tools', () => {
       true,
     );
     const properties = (
-      tool.parameters as { properties: Record<string, { enum?: string[] }> }
+      tool.parameters as { properties: Record<string, { type?: string; enum?: unknown }> }
     ).properties;
 
-    expect(properties['model']?.enum).toEqual(['primary', 'secondary']);
+    expect(properties['model']?.type).toBe('string');
+    expect(properties['model']?.enum).toBeUndefined();
   });
 
   it('AgentSwarm rejects more than 128 subagents at execution time', async () => {

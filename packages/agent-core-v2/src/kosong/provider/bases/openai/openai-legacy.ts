@@ -409,12 +409,14 @@ export class OpenAILegacyStreamedMessage implements StreamedMessage {
     this._rawFinishReason = normalized.rawFinishReason;
   }
 
-  private _captureUsage(raw: Record<string, unknown>, fallback: unknown): void {
+  private _captureUsage(raw: Record<string, unknown>, fallback: unknown): boolean {
     const hooked = this._extractUsageHook?.(raw);
     const rawUsage = hooked !== undefined ? hooked : fallback;
-    if (rawUsage !== null && rawUsage !== undefined) {
-      this._usage = extractUsage(rawUsage) ?? null;
+    if (rawUsage === null || rawUsage === undefined) {
+      return false;
     }
+    this._usage = extractUsage(rawUsage) ?? null;
+    return true;
   }
 
   private async *_convertNonStreamResponse(
@@ -462,7 +464,12 @@ export class OpenAILegacyStreamedMessage implements StreamedMessage {
           this._id = chunk.id;
         }
 
-        this._captureUsage(chunk as unknown as Record<string, unknown>, chunk.usage);
+        if (
+          this._captureUsage(chunk as unknown as Record<string, unknown>, chunk.usage) &&
+          this._usage !== null
+        ) {
+          yield { type: 'usage', usage: { ...this._usage } };
+        }
 
         if (!chunk.choices || chunk.choices.length === 0) {
           continue;

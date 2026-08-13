@@ -1340,6 +1340,7 @@ const VOLATILE_SIGNAL_TYPES = [
   'assistant.delta',
   'thinking.delta',
   'tool.call.delta',
+  'turn.step.usage',
   'tool.progress',
   'shell.output',
   'shell.started',

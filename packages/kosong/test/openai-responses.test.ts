@@ -1518,6 +1518,10 @@ describe('OpenAIResponsesChatProvider', () => {
       expect(parts).toEqual([
         { type: 'text', text: 'Hello' },
         { type: 'text', text: ' world' },
+        {
+          type: 'usage',
+          usage: { inputOther: 15, output: 10, inputCacheRead: 5, inputCacheCreation: 0 },
+        },
       ]);
 
       expect(stream.usage).toEqual({
@@ -1577,6 +1581,10 @@ describe('OpenAIResponsesChatProvider', () => {
         },
         { type: 'tool_call_part', argumentsPart: '{"a":', index: 'item_123' },
         { type: 'tool_call_part', argumentsPart: ' 2, "b": 3}', index: 'item_123' },
+        {
+          type: 'usage',
+          usage: { inputOther: 5, output: 3, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
       ]);
 
       expect(stream.usage).toEqual({
@@ -1702,6 +1710,10 @@ describe('OpenAIResponsesChatProvider', () => {
         { type: 'think', think: ' the answer...' },
         { type: 'think', think: '', encrypted: 'enc_xyz' },
         { type: 'text', text: '42' },
+        {
+          type: 'usage',
+          usage: { inputOther: 8, output: 4, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
       ]);
     });
 

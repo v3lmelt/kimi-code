@@ -19,7 +19,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ApprovalPanelComponent } from '#/tui/components/dialogs/approval-panel';
 import { EffortSelectorComponent } from '#/tui/components/dialogs/effort-selector';
 import { KIMI_CODE_PLUGIN_MARKETPLACE_URL } from '#/constant/app';
-import { MOON_SPINNER_FRAMES } from '#/tui/constant/rendering';
+import { SPINNER_FRAMES } from '#/tui/constant/rendering';
 import {
   AgentSwarmProgressComponent,
   agentSwarmGridHeightForTerminalRows,
@@ -3206,7 +3206,7 @@ command = "vim"
     }
   });
 
-  it('coalesces streaming tool-call argument preview updates', async () => {
+  it('seeds active tool-call state during streaming but defers the card to tool.call.started', async () => {
     vi.useFakeTimers();
     try {
       const { driver } = await makeDriver();
@@ -3230,6 +3230,25 @@ command = "vim"
       expect(driver.streamingUI.hasActiveToolCall('call_bash')).toBe(false);
 
       await vi.runOnlyPendingTimersAsync();
+
+      // Streaming only seeds the active-tool state; no card is mounted yet.
+      expect(driver.streamingUI.getToolComponent('call_bash')).toBeUndefined();
+      expect(driver.streamingUI.hasActiveToolCall('call_bash')).toBe(true);
+
+      // The full tool call arrives → the card pops in fully-formed.
+      driver.sessionEventHandler.handleEvent(
+        {
+          type: 'tool.call.started',
+          agentId: 'main',
+          sessionId: 'ses-1',
+          turnId: 1,
+          step: 1,
+          toolCallId: 'call_bash',
+          name: 'Bash',
+          args: { command: 'echo hi' },
+        } as Event,
+        vi.fn(),
+      );
 
       expect(driver.streamingUI.getToolComponent('call_bash')).toBeDefined();
       expect(driver.streamingUI.getActiveToolCall('call_bash')?.args).toMatchObject({
@@ -3355,7 +3374,7 @@ command = "vim"
     );
 
     const collapsed = driver.state.transcriptContainer.render(120).map(stripSgr).join('\n');
-    expect(collapsed).toContain('Compaction complete');
+    expect(collapsed).toContain('Conversation compacted');
     expect(collapsed).not.toContain('Keep the src/tui compaction notes.');
 
     driver.state.editor.onToggleToolExpand?.();
@@ -3398,7 +3417,7 @@ command = "vim"
     );
 
     const transcript = driver.state.transcriptContainer.render(120).map(stripSgr).join('\n');
-    expect(transcript).toContain('Compaction complete');
+    expect(transcript).toContain('Conversation compacted');
     expect(transcript).toContain('Keep the src/tui compaction notes.');
   });
 
@@ -3536,13 +3555,13 @@ command = "vim"
     const editorTopBorder = stripSgr(driver.state.editor.render(80)[0] ?? '');
     expect(panel).toContain('BTW ─ Esc close');
     expect(panel).not.toContain('ctrl+o expand');
-    expect(editorTopBorder.startsWith('├')).toBe(true);
-    expect(editorTopBorder.endsWith('┤')).toBe(true);
+    expect(editorTopBorder.startsWith('─')).toBe(true);
+    expect(editorTopBorder.endsWith('─')).toBe(true);
 
     driver.state.editor.handleInput('/');
     const highlightedEditorTopBorder = stripSgr(driver.state.editor.render(80)[0] ?? '');
-    expect(highlightedEditorTopBorder.startsWith('╭')).toBe(true);
-    expect(highlightedEditorTopBorder.endsWith('╮')).toBe(true);
+    expect(highlightedEditorTopBorder.startsWith('─')).toBe(true);
+    expect(highlightedEditorTopBorder.endsWith('─')).toBe(true);
     expect(panel).not.toContain('BTW done');
     expect(panel).not.toContain('BTW running');
     expect(panel).not.toContain('BTW failed');
@@ -3603,6 +3622,9 @@ command = "vim"
       () => {},
     );
     driver.streamingUI.flushNow();
+    // Commit the in-flight preview to the transcript so the main answer is
+    // asserted against the transcript (the preview layer is transient).
+    driver.streamingUI.finalizeAssistantStream();
 
     const transcript = stripSgr(renderTranscript(driver));
     const panel = stripSgr(renderBtwPanel(driver));
@@ -3783,8 +3805,8 @@ command = "vim"
     expect(driver.state.btwPanelContainer.children).toHaveLength(0);
     expect(requestRender.mock.calls.at(-1)).toEqual([true]);
     const editorTopBorder = stripSgr(driver.state.editor.render(80)[0] ?? '');
-    expect(editorTopBorder.startsWith('╭')).toBe(true);
-    expect(editorTopBorder.endsWith('╮')).toBe(true);
+    expect(editorTopBorder.startsWith('─')).toBe(true);
+    expect(editorTopBorder.endsWith('─')).toBe(true);
     expect(driver.state.editor.focused).toBe(true);
   });
 
@@ -4908,7 +4930,7 @@ command = "vim"
     const transcript = stripSgr(
       driver.state.transcriptContainer.render(terminalColumns).join('\n'),
     );
-    expect(transcript).toContain('Using Read (src/after.ts)');
+    expect(transcript).toContain('Read(src/after.ts)');
   });
 
   it('shows AgentSwarm as completed when only some subagents fail', async () => {
@@ -6521,13 +6543,13 @@ command = "vim"
       );
     }
 
-    // The moon must stay up: still waiting, no orphan thinking component, and
-    // the activity pane still renders a moon frame (no blank, spinner-less gap).
+    // The spinner must stay up: still waiting, no orphan thinking component,
+    // and the activity pane still renders a frame (no blank, spinner-less gap).
     expect(driver.state.appState.streamingPhase).toBe('waiting');
     expect(driver.state.livePane.mode).toBe('waiting');
     expect(driver.streamingUI.hasActiveThinkingComponent()).toBe(false);
     const activity = stripSgr(renderActivity(driver));
-    expect(MOON_SPINNER_FRAMES.some((frame) => activity.includes(frame))).toBe(true);
+    expect(SPINNER_FRAMES.some((frame) => activity.includes(frame))).toBe(true);
 
     // Real thinking text finally arrives -> transition into thinking mode.
     driver.sessionEventHandler.handleEvent(

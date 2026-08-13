@@ -1196,6 +1196,11 @@ describe('SessionSubagentHost', () => {
           model: 'cheap-model',
           maxContextSize: 1_000_000,
         },
+        'expensive-model': {
+          provider: 'test-provider',
+          model: 'expensive-model',
+          maxContextSize: 1_000_000,
+        },
         '__secondary__': {
           provider: 'test-provider',
           model: 'cheap-model',
@@ -1208,8 +1213,8 @@ describe('SessionSubagentHost', () => {
       config?: KimiConfig;
       experimentalFlags?: FlagResolver;
       providerManager?: Session['options']['providerManager'];
-      modelChoice?: 'primary' | 'secondary';
-      profilePreference?: 'primary' | 'secondary';
+      modelChoice?: string;
+      profilePreference?: string;
     }) {
       const parent = testAgent();
       parent.configure();
@@ -1299,6 +1304,85 @@ describe('SessionSubagentHost', () => {
         profilePreference: 'primary',
       });
       expect(child.agent.config.modelAlias).toBe(parent.agent.config.modelAlias);
+    });
+
+    it('binds a concrete model alias passed via the model argument over the secondary default', async () => {
+      const { child } = await spawnChild({
+        experimentalFlags: secondaryFlags(),
+        config: {
+          providers: {},
+          secondaryModel: { model: 'cheap-model' },
+          models: {
+            'expensive-model': {
+              provider: 'test-provider',
+              model: 'expensive-model',
+              maxContextSize: 1_000_000,
+            },
+          },
+        },
+        modelChoice: 'expensive-model',
+      });
+      expect(child.agent.config.modelAlias).toBe('expensive-model');
+    });
+
+    it('binds a concrete model alias from profile model_preference over the secondary default', async () => {
+      const { child } = await spawnChild({
+        experimentalFlags: secondaryFlags(),
+        config: {
+          providers: {},
+          secondaryModel: { model: 'cheap-model' },
+          models: {
+            'expensive-model': {
+              provider: 'test-provider',
+              model: 'expensive-model',
+              maxContextSize: 1_000_000,
+            },
+          },
+        },
+        profilePreference: 'expensive-model',
+      });
+      expect(child.agent.config.modelAlias).toBe('expensive-model');
+    });
+
+    it('binds "inherit" to the caller model despite a configured secondary', async () => {
+      const { parent, child } = await spawnChild({
+        experimentalFlags: secondaryFlags(),
+        config: { providers: {}, secondaryModel: { model: 'cheap-model' } },
+        modelChoice: 'inherit',
+      });
+      expect(child.agent.config.modelAlias).toBe(parent.agent.config.modelAlias);
+      expect(child.agent.config.modelAlias).not.toBe('cheap-model');
+    });
+
+    it('fails the spawn with a generic wrapped error for an unknown concrete alias', async () => {
+      const parent = testAgent();
+      parent.configure();
+      const child = testAgent();
+      child.configure({ tools: ['Read'] });
+      const config: KimiConfig = {
+        providers: {},
+        models: {},
+      };
+      const session = fakeSession(parent.agent, child.agent, {}, {
+        experimentalFlags: secondaryFlags(),
+        config,
+        providerManager: new ProviderManager({ config }),
+      });
+      const host = new SessionSubagentHost(session, 'main');
+
+      await expect(
+        host
+          .spawn({
+            profileName: 'coder',
+            modelChoice: 'no-such-model',
+            parentToolCallId: 'call_agent',
+            prompt: 'Do work',
+            description: 'Do work',
+            runInBackground: false,
+            signal,
+          })
+          .then((handle) => handle.completion),
+      ).rejects.toThrow(/not a valid \[models\] entry/);
     });
 
     it('fails the spawn with a wrapped error when the secondary model does not resolve', async () => {
@@ -1924,7 +2008,7 @@ function profile(input: {
   readonly systemPrompt: string;
   readonly description?: string | undefined;
   readonly subagents?: Record<string, ResolvedAgentProfile> | undefined;
-  readonly modelPreference?: 'primary' | 'secondary';
+  readonly modelPreference?: string;
 }): ResolvedAgentProfile {
   return {
     name: input.name,

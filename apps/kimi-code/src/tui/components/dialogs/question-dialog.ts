@@ -18,6 +18,7 @@ import {
 } from '@moonshot-ai/pi-tui';
 
 import { currentTheme } from '#/tui/theme';
+import { SELECT_POINTER } from '#/tui/constant/symbols';
 import type {
   PendingQuestion,
   QuestionPanelResponse,
@@ -442,15 +443,16 @@ export class QuestionDialogComponent extends Container implements Focusable {
     if (question === undefined) return [];
 
     const accent = (text: string) => currentTheme.fg('primary', text);
+    const rule = (text: string) => currentTheme.fg('border', text);
     const dim = (text: string) => currentTheme.fg('textDim', text);
     const success = (text: string) => currentTheme.fg('success', text);
 
     const renderWidth = Math.max(1, width);
-    const lines: string[] = [accent('─'.repeat(renderWidth)), currentTheme.boldFg('primary', ' question'), ''];
+    const lines: string[] = [rule('─'.repeat(renderWidth)), currentTheme.boldFg('textStrong', ' question'), ''];
     this.pushTabs(lines);
     lines.push('');
 
-    appendWrapped(lines, ' ? ', '   ', question.question, renderWidth, accent);
+    appendWrapped(lines, ' ? ', '   ', question.question, renderWidth, (t) => currentTheme.fg('textStrong', t));
     if (this.isEditingOther()) {
       lines.push(dim('   Type your answer, then press Enter to save.'));
     }
@@ -496,15 +498,14 @@ export class QuestionDialogComponent extends Container implements Focusable {
       if (question.multi_select) {
         const checked = isSelected ? '✓' : ' ';
         prefix = `  [${checked}] `;
-        if (isSelected && isCursor) tone = (s) => currentTheme.boldFg('success', s);
-        else if (isSelected) tone = success;
+        if (isSelected) tone = success;
         else if (isCursor) tone = accent;
         else tone = dim;
       } else if (isSelected && this.isAnswered(questionIdx)) {
-        prefix = isCursor ? `  → [${String(num)}] ` : `    [${String(num)}] `;
-        tone = isCursor ? (s) => currentTheme.boldFg('success', s) : success;
+        prefix = isCursor ? `  ${SELECT_POINTER} [${String(num)}] ` : `    [${String(num)}] `;
+        tone = success;
       } else if (isCursor) {
-        prefix = `  → [${String(num)}] `;
+        prefix = `  ${SELECT_POINTER} [${String(num)}] `;
         tone = accent;
       } else {
         prefix = `    [${String(num)}] `;
@@ -532,19 +533,20 @@ export class QuestionDialogComponent extends Container implements Focusable {
 
     lines.push('');
     lines.push(this.buildQuestionHint(dim, questionIdx));
-    lines.push(accent('─'.repeat(renderWidth)));
+    lines.push(rule('─'.repeat(renderWidth)));
 
     return lines.map((line) => truncateToWidth(line, width));
   }
 
   private renderSubmitTab(width: number): string[] {
     const accent = (text: string) => currentTheme.fg('primary', text);
+    const rule = (text: string) => currentTheme.fg('border', text);
     const dim = (text: string) => currentTheme.fg('textDim', text);
     const text = (t: string) => currentTheme.fg('text', t);
     const warning = (text: string) => currentTheme.fg('warning', text);
 
     const renderWidth = Math.max(1, width);
-    const lines: string[] = [accent('─'.repeat(renderWidth)), currentTheme.boldFg('primary', ' question'), ''];
+    const lines: string[] = [rule('─'.repeat(renderWidth)), currentTheme.boldFg('textStrong', ' question'), ''];
     this.pushTabs(lines);
     lines.push('');
     lines.push(currentTheme.boldFg('text', ` ${REVIEW_TITLE}`));
@@ -588,7 +590,7 @@ export class QuestionDialogComponent extends Container implements Focusable {
       if (label === undefined) continue;
       const num = i + 1;
       if (i === this.submitActionIdx) {
-        lines.push(accent(`  → [${String(num)}] ${label}`));
+        lines.push(accent(`  ${SELECT_POINTER} [${String(num)}] ${label}`));
       } else {
         lines.push(dim(`    [${String(num)}] ${label}`));
       }
@@ -596,7 +598,7 @@ export class QuestionDialogComponent extends Container implements Focusable {
 
     lines.push('');
     lines.push(this.buildSubmitHint(dim));
-    lines.push(accent('─'.repeat(renderWidth)));
+    lines.push(rule('─'.repeat(renderWidth)));
 
     return lines.map((line) => truncateToWidth(line, width));
   }
@@ -634,7 +636,7 @@ export class QuestionDialogComponent extends Container implements Focusable {
         ...(this.totalTabs() > 1 ? ['tab switch'] : []),
         'esc cancel',
       ];
-      return dim(`  ${parts.join('  ')}`);
+      return dim(`  ${parts.join(' · ')}`);
     }
 
     const optionCount = Math.min(this.displayOptions(questionIdx).length, NUMBER_KEYS.length);
@@ -648,14 +650,14 @@ export class QuestionDialogComponent extends Container implements Focusable {
     ];
     if (this.totalTabs() > 1) parts.push('←/→/tab switch');
     parts.push('esc cancel');
-    return dim(`  ${parts.join('  ')}`);
+    return dim(`  ${parts.join(' · ')}`);
   }
 
   private buildSubmitHint(dim: (s: string) => string): string {
     const parts: string[] = ['↑↓ select', '1/2 choose', '↵ confirm'];
     if (this.totalTabs() > 1) parts.push('←/→/tab switch');
     parts.push('esc cancel');
-    return dim(`  ${parts.join('  ')}`);
+    return dim(`  ${parts.join(' · ')}`);
   }
 
   private computeVisibleStart(cursor: number, total: number): number {
@@ -745,13 +747,13 @@ export class QuestionDialogComponent extends Container implements Focusable {
       const checked = isSelected ? '✓' : ' ';
       const body = `  [${checked}] ${option.label}: `;
       prefix = isSelected
-        ? currentTheme.boldFg('success', body)
+        ? currentTheme.fg('success', body)
         : currentTheme.fg('primary', body);
     } else {
-      const body = `  → [${String(num)}] ${option.label}: `;
+      const body = `  ${SELECT_POINTER} [${String(num)}] ${option.label}: `;
       prefix =
         isSelected && this.isAnswered(questionIdx)
-          ? currentTheme.boldFg('success', body)
+          ? currentTheme.fg('success', body)
           : currentTheme.fg('primary', body);
     }
 

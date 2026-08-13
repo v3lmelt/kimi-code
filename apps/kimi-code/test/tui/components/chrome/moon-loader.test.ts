@@ -1,5 +1,5 @@
 import type { TUI } from '@moonshot-ai/pi-tui';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { MoonLoader } from '#/tui/components/chrome/moon-loader';
 
@@ -20,6 +20,14 @@ afterEach(() => {
 });
 
 describe('MoonLoader', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it('keeps the tip out of renderInline so it does not squeeze against the swarm progress bar', () => {
     const loader = createLoader();
     loader.setTip(' · Tip: ctrl+s: steer mid-turn');
@@ -38,5 +46,45 @@ describe('MoonLoader', () => {
 
     const row = loader.render(80).join('\n');
     expect(row).toContain('Tip: ctrl+s: steer mid-turn');
+  });
+
+  it('appends the status provider text on its own row but keeps it out of renderInline', () => {
+    const loader = createLoader();
+    loader.setStatusProvider(() => ' (36s · ↑ 1.2k tok)');
+
+    const row = loader.render(80).join('\n');
+    expect(row).toContain('(36s · ↑ 1.2k tok)');
+    expect(loader.renderInline()).not.toContain('36s');
+
+    loader.setStatusProvider(undefined);
+    expect(loader.render(80).join('\n')).not.toContain('36s');
+  });
+
+  it('turns the label red after a stall with no active tools', () => {
+    const loader = createLoader();
+    loader.setLabel('Working…');
+    loader.setStallProvider(() => ({ lastActivityAtMs: 0, hasActiveTools: false }));
+    // 0 lastActivityAtMs => elapsed far exceeds the 3s threshold.
+    const row = loader.render(80).join('\n');
+    expect(row).toContain('Working…');
+    expect(row).not.toMatch(/Waiting|Pondering/); // label is the explicit one
+  });
+
+  it('does not stall while tools are active', () => {
+    const loader = createLoader();
+    loader.setLabel('Working…');
+    const now = Date.now();
+    loader.setStallProvider(() => ({ lastActivityAtMs: now, hasActiveTools: true }));
+    const row = loader.render(80).join('\n');
+    expect(row).toContain('Working…');
+  });
+
+  it('accepts mode and thinking status providers without throwing', () => {
+    const loader = createLoader();
+    loader.setMode('tool');
+    loader.setThinkingStatusProvider(() => 'thinking');
+    loader.setStatusProvider(() => ' (thinking · 12s)');
+    const row = loader.render(120).join('\n');
+    expect(row).toContain('(thinking · 12s)');
   });
 });

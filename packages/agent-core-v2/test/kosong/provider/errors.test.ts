@@ -28,6 +28,7 @@ import {
   APIProviderRateLimitError,
   APIStatusError,
   ChatProviderError,
+  MissingApiKeyError,
   createAbortError,
   isRetryableGenerateError,
 } from '#/kosong/contract/errors';
@@ -37,6 +38,7 @@ import { convertAnthropicError } from '#/kosong/provider/bases/anthropic/anthrop
 import { convertOpenAIError } from '#/kosong/provider/bases/openai/openai-common';
 import { OpenAIResponsesStreamedMessage } from '#/kosong/provider/bases/openai/openai-responses';
 import { composeOpenAIChatHooks } from '#/kosong/provider/bases/openai/openaiHooks';
+import { requireProviderApiKey } from '#/kosong/provider/bases/request-auth';
 import { kimiAnthropicTrait, kimiOpenAITrait } from '#/kosong/provider/providers/kimi/kimi.contrib';
 import { classifyKimiQuotaError } from '#/kosong/provider/providers/kimi/kimi-errors';
 
@@ -299,5 +301,24 @@ describe('OpenAI Responses quota-exhausted conversion', () => {
     expect((caught as APIProviderQuotaExhaustedError).message).toBe('vendor quota exhausted');
     expect(seen).toHaveLength(1);
     expect(seen[0]).toMatchObject({ type: 'error', code: 'vendor_quota_gone' });
+  });
+});
+
+describe('MissingApiKeyError (deterministic credential gap)', () => {
+  it('is coded provider.auth_error and never retried', () => {
+    const error = new MissingApiKeyError('SomeProvider: apiKey is required');
+    expect(error).toBeInstanceOf(ChatProviderError);
+    expect(error.name).toBe('MissingApiKeyError');
+    expect(error.code).toBe('provider.auth_error');
+    expect(isRetryableGenerateError(error)).toBe(false);
+  });
+
+  it('is thrown by requireProviderApiKey when no credential is available', () => {
+    expect(() => requireProviderApiKey('SomeProvider', undefined)).toThrow(MissingApiKeyError);
+    expect(() => requireProviderApiKey('SomeProvider', undefined, '')).toThrow(MissingApiKeyError);
+    expect(requireProviderApiKey('SomeProvider', undefined, 'key')).toBe('key');
+    expect(requireProviderApiKey('SomeProvider', { apiKey: 'per-request' }, 'key')).toBe(
+      'per-request',
+    );
   });
 });

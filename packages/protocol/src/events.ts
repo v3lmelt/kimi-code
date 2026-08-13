@@ -675,6 +675,20 @@ export interface TurnStepCompletedEvent {
   readonly rawFinishReason?: string;
 }
 
+/**
+ * Mid-step token-usage update, emitted live while a step streams whenever the
+ * provider reports usage (Anthropic `message_start` / `message_delta`, Google
+ * per-chunk usage metadata, OpenAI `include_usage` final chunk). Live-only:
+ * never persisted or replayed.
+ */
+export interface TurnStepUsageEvent {
+  readonly type: 'turn.step.usage';
+  readonly turnId: number;
+  readonly step: number;
+  readonly stepId?: string;
+  readonly usage: TokenUsage;
+}
+
 export interface TurnStepRetryingEvent {
   readonly type: 'turn.step.retrying';
   readonly turnId: number;
@@ -955,6 +969,7 @@ export type AgentEvent =
   | TurnEndedEvent
   | TurnStepStartedEvent
   | TurnStepCompletedEvent
+  | TurnStepUsageEvent
   | TurnStepRetryingEvent
   | TurnStepInterruptedEvent
   | AssistantDeltaEvent
@@ -1596,6 +1611,14 @@ export const turnStepCompletedEventSchema = z.object({
   rawFinishReason: z.string().optional(),
 }) satisfies z.ZodType<TurnStepCompletedEvent>;
 
+export const turnStepUsageEventSchema = z.object({
+  type: z.literal('turn.step.usage'),
+  turnId: z.number(),
+  step: z.number(),
+  stepId: z.string().optional(),
+  usage: tokenUsageSchema,
+}) satisfies z.ZodType<TurnStepUsageEvent>;
+
 export const turnStepRetryingEventSchema = z.object({
   type: z.literal('turn.step.retrying'),
   turnId: z.number(),
@@ -1853,6 +1876,7 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   turnEndedEventSchema,
   turnStepStartedEventSchema,
   turnStepCompletedEventSchema,
+  turnStepUsageEventSchema,
   turnStepRetryingEventSchema,
   turnStepInterruptedEventSchema,
   assistantDeltaEventSchema,
@@ -1916,6 +1940,7 @@ export const VOLATILE_EVENT_TYPES = [
   'assistant.delta',
   'thinking.delta',
   'tool.call.delta',
+  'turn.step.usage',
   'tool.progress',
   'shell.output',
   'shell.started',

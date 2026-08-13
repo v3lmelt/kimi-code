@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { SearchableList, type SearchableListOptions } from '#/tui/utils/searchable-list';
 
@@ -96,5 +96,29 @@ describe('SearchableList', () => {
     expect(search.handleKey('a')).toBe(true);
     expect(search.handleKey(BACKSPACE)).toBe(true);
     expect(search.view().query).toBe('');
+  });
+
+  it('invokes onChange when cursor, page, or query changes', () => {
+    const onChange = vi.fn();
+    const list = make({ searchable: true, onChange });
+
+    list.moveUp();
+    expect(onChange).toHaveBeenCalledTimes(1);
+
+    list.moveDown();
+    expect(onChange).toHaveBeenCalledTimes(2);
+
+    list.pageDown();
+    expect(onChange).toHaveBeenCalledTimes(3);
+
+    list.handleKey('i');
+    expect(onChange).toHaveBeenCalledTimes(4);
+
+    list.handleKey(BACKSPACE);
+    expect(onChange).toHaveBeenCalledTimes(5);
+
+    list.handleKey('i');
+    list.clearQuery();
+    expect(onChange).toHaveBeenCalledTimes(7);
   });
 });

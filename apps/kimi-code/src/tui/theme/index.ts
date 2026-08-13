@@ -2,30 +2,31 @@
  * Theme system public API.
  */
 
-import { getBuiltInPalette } from './colors';
+import { claudeColors, claudeLightColors, getBuiltInPalette } from './colors';
 import type { ColorPalette, ResolvedTheme } from './colors';
 import { loadCustomThemeMerged } from './custom-theme-loader';
 import { detectTerminalTheme } from './detect';
 
 export { currentTheme, Theme } from './theme';
 export type { ColorToken } from './theme';
-export { darkColors, lightColors, getBuiltInPalette } from './colors';
+export { darkColors, lightColors, claudeColors, claudeLightColors, getBuiltInPalette, AUTO_ACCEPT_DARK, AUTO_ACCEPT_LIGHT } from './colors';
 export type { ColorPalette, ResolvedTheme } from './colors';
 export { detectTerminalTheme } from './detect';
 export { loadCustomTheme, loadCustomThemeMerged, listCustomThemes } from './custom-theme-loader';
 
 /**
  * User-facing theme preference.
- * `'auto'` defers to terminal background detection at startup.
- * `'dark'` / `'light'` are explicit built-in overrides.
+ * `'auto'` defers to terminal background detection at startup, picking the
+ * dark/light palette. `'claude'` does the same detection but resolves to the
+ * Claude Code palettes. `'dark'` / `'light'` are explicit built-in overrides.
  * Any other string is treated as a custom theme name looked up in
  * `~/.kimi-code/themes/<name>.json`.
  */
-export type BuiltInTheme = 'dark' | 'light' | 'auto';
+export type BuiltInTheme = 'dark' | 'light' | 'auto' | 'claude';
 export type ThemeName = BuiltInTheme | (string & {});
 
 export function isBuiltInTheme(value: string): value is BuiltInTheme {
-  return value === 'dark' || value === 'light' || value === 'auto';
+  return value === 'dark' || value === 'light' || value === 'auto' || value === 'claude';
 }
 
 export function isThemeName(_value: string): _value is ThemeName {
@@ -36,6 +37,7 @@ export function isThemeName(_value: string): _value is ThemeName {
  * Resolve a user preference to a concrete palette.
  *
  * - `'auto'` triggers terminal background detection.
+ * - `'claude'` triggers the same detection, resolving to the Claude palettes.
  * - `'dark'` / `'light'` return the built-in palette.
  * - Any other string loads a custom theme from `~/.kimi-code/themes/`;
  *   missing / invalid files fall back to dark palette.
@@ -43,6 +45,10 @@ export function isThemeName(_value: string): _value is ThemeName {
 export async function getColorPalette(theme: ThemeName): Promise<ColorPalette> {
   if (theme === 'light') return getBuiltInPalette('light');
   if (theme === 'dark') return getBuiltInPalette('dark');
+  if (theme === 'claude') {
+    const detected = await detectTerminalTheme();
+    return detected === 'light' ? claudeLightColors : claudeColors;
+  }
   if (theme === 'auto') {
     const detected = await detectTerminalTheme();
     return getBuiltInPalette(detected);
@@ -54,10 +60,12 @@ export async function getColorPalette(theme: ThemeName): Promise<ColorPalette> {
 
 /**
  * Synchronous fallback used by paths that cannot wait on terminal probes.
- * `'auto'` collapses to `'dark'`; explicit choices pass through.
+ * `'auto'` collapses to `'dark'`; `'claude'` collapses to its dark variant;
+ * explicit choices pass through.
  * Custom themes are not supported here — falls back to dark.
  */
 export function getColorPaletteSync(theme: ThemeName): ColorPalette {
   if (theme === 'light') return getBuiltInPalette('light');
+  if (theme === 'claude') return claudeColors;
   return getBuiltInPalette('dark');
 }

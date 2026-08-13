@@ -12,9 +12,9 @@ export const RESULT_PREVIEW_LINES = 3;
 export const THINKING_PREVIEW_LINES = 2;
 export const COMMAND_PREVIEW_LINES = 10;
 
-// Animation frames are shared by the login/update loaders and live thinking.
-export const BRAILLE_SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-export const BRAILLE_SPINNER_INTERVAL_MS = 80;
-
-export const MOON_SPINNER_FRAMES = ['🌑', '🌒', '🌓', '🌔', '🌕', '🌖', '🌗', '🌘'];
-export const MOON_SPINNER_INTERVAL_MS = 120;
+// Claude Code-style spinner frames, shared by the activity/login/update
+// loaders and the subagent windows. The reversed pass makes the sequence
+// ping-pong instead of jumping back to the first frame.
+const BASE_SPINNER_FRAMES = ['·', '✢', '*', '✶', '✻', '✽'];
+export const SPINNER_FRAMES = [...BASE_SPINNER_FRAMES, ...[...BASE_SPINNER_FRAMES].reverse()];
+export const SPINNER_INTERVAL_MS = 160;

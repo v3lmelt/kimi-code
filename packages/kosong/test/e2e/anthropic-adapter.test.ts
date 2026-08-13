@@ -134,7 +134,15 @@ describe('e2e: Anthropic adapter bridge', () => {
 
       const response = await provider.generate('', [], history);
       expect(await collectParts(response)).toEqual([
+        {
+          type: 'usage',
+          usage: { inputOther: 12, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
         { type: 'text', text: 'Compatible endpoint accepted the history.' },
+        {
+          type: 'usage',
+          usage: { inputOther: 12, output: 7, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
       ]);
       expect(harness.requests).toHaveLength(1);
       expect(harness.requests[0]!.search).toBe('?beta=true');
@@ -307,6 +315,10 @@ describe('e2e: Anthropic adapter bridge', () => {
       const parts = await collectParts(stream);
 
       expect(parts).toEqual([
+        {
+          type: 'usage',
+          usage: { inputOther: 19, output: 0, inputCacheRead: 2, inputCacheCreation: 1 },
+        },
         { type: 'text', text: 'Hello from Anthropic' },
         {
           type: 'function',
@@ -316,6 +328,10 @@ describe('e2e: Anthropic adapter bridge', () => {
         } satisfies ToolCall,
         { type: 'tool_call_part', argumentsPart: '{"a":2', index: 1 },
         { type: 'tool_call_part', argumentsPart: ',"b":3}', index: 1 },
+        {
+          type: 'usage',
+          usage: { inputOther: 19, output: 7, inputCacheRead: 2, inputCacheCreation: 1 },
+        },
       ]);
 
       expect(stream.id).toBe('msg_1');

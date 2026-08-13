@@ -75,9 +75,16 @@ describe('ActivityPaneComponent', () => {
     },
   );
 
-  it('renders nothing for hidden and thinking modes', () => {
+  it('renders nothing for hidden mode', () => {
     expect(new ActivityPaneComponent({ mode: 'hidden' }).render(80)).toEqual([]);
-    expect(new ActivityPaneComponent({ mode: 'thinking' }).render(80)).toEqual([]);
+  });
+
+  it('renders the spinner for thinking mode (status row shows thinking text)', () => {
+    const component = new ActivityPaneComponent({
+      mode: 'thinking',
+      spinner: new Text('working', 0, 0) as never,
+    });
+    expect(component.render(80).map((line) => line.trimEnd())).toEqual(['', 'working']);
   });
 
   it.each(['waiting', 'tool', 'composing'] as const)(

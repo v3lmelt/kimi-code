@@ -83,7 +83,7 @@ export class WrappingSelectList extends SelectList {
     primaryColumnWidth: number,
   ): string[] {
     const { theme } = this.internals();
-    const prefix = isSelected ? '→ ' : '  ';
+    const prefix = isSelected ? '❯ ' : '  ';
     const prefixWidth = visibleWidth(prefix);
     const description = item.description
       ? item.description.replaceAll(/[\r\n]+/g, ' ').trim()

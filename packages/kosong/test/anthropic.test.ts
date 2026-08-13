@@ -2803,9 +2803,17 @@ describe('AnthropicChatProvider', () => {
       const parts = await collectParts(result);
 
       expect(parts).toEqual([
+        {
+          type: 'usage',
+          usage: { inputOther: 10, output: 0, inputCacheRead: 3, inputCacheCreation: 2 },
+        },
         { type: 'text', text: '' },
         { type: 'text', text: 'Hello' },
         { type: 'text', text: ' world' },
+        {
+          type: 'usage',
+          usage: { inputOther: 10, output: 5, inputCacheRead: 3, inputCacheCreation: 2 },
+        },
       ]);
       expect(result.id).toBe('msg_stream_001');
       expect(result.usage).toEqual({
@@ -2864,12 +2872,20 @@ describe('AnthropicChatProvider', () => {
       const parts = await collectParts(result);
 
       expect(parts).toEqual([
+        {
+          type: 'usage',
+          usage: { inputOther: 20, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
         { type: 'think', think: '' },
         { type: 'think', think: 'Let me think' },
         { type: 'think', think: ' about this' },
         { type: 'think', think: '', encrypted: 'sig_xyz' },
         { type: 'text', text: '' },
         { type: 'text', text: 'The answer is 4.' },
+        {
+          type: 'usage',
+          usage: { inputOther: 20, output: 15, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
       ]);
       expect(result.id).toBe('msg_stream_002');
       expect(result.usage).toEqual({
@@ -2947,6 +2963,10 @@ describe('AnthropicChatProvider', () => {
       const parts = await collectParts(result);
 
       expect(parts).toEqual([
+        {
+          type: 'usage',
+          usage: { inputOther: 15, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
         { type: 'text', text: '' },
         { type: 'text', text: "I'll add those." },
         {
@@ -2957,6 +2977,10 @@ describe('AnthropicChatProvider', () => {
         },
         { type: 'tool_call_part', argumentsPart: '{"a":', index: 1 },
         { type: 'tool_call_part', argumentsPart: '2,"b":3}', index: 1 },
+        {
+          type: 'usage',
+          usage: { inputOther: 15, output: 8, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
       ]);
       expect(result.id).toBe('msg_stream_003');
     });
@@ -3024,6 +3048,10 @@ describe('AnthropicChatProvider', () => {
       const parts = await collectParts(result);
       expect(parts).toEqual([
         {
+          type: 'usage',
+          usage: { inputOther: 10, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
+        {
           type: 'function',
           id: 'toolu_a',
           name: 'tool_a', arguments: '',
@@ -3039,6 +3067,10 @@ describe('AnthropicChatProvider', () => {
         { type: 'tool_call_part', argumentsPart: '{"y":', index: 1 },
         { type: 'tool_call_part', argumentsPart: '1}', index: 0 },
         { type: 'tool_call_part', argumentsPart: '2}', index: 1 },
+        {
+          type: 'usage',
+          usage: { inputOther: 10, output: 5, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
       ]);
     });
 
@@ -3218,9 +3250,17 @@ describe('AnthropicChatProvider', () => {
       const parts = await collectParts(result);
 
       expect(parts).toEqual([
+        {
+          type: 'usage',
+          usage: { inputOther: 10, output: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
         { type: 'think', think: '', encrypted: 'enc_data_123' },
         { type: 'text', text: '' },
         { type: 'text', text: 'Done.' },
+        {
+          type: 'usage',
+          usage: { inputOther: 10, output: 3, inputCacheRead: 0, inputCacheCreation: 0 },
+        },
       ]);
     });
   });

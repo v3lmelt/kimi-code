@@ -33,10 +33,10 @@ export const AgentSwarmToolInputSchema = z
         'Subagent type used for every new subagent spawned from items; defaults to coder when omitted. Resumed subagents always keep their original type, so passing subagent_type together with resume_agent_ids is allowed — it only affects the item-based spawns.',
       ),
     model: z
-      .enum(['primary', 'secondary'])
+      .string()
       .optional()
       .describe(
-        'Model for every new subagent spawned from items: "secondary" uses the configured secondary model (the default when one is set), "primary" uses the model you are running on. Resumed subagents keep their bound model.',
+        'Model for every new subagent spawned from items: any model alias configured in [models] (see "Available models" in this tool description), or the special values "primary" (the model you are running on), "secondary" (the configured secondary model, the default when one is set), and "inherit" (your own model, the default otherwise). This choice overrides the selected agent type\'s model_preference. Resumed subagents keep their bound model.',
       ),
     prompt_template: z
       .string()

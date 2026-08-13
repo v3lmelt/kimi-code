@@ -68,8 +68,9 @@ export interface ColorPalette {
   diffMeta: string;
 
   // ── Roles ──
-  /** User message: bullet & text, skill-activation name. The one role colour
-   *  with its own hue — assistant/thinking/status bullets reuse text/textDim. */
+  /** User-accent hue. Now only the plugin-command name — user messages render
+   *  plain text on the USER_MESSAGE_BG bar (no bullet), and skill activation
+   *  uses a text-coloured bullet with a bold default-text name. */
   roleUser: string;
 
   // ── Shell mode ──
@@ -106,6 +107,71 @@ export const darkColors: ColorPalette = {
   shellMode: '#BD93F9',
 };
 
+/**
+ * Claude Code palette, dark variant: exact Claude Code values — the Claude
+ * orange as brand/primary, lavender for focused borders, magenta for shell
+ * mode. Token set is identical to dark/light. User messages render as plain
+ * text on a #373737 background bar, so roleUser is plain white.
+ */
+export const claudeColors: ColorPalette = {
+  primary: '#D77757',
+  accent: '#EB9F7F',
+
+  text: '#FFFFFF',
+  textStrong: '#FFFFFF',
+  textDim: '#999999',
+  textMuted: '#505050',
+
+  border: '#888888',
+  borderFocus: '#B1B9F9',
+
+  success: '#4EBA65',
+  warning: '#FFC107',
+  error: '#FF6B80',
+
+  diffAdded: '#4EBA65',
+  diffRemoved: '#FF6B80',
+  diffAddedStrong: '#38A260',
+  diffRemovedStrong: '#B3596B',
+  diffGutter: '#505050',
+  diffMeta: '#999999',
+
+  roleUser: '#FFFFFF',
+  shellMode: '#FD5DB1',
+};
+
+/**
+ * Claude Code palette, light variant: exact Claude Code light values.
+ * Accent/diff-strong/shell hues are darkened from the dark variants to keep
+ * ≥ 3:1 contrast on white (user messages sit on a #F0F0F0 background bar).
+ */
+export const claudeLightColors: ColorPalette = {
+  primary: '#D77757',
+  accent: '#B85C3E',
+
+  text: '#000000',
+  textStrong: '#000000',
+  textDim: '#666666',
+  textMuted: '#AFAFAF',
+
+  border: '#999999',
+  borderFocus: '#5769F7',
+
+  success: '#2C7A39',
+  warning: '#966C1E',
+  error: '#AB2B3F',
+
+  diffAdded: '#2C7A39',
+  diffRemoved: '#AB2B3F',
+  diffAddedStrong: '#1E6E2F',
+  diffRemovedStrong: '#8E2233',
+  diffGutter: '#AFAFAF',
+  diffMeta: '#666666',
+
+  roleUser: '#000000',
+  shellMode: '#D6336C',
+};
+
 export const lightColors: ColorPalette = {
   primary: '#1565C0',
   accent: '#00838F',
@@ -134,6 +200,23 @@ export const lightColors: ColorPalette = {
 };
 
 export type ResolvedTheme = 'dark' | 'light';
+
+/**
+ * Claude's auto-accept pill violet — a one-off hue with no palette token.
+ * Not part of `ColorPalette`; components import these constants directly
+ * and pick by resolved dark/light.
+ */
+export const AUTO_ACCEPT_DARK = '#AF87FF';
+export const AUTO_ACCEPT_LIGHT = '#8700FF';
+
+/**
+ * Claude Code-style user-message background bar — the full-width bar behind
+ * user messages replaces any bullet glyph. Not part of `ColorPalette`;
+ * components import these constants directly and pick by the active
+ * palette's text brightness (bright text ⇒ dark bar, dark text ⇒ light bar).
+ */
+export const USER_MESSAGE_BG_DARK = '#373737';
+export const USER_MESSAGE_BG_LIGHT = '#F0F0F0';
 
 /** Synchronous palette lookup for built-in themes only. */
 export function getBuiltInPalette(resolved: ResolvedTheme): ColorPalette {

@@ -95,6 +95,15 @@ export interface Component {
 	 * Called when theme changes or when component needs to re-render from scratch.
 	 */
 	invalidate(): void;
+
+	/**
+	 * Optional monotonic render-output generation. Any mutation that changes what
+	 * `render` returns must increment it (via `bumpVersion`). When absent, the
+	 * component is always considered dirty and never skipped by a parent's
+	 * subtree short-circuit — short-circuiting is an optimization, never a
+	 * behaviour change.
+	 */
+	version?: number;
 }
 
 type InputListenerResult = { consume?: boolean; data?: string } | undefined;
@@ -261,45 +270,184 @@ type OverlayFocusRestoreState = { status: "inactive" } | ActiveOverlayFocusResto
 type OverlayFocusRestorePolicy = "clear" | "preserve";
 
 /**
+ * Parent back-reference for version bump propagation (leaf → root). Module-private,
+ * so it never leaks into the public Component contract.
+ */
+const PARENT = Symbol("PARENT");
+type WithParent = Component & { [PARENT]?: Container };
+
+/**
  * Container - a component that contains other components
  */
 export class Container implements Component {
 	children: Component[] = [];
 
+	/** Render-output generation. `undefined` when a descendant has no version. */
+	private versionCounter = 0;
+	/** Structural generation: add/insert/remove/clear/truncate bump this. */
+	private childrenVersion = 0;
+	/** True when some descendant has no version — the subtree can't be skipped. */
+	private alwaysDirty = false;
+	private subtreeCache?: {
+		width: number;
+		childrenVersion: number;
+		childRefs: Component[];
+		childVersions: (number | undefined)[];
+		childLines: string[][];
+		lines: string[];
+	};
+
+	get version(): number | undefined {
+		return this.alwaysDirty ? undefined : this.versionCounter;
+	}
+
+	/** Public bump entry: increment our generation and propagate to ancestors. */
+	bump(): void {
+		this.versionCounter++;
+		const parent = (this as WithParent)[PARENT];
+		if (parent) parent.bump();
+	}
+
 	addChild(component: Component): void {
+		(component as WithParent)[PARENT] = this;
 		this.children.push(component);
+		this.afterStructureChange();
+	}
+
+	insertChild(index: number, component: Component): void {
+		(component as WithParent)[PARENT] = this;
+		this.children.splice(index, 0, component);
+		this.afterStructureChange();
 	}
 
 	removeChild(component: Component): void {
 		const index = this.children.indexOf(component);
 		if (index !== -1) {
 			this.children.splice(index, 1);
+			delete (component as WithParent)[PARENT];
+			this.afterStructureChange();
 		}
 	}
 
 	clear(): void {
+		for (const child of this.children) {
+			delete (child as WithParent)[PARENT];
+		}
 		this.children = [];
+		this.afterStructureChange();
+	}
+
+	/** Remove all children at index >= n (used instead of direct array mutation). */
+	truncateChildren(n: number): void {
+		if (this.children.length <= n) return;
+		for (let i = n; i < this.children.length; i++) {
+			delete (this.children[i] as WithParent)[PARENT];
+		}
+		this.children.length = n;
+		this.afterStructureChange();
+	}
+
+	private afterStructureChange(): void {
+		this.childrenVersion++;
+		this.recomputeAlwaysDirty();
+		bumpVersion(this);
+	}
+
+	private recomputeAlwaysDirty(): void {
+		this.alwaysDirty = this.children.some((c) => c.version === undefined);
 	}
 
 	invalidate(): void {
 		for (const child of this.children) {
 			child.invalidate?.();
 		}
+		// Theme/global change: everything this container renders is stale.
+		bumpVersion(this);
 	}
 
 	render(width: number): string[] {
 		// Extremely narrow terminals can report tiny or even non-positive
 		// column counts; never propagate a width below 1 into components.
 		width = Math.max(1, width);
-		const lines: string[] = [];
-		for (const child of this.children) {
-			const childLines = child.render(width);
-			for (const line of childLines) {
-				lines.push(line);
+
+		if (!isVersionCacheEnabled()) {
+			// Fallback: original full-traversal behaviour (byte-identical output).
+			const lines: string[] = [];
+			for (const child of this.children) {
+				const childLines = child.render(width);
+				for (const line of childLines) lines.push(line);
 			}
+			return lines;
 		}
+
+		const cache = this.subtreeCache;
+		const structOk =
+			cache !== undefined &&
+			cache.width === width &&
+			cache.childrenVersion === this.childrenVersion &&
+			cache.childRefs.length === this.children.length;
+
+		// Fast path: every child's version matches the snapshot → reuse cached lines.
+		if (structOk) {
+			let allMatch = true;
+			for (let i = 0; i < this.children.length; i++) {
+				const v = this.children[i]!.version;
+				if (v === undefined || v !== cache.childVersions[i]) {
+					allMatch = false;
+					break;
+				}
+			}
+			if (allMatch) return cache.lines;
+		}
+
+		const childRefs: Component[] = [];
+		const childVersions: (number | undefined)[] = [];
+		const childLines: string[][] = [];
+		const lines: string[] = [];
+		for (let i = 0; i < this.children.length; i++) {
+			const child = this.children[i]!;
+			childRefs.push(child);
+			const v = child.version;
+			childVersions.push(v);
+			let cl: string[];
+			if (
+				structOk &&
+				cache.childRefs[i] === child &&
+				v !== undefined &&
+				v === cache.childVersions[i]
+			) {
+				cl = cache.childLines[i]!; // reuse unchanged child's lines, skip child.render
+			} else {
+				cl = child.render(width);
+			}
+			childLines.push(cl);
+			for (const line of cl) lines.push(line);
+		}
+		this.subtreeCache = { width, childrenVersion: this.childrenVersion, childRefs, childVersions, childLines, lines };
 		return lines;
 	}
+}
+
+/**
+ * Bump a component's render version and propagate up to every ancestor container.
+ * Leaf components bump their `version` field; containers bump their internal
+ * counter. Mutation is the low-frequency path, so O(depth) propagation is
+ * negligible relative to the ~16ms render cadence.
+ */
+export function bumpVersion(component: Component): void {
+	if (component instanceof Container) {
+		component.bump();
+		return;
+	}
+	(component as { version?: number }).version =
+		((component as { version?: number }).version ?? 0) + 1;
+	const parent = (component as WithParent)[PARENT];
+	if (parent) bumpVersion(parent);
+}
+
+/** Whether the version short-circuit is enabled (PI_TUI_NO_RENDER_CACHE=1 disables it). */
+export function isVersionCacheEnabled(): boolean {
+	return process.env["PI_TUI_NO_RENDER_CACHE"] !== "1";
 }
 
 /**
@@ -1244,7 +1392,7 @@ export class TUI extends Container {
 	 * @param height - Terminal height (visible viewport size)
 	 * @returns Cursor position { row, col } or null if no marker found
 	 */
-	private extractCursorPosition(lines: string[], height: number): { row: number; col: number } | null {
+	private extractCursorPosition(lines: string[], height: number): { row: number; col: number; markerRow: number } | null {
 		// Only scan the bottom `height` lines (visible viewport)
 		const viewportTop = Math.max(0, lines.length - height);
 		for (let row = lines.length - 1; row >= viewportTop; row--) {
@@ -1255,10 +1403,9 @@ export class TUI extends Container {
 				const beforeMarker = line.slice(0, markerIndex);
 				const col = visibleWidth(beforeMarker);
 
-				// Strip marker from the line
-				lines[row] = line.slice(0, markerIndex) + line.slice(markerIndex + CURSOR_MARKER.length);
-
-				return { row, col };
+				// Non-mutating: the marker is stripped later, in the
+				// processed-lines pass, so render-cached line arrays stay intact.
+				return { row, col, markerRow: row };
 			}
 		}
 		return null;
@@ -1305,6 +1452,7 @@ export class TUI extends Container {
 		// re-normalizing the whole transcript.
 		const rawLines = newLines;
 		const reuseProcessed = !widthChanged && this.previousRawLines.length > 0;
+		const markerRow = cursorPos?.markerRow;
 		const processedLines: string[] = new Array(rawLines.length);
 		const lineImageIds: ReadonlyArray<number>[] = new Array(rawLines.length);
 		for (let i = 0; i < rawLines.length; i++) {
@@ -1315,6 +1463,11 @@ export class TUI extends Container {
 				continue;
 			}
 			let line = rawLine;
+			// Strip the cursor marker on the marker row (non-mutating) so
+			// render-cached raw lines stay intact for reference reuse.
+			if (i === markerRow) {
+				line = line.replace(CURSOR_MARKER, "");
+			}
 			let imageIds: readonly number[] = EMPTY_IMAGE_IDS;
 			if (isImageLine(line)) {
 				imageIds = extractKittyImageIds(line);

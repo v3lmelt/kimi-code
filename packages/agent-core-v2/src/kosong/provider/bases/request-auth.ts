@@ -7,7 +7,7 @@
  * failure — it never invents a key from a vendor-specific source.
  */
 
-import { ChatProviderError } from '#/kosong/contract/errors';
+import { MissingApiKeyError } from '#/kosong/contract/errors';
 import type { ProviderRequestAuth } from '#/kosong/contract/provider';
 
 export function requireProviderApiKey(
@@ -17,7 +17,7 @@ export function requireProviderApiKey(
 ): string {
   const apiKey = auth?.apiKey ?? defaultApiKey;
   if (apiKey === undefined || apiKey.length === 0) {
-    throw new ChatProviderError(
+    throw new MissingApiKeyError(
       `${providerName}: apiKey is required. Provide it via the constructor options, the provider's API-key environment variable, options.auth.apiKey on each request, or an OAuth login.`,
     );
   }

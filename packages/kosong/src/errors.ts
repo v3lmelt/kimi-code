@@ -11,6 +11,19 @@ export class ChatProviderError extends Error {
 }
 
 /**
+ * Client-side credential gap: no API key was available for the request (no
+ * constructor key, no per-request auth, no OAuth login). Deterministic — the
+ * identical request can never succeed — so the retry verdict fails it fast
+ * instead of burning the whole retry budget on backoff.
+ */
+export class MissingApiKeyError extends ChatProviderError {
+  constructor(message: string) {
+    super(message);
+    this.name = 'MissingApiKeyError';
+  }
+}
+
+/**
  * Network-level connection failure.
  */
 export class APIConnectionError extends ChatProviderError {
@@ -211,6 +224,11 @@ export function throwIfAbortError(error: unknown): void {
 }
 
 export function isRetryableGenerateError(error: unknown): boolean {
+  // A missing credential is deterministic: retrying the identical request can
+  // never succeed, so it fails fast instead of burning the retry budget.
+  if (error instanceof MissingApiKeyError) {
+    return false;
+  }
   if (error instanceof APIConnectionError || error instanceof APITimeoutError) {
     return true;
   }

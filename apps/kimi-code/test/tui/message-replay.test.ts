@@ -1120,7 +1120,7 @@ describe('KimiTUI resume message replay', () => {
       instruction: 'preserve implementation notes',
     });
     const collapsed = stripAnsi(driver.state.transcriptContainer.render(120).join('\n'));
-    expect(collapsed).toContain('Compaction complete');
+    expect(collapsed).toContain('Conversation compacted');
     expect(collapsed).toContain('120 → 24 tokens');
     expect(collapsed).toContain('preserve implementation notes');
     expect(collapsed).not.toContain('Compacted transcript summary.');
@@ -1149,7 +1149,7 @@ describe('KimiTUI resume message replay', () => {
     await driver.switchToSession(resumed, 'Resumed session (ses-replay).');
 
     const transcript = stripAnsi(driver.state.transcriptContainer.render(120).join('\n'));
-    expect(transcript).toContain('Compaction complete');
+    expect(transcript).toContain('Conversation compacted');
     expect(transcript).toContain('Compacted transcript summary.');
   });
 
@@ -1175,7 +1175,7 @@ describe('KimiTUI resume message replay', () => {
     const transcript = stripAnsi(driver.state.transcriptContainer.render(120).join('\n'));
     expect(transcript).toContain('Compaction cancelled');
     expect(transcript).toContain('preserve implementation notes');
-    expect(transcript).not.toContain('Compaction complete');
+    expect(transcript).not.toContain('Conversation compacted');
   });
 
   it('renders plan permission and approval replay notices', async () => {

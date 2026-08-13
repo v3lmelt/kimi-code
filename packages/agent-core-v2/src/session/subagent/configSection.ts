@@ -44,6 +44,7 @@ import type { AgentModelPreference } from '#/app/agentProfileCatalog/agentProfil
 import { isPlainObject } from '#/app/config/toml';
 import type { IFlagService } from '#/app/flag/flag';
 import {
+  MODELS_SECTION,
   SECONDARY_MODEL_ENV,
   SECONDARY_MODEL_SECTION,
 } from '#/app/kosongConfig/configSection';
@@ -52,6 +53,7 @@ import {
   secondaryModelPatch,
 } from '#/app/kosongConfig/secondaryModelOverlay';
 import { type SecondaryModelConfig } from '#/app/kosongConfig/configSection';
+import type { ModelsSection } from '#/kosong/model/model';
 import {
   type EnvBindings,
   envBindings,
@@ -73,6 +75,9 @@ export const SubagentConfigSchema = z.object({
 export type SubagentConfig = z.infer<typeof SubagentConfigSchema>;
 
 export const DEFAULT_SUBAGENT_TIMEOUT_MS = 2 * 60 * 60 * 1000;
+
+/** Cap on individually listed aliases in the "Available models" block; extras collapse into one line. */
+export const MAX_LISTED_MODELS = 24;
 
 export const SUBAGENT_TIMEOUT_ENV = 'KIMI_SUBAGENT_TIMEOUT_MS';
 
@@ -119,6 +124,22 @@ export function resolveSubagentBinding(
   own: { modelAlias: string; thinkingLevel: string },
   requested?: SubagentModelChoice,
 ): { model: string; thinking?: string; displayModel: string } {
+  // Concrete `[models]` alias — bind it directly; thinking resolves naturally.
+  if (isConcreteModelAlias(requested)) {
+    return {
+      model: requested,
+      thinking: undefined,
+      displayModel: subagentDisplayModel(config, requested),
+    };
+  }
+  // Explicitly inherit the caller's model, even when a secondary is set.
+  if (requested === 'inherit') {
+    return {
+      model: own.modelAlias,
+      thinking: own.thinkingLevel,
+      displayModel: subagentDisplayModel(config, own.modelAlias),
+    };
+  }
   const secondary = resolveSecondaryModel(config, flags);
   if (requested !== 'primary' && secondary?.model !== undefined) {
     const model =
@@ -134,6 +155,17 @@ export function resolveSubagentBinding(
     thinking: own.thinkingLevel,
     displayModel: subagentDisplayModel(config, own.modelAlias),
   };
+}
+
+function isConcreteModelAlias(
+  requested: SubagentModelChoice | undefined,
+): requested is string {
+  return (
+    requested !== undefined &&
+    requested !== 'primary' &&
+    requested !== 'secondary' &&
+    requested !== 'inherit'
+  );
 }
 
 export function subagentDisplayModel(
@@ -152,16 +184,69 @@ export function buildSubagentModelDescriptions(
   callerModelAlias: string | undefined,
   modelCatalog: IModelCatalog,
 ): string | undefined {
+  if (callerModelAlias === undefined) return undefined;
+  if (!flags.enabled(SECONDARY_MODEL_FLAG_ID)) return undefined;
   const secondary = resolveSecondaryModel(config, flags);
   const secondaryModel = secondary?.model;
-  if (secondaryModel === undefined || callerModelAlias === undefined) return undefined;
-  const boundSecondary =
-    secondaryModelPatch(secondary) === undefined ? secondaryModel : SECONDARY_DERIVED_MODEL_ID;
-  return [
-    'Available models (pass via model):',
-    `- secondary: ${secondaryModel} (default) — the configured secondary model; prefer it for routine subagent tasks${capabilitiesSuffix(resolvedCapabilities(modelCatalog, boundSecondary))}`,
-    `- primary: ${callerModelAlias} — the main model you are running on; use it for hard, quality-sensitive subagent tasks${capabilitiesSuffix(resolvedCapabilities(modelCatalog, callerModelAlias))}`,
-  ].join('\n');
+  const lines: string[] = [];
+  const seen = new Set<string>();
+
+  const addLine = (
+    alias: string,
+    label: string,
+    note: string,
+    isDefault: boolean,
+    capModel: string,
+  ): void => {
+    if (seen.has(alias)) return;
+    seen.add(alias);
+    lines.push(
+      `- ${label}: ${alias}${isDefault ? ' (default)' : ''}${note}${capabilitiesSuffix(
+        resolvedCapabilities(modelCatalog, capModel),
+      )}`,
+    );
+  };
+
+  addLine(
+    callerModelAlias,
+    'primary',
+    ' — the main model you are running on; use it for hard, quality-sensitive subagent tasks',
+    false,
+    callerModelAlias,
+  );
+  if (secondaryModel !== undefined && secondaryModel !== callerModelAlias) {
+    const capModel =
+      secondaryModelPatch(secondary) === undefined
+        ? secondaryModel
+        : SECONDARY_DERIVED_MODEL_ID;
+    addLine(
+      secondaryModel,
+      'secondary',
+      ' — the configured secondary model; prefer it for routine subagent tasks',
+      true,
+      capModel,
+    );
+  }
+
+  const models = config.get<ModelsSection | undefined>(MODELS_SECTION);
+  const rest = Object.keys(models ?? {}).filter(
+    (alias) => alias !== SECONDARY_DERIVED_MODEL_ID && !seen.has(alias),
+  );
+  if (rest.length > MAX_LISTED_MODELS) {
+    for (const alias of rest.slice(0, MAX_LISTED_MODELS)) {
+      addLine(alias, alias, '', false, alias);
+    }
+    lines.push(`- other models: ${rest.slice(MAX_LISTED_MODELS).join(', ')}`);
+  } else {
+    for (const alias of rest) {
+      addLine(alias, alias, '', false, alias);
+    }
+  }
+
+  lines.push(
+    '"inherit" uses your own model; this is the default when no secondary model is configured.',
+  );
+  return ['Available models (pass via model):', ...lines].join('\n');
 }
 
 const ADVERTISED_CAPABILITY_FLAGS = [
@@ -209,27 +294,42 @@ export function wrapSubagentModelError(
   error: unknown,
   boundModel: string,
   callerModelAlias: string | undefined,
+  secondaryModel?: string | undefined,
 ): unknown {
   if (boundModel === callerModelAlias) return error;
   if (!isError2(error) || error.code !== ErrorCodes.CONFIG_INVALID) return error;
   if (error.details?.['model'] !== boundModel) return error;
-  const displayModel =
-    boundModel === SECONDARY_DERIVED_MODEL_ID
-      ? `the derived entry "${SECONDARY_DERIVED_MODEL_ID}"`
-      : `"${boundModel}"`;
+  if (boundModel === SECONDARY_DERIVED_MODEL_ID || boundModel === secondaryModel) {
+    const displayModel =
+      boundModel === SECONDARY_DERIVED_MODEL_ID
+        ? `the derived entry "${SECONDARY_DERIVED_MODEL_ID}"`
+        : `"${boundModel}"`;
+    return new Error2(
+      error.code,
+      `${error.message} (secondary model ${displayModel} comes from [secondary_model].model / ${SECONDARY_MODEL_ENV} — check that it names a valid [models] entry)`,
+      {
+        cause: error,
+        name: error.name,
+        details: {
+          ...error.details,
+          secondaryModel: boundModel,
+          secondaryModelConfig: {
+            section: 'secondaryModel.model',
+            environment: SECONDARY_MODEL_ENV,
+          },
+        },
+      },
+    );
+  }
   return new Error2(
     error.code,
-    `${error.message} (secondary model ${displayModel} comes from [secondary_model].model / ${SECONDARY_MODEL_ENV} — check that it names a valid [models] entry)`,
+    `${error.message} (model "${boundModel}" is not a valid [models] entry — pass a configured model alias via the Agent tool's model parameter or the agent's model_preference)`,
     {
       cause: error,
       name: error.name,
       details: {
         ...error.details,
-        secondaryModel: boundModel,
-        secondaryModelConfig: {
-          section: 'secondaryModel.model',
-          environment: SECONDARY_MODEL_ENV,
-        },
+        modelChoice: boundModel,
       },
     },
   );

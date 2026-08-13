@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
 import type { TUIState } from "#/tui/kimi-tui";
-import { darkColors, lightColors } from "#/tui/theme/colors";
-import { getBuiltInPalette } from "#/tui/theme";
+import { darkColors, lightColors, claudeColors, claudeLightColors } from "#/tui/theme/colors";
+import { getBuiltInPalette, getColorPalette, getColorPaletteSync, isBuiltInTheme } from "#/tui/theme";
 import {
   DISABLE_TERMINAL_THEME_REPORTING,
   ENABLE_TERMINAL_THEME_REPORTING,
@@ -171,5 +171,18 @@ describe('ColorPalette warning token', () => {
   it('resolves the correct palette by theme name', () => {
     expect(getBuiltInPalette('dark')).toBe(darkColors);
     expect(getBuiltInPalette('light')).toBe(lightColors);
+  });
+});
+
+describe('claude theme', () => {
+  it('is a built-in theme with the full palette token set', () => {
+    expect(isBuiltInTheme('claude')).toBe(true);
+    expect(Object.keys(claudeColors).sort()).toEqual(Object.keys(darkColors).sort());
+    expect(Object.keys(claudeLightColors).sort()).toEqual(Object.keys(darkColors).sort());
+  });
+
+  it('resolves by name, sync and async (non-TTY detects dark)', async () => {
+    expect(getColorPaletteSync('claude')).toBe(claudeColors);
+    await expect(getColorPalette('claude')).resolves.toBe(claudeColors);
   });
 });

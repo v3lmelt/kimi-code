@@ -150,7 +150,7 @@ export class ApprovalPreviewViewer extends Container implements Focusable {
   }
 
   private renderHeader(width: number): string {
-    const title = currentTheme.boldFg('primary', ' Preview ');
+    const title = currentTheme.boldFg('textStrong', ' Preview ');
     return fitExactly(title + this.headerTitle, width);
   }
 
@@ -162,21 +162,21 @@ export class ApprovalPreviewViewer extends Container implements Focusable {
     if (this.scrollTop < 0) this.scrollTop = 0;
 
     const viewRows = bodyHeight - 2;
-    const top = currentTheme.fg('primary', '┌' + '─'.repeat(Math.max(0, width - 2)) + '┐');
-    const bottom = currentTheme.fg('primary', '└' + '─'.repeat(Math.max(0, width - 2)) + '┘');
+    const top = currentTheme.fg('border', '┌' + '─'.repeat(Math.max(0, width - 2)) + '┐');
+    const bottom = currentTheme.fg('border', '└' + '─'.repeat(Math.max(0, width - 2)) + '┘');
 
     const out: string[] = [top];
     for (let i = 0; i < viewRows; i++) {
       const lineIndex = this.scrollTop + i;
       const raw = this.bodyLines[lineIndex] ?? '';
-      out.push(currentTheme.fg('primary', '│ ') + fitExactly(raw, innerWidth) + currentTheme.fg('primary', ' │'));
+      out.push(currentTheme.fg('border', '│ ') + fitExactly(raw, innerWidth) + currentTheme.fg('border', ' │'));
     }
     out.push(bottom);
     return out;
   }
 
   private renderFooter(width: number, bodyHeight: number): string {
-    const key = (text: string): string => currentTheme.boldFg('primary', text);
+    const key = (text: string): string => currentTheme.fg('text', text);
     const dim = (text: string): string => currentTheme.fg('textMuted', text);
 
     const total = this.bodyLines.length;

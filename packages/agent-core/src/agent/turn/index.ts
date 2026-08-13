@@ -1380,6 +1380,13 @@ function mapLoopEvent(event: LoopEvent, turnId: number): AgentEvent | undefined 
         errorMessage: event.errorMessage,
         statusCode: event.statusCode,
       };
+    case 'step.usage':
+      return {
+        type: 'turn.step.usage',
+        turnId,
+        step: event.step,
+        usage: event.usage,
+      };
     case 'content.part':
       return undefined;
     case 'tool.call':

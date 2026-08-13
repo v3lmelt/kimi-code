@@ -144,8 +144,20 @@ describe('parseAgentFileText', () => {
     });
   });
 
-  it('rejects an invalid model_preference', () => {
-    expect(() => parse(agentFileText({ description: 'd', model_preference: 'cheapest' }))).toThrow(
+  it('accepts an arbitrary model alias as model_preference', () => {
+    const definition = parse(
+      agentFileText({ description: 'd', model_preference: 'cheapest' }),
+    );
+    expect(definition.modelPreference).toBe('cheapest');
+  });
+
+  it('accepts "inherit" as model_preference', () => {
+    const definition = parse(agentFileText({ description: 'd', model_preference: 'inherit' }));
+    expect(definition.modelPreference).toBe('inherit');
+  });
+
+  it('rejects a non-string model_preference', () => {
+    expect(() => parse(agentFileText({ description: 'd', model_preference: 42 }))).toThrow(
       /model_preference/,
     );
   });

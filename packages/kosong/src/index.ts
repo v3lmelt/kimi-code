@@ -7,6 +7,7 @@ export {
   isContentPart,
   isToolCall,
   isToolCallPart,
+  isUsagePart,
   mergeInPlace,
 } from './message';
 export type {
@@ -20,6 +21,7 @@ export type {
   ThinkPart,
   ToolCall,
   ToolCallPart,
+  UsagePart,
   VideoURLPart,
 } from './message';
 
@@ -77,6 +79,7 @@ export {
   APIStatusError,
   APITimeoutError,
   ChatProviderError,
+  MissingApiKeyError,
   createAbortError,
   isAbortError,
   isContextOverflowStatusError,

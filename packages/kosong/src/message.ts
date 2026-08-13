@@ -1,4 +1,5 @@
 import type { Tool } from './tool';
+import type { TokenUsage } from './usage';
 
 export type Role = 'system' | 'user' | 'assistant' | 'tool';
 
@@ -68,6 +69,20 @@ export interface ToolCallPart {
 }
 
 /**
+ * A mid-stream token-usage update.
+ *
+ * Usage parts are informational: they never merge into the final
+ * {@link Message}. Providers yield one whenever the wire protocol reports
+ * usage mid-stream (Anthropic `message_start` / `message_delta`, Google
+ * per-chunk `usageMetadata`, OpenAI `include_usage` final chunk), so hosts
+ * can show live counters instead of waiting for the completed stream.
+ */
+export interface UsagePart {
+  type: 'usage';
+  usage: TokenUsage;
+}
+
+/**
  * A single chunk yielded by {@link StreamedMessage}'s async iterator.
  *
  * During streaming, the generate loop receives a sequence of these parts and
@@ -79,7 +94,7 @@ export interface ToolCallPart {
  * are responsible for translating their native "done" signals into this
  * shape; they do not emit a separate done event.
  */
-export type StreamedMessagePart = ContentPart | ToolCall | ToolCallPart;
+export type StreamedMessagePart = ContentPart | ToolCall | ToolCallPart | UsagePart;
 
 /**
  * A single message in a conversation.
@@ -148,6 +163,11 @@ export function isToolCall(part: StreamedMessagePart): part is ToolCall {
 /** Check if a streamed part is a ToolCallPart (streaming argument delta). */
 export function isToolCallPart(part: StreamedMessagePart): part is ToolCallPart {
   return part.type === 'tool_call_part';
+}
+
+/** Check if a streamed part is a mid-stream UsagePart. */
+export function isUsagePart(part: StreamedMessagePart): part is UsagePart {
+  return part.type === 'usage';
 }
 
 /**

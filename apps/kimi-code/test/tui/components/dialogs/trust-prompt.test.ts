@@ -24,8 +24,8 @@ describe('TrustPromptComponent', () => {
     expect(titleIdx).toBeGreaterThanOrEqual(0);
     const hint = lines[titleIdx + 1];
     expect(hint).toContain('↑↓ navigate');
-    expect(hint).toContain('Enter select');
-    expect(hint).toContain('Esc exit');
+    expect(hint).toContain('enter select');
+    expect(hint).toContain('esc exit');
     expect(lines.some((l) => l.includes('/tmp/demo-workspace'))).toBe(true);
   });
 

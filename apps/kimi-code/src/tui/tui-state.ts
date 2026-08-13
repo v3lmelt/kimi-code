@@ -6,6 +6,7 @@ import {
 
 import { FooterComponent } from './components/chrome/footer';
 import { GutterContainer } from './components/chrome/gutter-container';
+import { ToastContainerComponent } from './components/chrome/toast';
 import type { MoonLoader, SpinnerStyle } from './components/chrome/moon-loader';
 import { TodoPanelComponent } from './components/chrome/todo-panel';
 import type { SessionRow } from './components/dialogs/session-picker';
@@ -30,12 +31,14 @@ export interface TUIState {
   terminal: ProcessTerminal;
   transcriptContainer: Container;
   activityContainer: Container;
+  previewContainer: Container;
   todoPanelContainer: Container;
   todoPanel: TodoPanelComponent;
   queueContainer: Container;
   btwPanelContainer: Container;
   editorContainer: Container;
   footer: FooterComponent;
+  toastContainer: ToastContainerComponent;
   editor: CustomEditor;
   theme: Theme;
   appState: AppState;
@@ -71,6 +74,7 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
 
   const transcriptContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
   const activityContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
+  const previewContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
   const todoPanelContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
   const todoPanel = new TodoPanelComponent();
   const queueContainer = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
@@ -88,6 +92,7 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
     terminal,
     transcriptContainer,
     activityContainer,
+    previewContainer,
     todoPanelContainer,
     todoPanel,
     queueContainer,
@@ -95,6 +100,9 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
     editorContainer,
     editor,
     footer,
+    toastContainer: new ToastContainerComponent(() => {
+      ui.requestRender();
+    }),
     theme,
     appState: { ...initialAppState },
     startupState: 'pending',

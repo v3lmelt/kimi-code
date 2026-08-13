@@ -1,4 +1,4 @@
-import type { Component } from '@moonshot-ai/pi-tui';
+import { bumpVersion, type Component } from '@moonshot-ai/pi-tui';
 import { Spacer, Text, visibleWidth } from '@moonshot-ai/pi-tui';
 
 import { STATUS_BULLET } from '#/tui/constant/symbols';
@@ -7,6 +7,7 @@ import type { ColorPalette } from '#/tui/theme/colors';
 import type { CronTranscriptData } from '#/tui/types';
 
 export class CronMessageComponent implements Component {
+  version = 0;
   private readonly spacer = new Spacer(1);
   private readonly data: CronTranscriptData;
   private readonly title: string;
@@ -29,6 +30,7 @@ export class CronMessageComponent implements Component {
   invalidate(): void {
     this.promptText.setText(currentTheme.fg('text', this.prompt));
     this.promptText.invalidate();
+    bumpVersion(this);
   }
 
   render(width: number): string[] {

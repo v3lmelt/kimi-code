@@ -618,25 +618,28 @@ export class GoogleGenAIStreamedMessage implements StreamedMessage {
     return parts;
   }
 
-  /** Extract usage metadata from a response chunk. */
-  private _extractUsage(response: Record<string, unknown>): void {
+  /** Extract usage metadata from a response chunk; returns true when the
+   * chunk carried usageMetadata (and {@link _usage} was refreshed). */
+  private _extractUsage(response: Record<string, unknown>): boolean {
     const usageMetadata = response['usageMetadata'] as Record<string, unknown> | undefined;
-    if (usageMetadata) {
-      const promptTokenCount =
-        typeof usageMetadata['promptTokenCount'] === 'number'
-          ? usageMetadata['promptTokenCount']
-          : 0;
-      const cachedContentTokenCount =
-        typeof usageMetadata['cachedContentTokenCount'] === 'number'
-          ? usageMetadata['cachedContentTokenCount']
-          : 0;
-      this._usage = {
-        inputOther: Math.max(promptTokenCount - cachedContentTokenCount, 0),
-        output: (usageMetadata['candidatesTokenCount'] as number) ?? 0,
-        inputCacheRead: cachedContentTokenCount,
-        inputCacheCreation: 0,
-      };
+    if (!usageMetadata) {
+      return false;
     }
+    const promptTokenCount =
+      typeof usageMetadata['promptTokenCount'] === 'number'
+        ? usageMetadata['promptTokenCount']
+        : 0;
+    const cachedContentTokenCount =
+      typeof usageMetadata['cachedContentTokenCount'] === 'number'
+        ? usageMetadata['cachedContentTokenCount']
+        : 0;
+    this._usage = {
+      inputOther: Math.max(promptTokenCount - cachedContentTokenCount, 0),
+      output: (usageMetadata['candidatesTokenCount'] as number) ?? 0,
+      inputCacheRead: cachedContentTokenCount,
+      inputCacheCreation: 0,
+    };
+    return true;
   }
 
   /** Extract response ID from a response chunk. */
@@ -660,7 +663,9 @@ export class GoogleGenAIStreamedMessage implements StreamedMessage {
     signal?: AbortSignal,
   ): AsyncGenerator<StreamedMessagePart> {
     this._throwIfAborted(signal);
-    this._extractUsage(response);
+    if (this._extractUsage(response) && this._usage !== null) {
+      yield { type: 'usage', usage: { ...this._usage } };
+    }
     this._extractId(response);
     this._captureFinishReason(response);
     for (const part of this._extractChunkParts(response)) {
@@ -679,7 +684,9 @@ export class GoogleGenAIStreamedMessage implements StreamedMessage {
         // AbortSignal see cancellation honored promptly even though the
         // Google GenAI SDK does not forward it to the underlying fetch.
         this._throwIfAborted(signal);
-        this._extractUsage(chunk);
+        if (this._extractUsage(chunk) && this._usage !== null) {
+          yield { type: 'usage', usage: { ...this._usage } };
+        }
         this._extractId(chunk);
         this._captureFinishReason(chunk);
         for (const part of this._extractChunkParts(chunk)) {

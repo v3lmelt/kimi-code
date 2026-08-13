@@ -84,6 +84,20 @@ export interface TurnStepCompletedEvent {
   readonly rawFinishReason?: string;
 }
 
+/**
+ * Mid-step token-usage update, published live while a step streams whenever
+ * the provider reports usage (Anthropic `message_start` / `message_delta`,
+ * Google per-chunk usage metadata, OpenAI `include_usage` final chunk).
+ * Bus-only: never appended to the loop journal, never replayed.
+ */
+export interface TurnStepUsageEvent {
+  readonly type: 'turn.step.usage';
+  readonly turnId: number;
+  readonly step: number;
+  readonly stepId?: string;
+  readonly usage: TokenUsage;
+}
+
 export interface TurnStepInterruptedEvent {
   readonly type: 'turn.step.interrupted';
   readonly turnId: number;
@@ -119,6 +133,7 @@ declare module '#/app/event/eventBus' {
     'turn.ended': TurnEndedEvent;
     'turn.step.started': TurnStepStartedEvent;
     'turn.step.completed': TurnStepCompletedEvent;
+    'turn.step.usage': TurnStepUsageEvent;
     'turn.step.interrupted': TurnStepInterruptedEvent;
     'assistant.delta': AssistantDeltaEvent;
     'thinking.delta': ThinkingDeltaEvent;

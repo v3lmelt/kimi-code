@@ -40,6 +40,7 @@ export class UndoSelectorComponent extends Container implements Focusable {
       items: opts.choices,
       toSearchText: (choice) => choice.label,
       initialIndex: Math.max(0, opts.choices.length - 1),
+      onChange: () => this.bump(),
     });
   }
 

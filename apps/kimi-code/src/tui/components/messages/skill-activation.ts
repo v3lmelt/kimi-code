@@ -4,7 +4,7 @@
  * When the user runs `/skill:foo bar`, the TUI renders a compact card instead
  * of expanding the SKILL.md body into the user bubble:
  *
- *   ▶ Activated skill: foo
+ *   ● Activated skill: foo
  *     bar
  *
  * The args line is optional. Core expands the skill body into the LLM context;
@@ -14,10 +14,20 @@
 
 import { Container, Text, Spacer } from '@moonshot-ai/pi-tui';
 
+import { STATUS_BULLET } from '#/tui/constant/symbols';
 import { currentTheme } from '#/tui/theme';
 import type { SkillActivationTrigger } from '#/tui/types';
 
 const ARGS_PREVIEW_MAX = 200;
+
+function buildHead(name: string): string {
+  // Claude tool-line style: text-coloured '● ' bullet, dim label, bold name.
+  return (
+    currentTheme.fg('text', STATUS_BULLET) +
+    currentTheme.fg('textDim', 'Activated skill: ') +
+    currentTheme.bold(name)
+  );
+}
 
 export class SkillActivationComponent extends Container {
   private headText: Text;
@@ -34,10 +44,7 @@ export class SkillActivationComponent extends Container {
     this.name = name;
     this.args = args;
     this.addChild(new Spacer(1));
-    const head =
-      currentTheme.boldFg('primary', '▶ Activated skill: ') +
-      currentTheme.boldFg('roleUser', name);
-    this.headText = new Text(head, 0, 0);
+    this.headText = new Text(buildHead(name), 0, 0);
     this.addChild(this.headText);
     const trimmed = args?.trim() ?? '';
     if (trimmed.length > 0) {
@@ -49,10 +56,7 @@ export class SkillActivationComponent extends Container {
   }
 
   override invalidate(): void {
-    const head =
-      currentTheme.boldFg('primary', '▶ Activated skill: ') +
-      currentTheme.boldFg('roleUser', this.name);
-    this.headText.setText(head);
+    this.headText.setText(buildHead(this.name));
     if (this.previewText !== undefined && this.args !== undefined) {
       const trimmed = this.args.trim();
       const preview =

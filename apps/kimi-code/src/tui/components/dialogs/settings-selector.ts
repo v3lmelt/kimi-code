@@ -7,6 +7,7 @@ export type SettingsSelection =
   | 'permission'
   | 'experiments'
   | 'upgrade'
+  | 'thinking'
   | 'usage';
 
 const SETTINGS_OPTIONS: readonly ChoiceOption[] = [
@@ -41,6 +42,11 @@ const SETTINGS_OPTIONS: readonly ChoiceOption[] = [
     description: 'Turn automatic CLI updates on or off.',
   },
   {
+    value: 'thinking',
+    label: 'Thinking display',
+    description: 'Show the model reasoning inline or collapse it to "∴ Thinking…".',
+  },
+  {
     value: 'usage',
     label: 'Usage',
     description: 'Show session tokens, context window, and plan quotas.',
@@ -55,6 +61,7 @@ function isSettingsSelection(value: string): value is SettingsSelection {
     value === 'permission' ||
     value === 'experiments' ||
     value === 'upgrade' ||
+    value === 'thinking' ||
     value === 'usage'
   );
 }

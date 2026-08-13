@@ -93,6 +93,7 @@ export class ChoicePickerComponent extends Container implements Focusable {
       pageSize: opts.pageSize,
       initialIndex: Math.max(currentIdx, 0),
       searchable: opts.searchable === true,
+      onChange: () => this.bump(),
     });
   }
 
@@ -144,8 +145,8 @@ export class ChoicePickerComponent extends Container implements Focusable {
       searchable && view.query.length === 0 ? currentTheme.fg('textMuted', '  (type to search)') : '';
     const hintLines = hint.split(/\r?\n/);
     const lines: string[] = [
-      currentTheme.fg('primary', '─'.repeat(width)),
-      currentTheme.boldFg('primary', ` ${this.opts.title}`) + titleSuffix,
+      currentTheme.fg('border', '─'.repeat(width)),
+      currentTheme.boldFg('textStrong', ` ${this.opts.title}`) + titleSuffix,
     ];
     for (const hintLine of hintLines) {
       lines.push(
@@ -201,7 +202,7 @@ export class ChoicePickerComponent extends Container implements Focusable {
         ),
       );
     }
-    lines.push(currentTheme.fg('primary', '─'.repeat(width)));
+    lines.push(currentTheme.fg('border', '─'.repeat(width)));
     return lines.map((line) => truncateToWidth(line, width));
   }
 }
@@ -216,6 +217,6 @@ function optionLabelStyle(
       : (text) => currentTheme.fg('error', text);
   }
   return selected
-    ? (text) => currentTheme.boldFg('primary', text)
+    ? (text) => currentTheme.fg('primary', text)
     : (text) => currentTheme.fg('text', text);
 }

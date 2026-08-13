@@ -29,12 +29,12 @@ interface TrustPromptOption {
 const OPTIONS: readonly TrustPromptOption[] = [
   {
     value: 'trust',
-    label: 'Trust this folder',
+    label: 'Yes, I trust this folder',
     description: 'Enable project MCP servers. Remembered for this folder.',
   },
   {
     value: 'distrust',
-    label: "Don't trust",
+    label: 'No, exit',
     description: 'Exit Kimi Code. Asked again next launch.',
   },
 ];
@@ -66,11 +66,11 @@ export class TrustPromptComponent implements Component, Focusable {
   }
 
   render(width: number): string[] {
-    const rule = currentTheme.fg('primary', '─'.repeat(width));
+    const rule = currentTheme.fg('border', '─'.repeat(width));
     const lines = [
       rule,
-      currentTheme.boldFg('primary', ' Trust this folder?'),
-      currentTheme.fg('textMuted', ' ↑↓ navigate · Enter select · Esc exit'),
+      currentTheme.boldFg('textStrong', ' Trust this folder?'),
+      currentTheme.fg('textMuted', ' ↑↓ navigate · enter select · esc exit'),
       '',
       ...wrapTextWithAnsi(this.opts.workDir, Math.max(20, width - 2)).map(
         (line) => ` ${currentTheme.fg('textStrong', line)}`,
@@ -92,7 +92,7 @@ export class TrustPromptComponent implements Component, Focusable {
       const selected = i === this.selectedIndex;
       const pointer = selected ? SELECT_POINTER : ' ';
       const label = selected
-        ? currentTheme.boldFg('primary', option.label)
+        ? currentTheme.fg('primary', option.label)
         : currentTheme.fg('text', option.label);
       lines.push(currentTheme.fg(selected ? 'primary' : 'textDim', `  ${pointer} `) + label);
       for (const line of wrapTextWithAnsi(option.description, Math.max(20, width - 4))) {

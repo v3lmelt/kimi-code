@@ -484,7 +484,12 @@ export class SessionSubagentHost {
       try {
         providerManager?.resolveProviderConfig(binding.modelAlias);
       } catch (error) {
-        throw wrapSubagentModelError(error, binding.modelAlias, parent.config.modelAlias);
+        throw wrapSubagentModelError(
+          error,
+          binding.modelAlias,
+          parent.config.modelAlias,
+          this.session.kimiConfig?.secondaryModel?.model,
+        );
       }
     }
     return binding;

@@ -152,7 +152,7 @@ export class TodoPanelComponent implements Component {
     const c = currentTheme.palette;
     const lines: string[] = [
       chalk.hex(c.border)('─'.repeat(width)),
-      chalk.hex(c.primary).bold('  Todo'),
+      chalk.hex(c.primary).bold('  Todos'),
     ];
 
     if (this.expanded) {

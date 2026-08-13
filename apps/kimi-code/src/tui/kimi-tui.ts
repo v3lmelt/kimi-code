@@ -54,9 +54,10 @@ import { CacheHintController } from './controllers/cache-hint-controller';
 import { BannerComponent } from './components/chrome/banner';
 import { DeviceCodeBoxComponent } from './components/chrome/device-code-box';
 import { GutterContainer } from './components/chrome/gutter-container';
-import { MoonLoader, type SpinnerStyle } from './components/chrome/moon-loader';
+import { MoonLoader, type LoaderMode, type SpinnerStyle } from './components/chrome/moon-loader';
 import { WelcomeComponent } from './components/chrome/welcome';
 import { pickRandomWorkingTip } from './components/chrome/working-tips';
+import type { ToastOptions } from './components/chrome/toast';
 import {
   ApprovalPanelComponent,
   type ApprovalPanelResponse,
@@ -144,6 +145,7 @@ import { hasDispose, isExpandable } from './utils/component-capabilities';
 import { isDeadTerminalError } from './utils/dead-terminal';
 import { formatErrorMessage } from './utils/event-payload';
 import { pickForegroundTasks } from './utils/foreground-task';
+import { formatTurnUsage } from './utils/turn-usage';
 import { ImageAttachmentStore, type ImageAttachment } from './utils/image-attachment-store';
 import { extractMediaAttachments, rewriteMediaPlaceholders } from './utils/image-placeholder';
 import type { ExtractionResult } from './utils/image-placeholder';
@@ -246,6 +248,7 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     editorCommand: input.tuiConfig.editorCommand,
     disablePasteBurst: input.tuiConfig.disablePasteBurst,
     cacheExpiryHint: input.tuiConfig.cacheExpiryHint,
+    hideThinking: input.tuiConfig.hideThinking,
     notifications: input.tuiConfig.notifications,
     upgrade: input.tuiConfig.upgrade,
     statusLine: input.tuiConfig.statusLine,
@@ -447,6 +450,12 @@ export class KimiTUI {
     this.authFlow = new AuthFlowController(this);
     this.btwPanelController = new BtwPanelController(this);
     this.sessionEventHandler = new SessionEventHandler(this);
+    // Feed the footer's main-agent token counter the live streamed output-token
+    // estimate so it chases the estimate with its catch-up animation (the same
+    // value the activity spinner reads on each frame).
+    this.state.footer.setTokenEstimateProvider(() =>
+      this.sessionEventHandler.getEstimatedOutputTokens(),
+    );
     this.sessionReplay = new SessionReplayRenderer(this);
     this.tasksBrowserController = new TasksBrowserController(this);
     this.editorKeyboard = new EditorKeyboardController(this, this.imageStore);
@@ -689,9 +698,9 @@ export class KimiTUI {
     );
     const banner = new BannerComponent(this.state.appState.banner);
     if (welcomeIndex >= 0) {
-      this.state.transcriptContainer.children.splice(welcomeIndex + 1, 0, banner);
+      this.state.transcriptContainer.insertChild(welcomeIndex + 1, banner);
     } else {
-      this.state.transcriptContainer.children.unshift(banner);
+      this.state.transcriptContainer.insertChild(0, banner);
     }
     this.state.transcriptContainer.invalidate();
   }
@@ -1071,11 +1080,16 @@ export class KimiTUI {
     const { ui } = this.state;
     ui.clear();
     ui.addChild(this.state.transcriptContainer);
+    ui.addChild(this.state.previewContainer);
     ui.addChild(this.state.activityContainer);
     ui.addChild(this.state.todoPanelContainer);
     ui.addChild(this.state.queueContainer);
     ui.addChild(this.state.btwPanelContainer);
     ui.addChild(this.state.editorContainer);
+    // Toasts float between the input row and the footer chrome.
+    const toastWrap = new GutterContainer(CHROME_GUTTER, CHROME_GUTTER);
+    toastWrap.addChild(this.state.toastContainer);
+    ui.addChild(toastWrap);
     // Footer is mounted later (mountFooter), not here.
   }
 
@@ -2231,7 +2245,13 @@ export class KimiTUI {
         return component;
       }
       case 'thinking': {
-        const thinking = new ThinkingComponent(entry.content, true);
+        const thinking = new ThinkingComponent(
+          entry.content,
+          true,
+          'finalized',
+          undefined,
+          this.state.appState.hideThinking === true,
+        );
         if (this.state.toolOutputExpanded) thinking.setExpanded(true);
         return thinking;
       }
@@ -2266,8 +2286,10 @@ export class KimiTUI {
     }
   }
 
-  appendTranscriptEntry(entry: TranscriptEntry): void {
-    this.state.transcriptEntries.push(entry);
+  appendTranscriptEntry(entry: TranscriptEntry, options?: { push?: boolean }): void {
+    if (options?.push !== false) {
+      this.state.transcriptEntries.push(entry);
+    }
     const component = this.createTranscriptComponent(entry);
     if (component) {
       markTranscriptComponent(component, entry);
@@ -2635,6 +2657,10 @@ export class KimiTUI {
     children.splice(0, children.length, ...newChildren);
   }
 
+  showToast(text: string, opts?: ToastOptions): void {
+    this.state.toastContainer.push(text, opts);
+  }
+
   showStatus(message: string, color?: ColorToken): void {
     this.state.transcriptContainer.addChild(new StatusMessageComponent(message, color));
     this.state.ui.requestRender();
@@ -2734,7 +2760,7 @@ export class KimiTUI {
         this.state.ui.requestRender();
         return;
       case 'waiting': {
-        const spinner = this.ensureActivitySpinner('moon');
+        const spinner = this.ensureActivitySpinner('moon', '', undefined, 'waiting');
         this.syncAgentSwarmActivitySpinner(placeSpinnerInAgentSwarm ? spinner : undefined);
         if (placeSpinnerInAgentSwarm) break;
         this.state.activityContainer.addChild(
@@ -2747,13 +2773,27 @@ export class KimiTUI {
         break;
       }
       case 'thinking': {
-        this.stopActivitySpinner();
+        // Keep the moon spinner up during thinking so the status row can show
+        // the live `thinking` / `thought for Ns` text (the ThinkingComponent in
+        // the transcript still owns the expandable reasoning content).
+        const spinner = this.ensureActivitySpinner('moon', '', undefined, 'thinking');
         this.syncAgentSwarmActivitySpinner(undefined);
+        this.state.activityContainer.addChild(
+          new ActivityPaneComponent({
+            mode: 'thinking',
+            spinner,
+            tip: this.currentLoadingTip?.tip,
+          }),
+        );
         break;
       }
       case 'composing': {
-        const spinner = this.ensureActivitySpinner('braille', 'working...', (s) =>
-          currentTheme.fg('primary', s),
+        // No label: the loader shows its per-run Claude-style verb ('✶ Pondering…').
+        const spinner = this.ensureActivitySpinner(
+          'braille',
+          '',
+          (s) => currentTheme.fg('primary', s),
+          'composing',
         );
         this.syncAgentSwarmActivitySpinner(undefined);
         this.state.activityContainer.addChild(
@@ -2766,7 +2806,7 @@ export class KimiTUI {
         break;
       }
       case 'tool': {
-        const spinner = this.ensureActivitySpinner('moon');
+        const spinner = this.ensureActivitySpinner('moon', '', undefined, 'tool');
         this.syncAgentSwarmActivitySpinner(placeSpinnerInAgentSwarm ? spinner : undefined);
         if (placeSpinnerInAgentSwarm) break;
         this.state.activityContainer.addChild(
@@ -3053,13 +3093,33 @@ export class KimiTUI {
     style: SpinnerStyle,
     label = '',
     colorFn?: (s: string) => string,
+    mode: LoaderMode = 'waiting',
   ): MoonLoader {
     if (this.state.activitySpinner?.style !== style) {
       this.stopActivitySpinner();
     }
 
+    const wire = (instance: MoonLoader): void => {
+      instance.setMode(mode);
+      instance.setStallProvider(() => ({
+        lastActivityAtMs: this.sessionEventHandler.getLastActivityAtMs(),
+        hasActiveTools: this.state.livePane.mode === 'tool',
+      }));
+      instance.setThinkingStatusProvider(() => this.streamingUI.getThinkingStatus());
+      instance.setStatusProvider(() =>
+        formatTurnUsage(
+          this.state.appState.streamingPhase,
+          this.state.appState.turnUsage,
+          Date.now(),
+          this.sessionEventHandler.getEstimatedOutputTokens(),
+          this.streamingUI.getThinkingStatus(),
+        ),
+      );
+    };
+
     if (this.state.activitySpinner === null) {
       const instance = new MoonLoader(this.state.ui, style, colorFn, label);
+      wire(instance);
       this.state.activitySpinner = { instance, style };
       return instance;
     }
@@ -3068,6 +3128,7 @@ export class KimiTUI {
     if (colorFn !== undefined) {
       this.state.activitySpinner.instance.setColorFn(colorFn);
     }
+    wire(this.state.activitySpinner.instance);
     return this.state.activitySpinner.instance;
   }
 

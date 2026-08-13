@@ -50,11 +50,12 @@ export class QueuePaneComponent extends Container {
         const prompt = '$ ';
         const availableWidth = Math.max(1, width - visibleWidth(prefix) - visibleWidth(prompt));
         const truncated = truncateToWidth(singleLine, availableWidth, ELLIPSIS);
-        lines.push(accent(prefix) + shell(prompt + truncated));
+        lines.push(accent(prefix) + shell(prompt) + dim(truncated));
       } else {
         const availableWidth = Math.max(1, width - visibleWidth(prefix));
         const truncated = truncateToWidth(singleLine, availableWidth, ELLIPSIS);
-        lines.push(accent(prefix + truncated));
+        // Queued lines render dim behind the accent pointer, like Claude's queue.
+        lines.push(accent(prefix) + dim(truncated));
       }
     }
 

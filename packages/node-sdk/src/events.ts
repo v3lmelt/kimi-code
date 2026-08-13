@@ -28,6 +28,7 @@ export type {
   TurnEndedEvent,
   TurnStepStartedEvent,
   TurnStepCompletedEvent,
+  TurnStepUsageEvent,
   TurnStepRetryingEvent,
   TurnStepInterruptedEvent,
   TurnEndReason,

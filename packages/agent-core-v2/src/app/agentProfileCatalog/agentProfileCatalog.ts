@@ -43,7 +43,7 @@ import type { ISessionProcessRunner } from '#/session/process/processRunner';
 
 export const DEFAULT_AGENT_PROFILE_NAME = 'agent';
 
-export type AgentModelPreference = 'primary' | 'secondary';
+export type AgentModelPreference = 'primary' | 'secondary' | 'inherit' | (string & {});
 
 export interface AgentProfilePromptPrefixContext {
   readonly cwd: string;

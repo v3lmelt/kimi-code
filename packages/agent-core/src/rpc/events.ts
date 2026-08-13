@@ -46,6 +46,7 @@ export type {
   TurnStepInterruptedEvent,
   TurnStepRetryingEvent,
   TurnStepStartedEvent,
+  TurnStepUsageEvent,
   UsageStatus,
   WarningEvent,
 } from '@moonshot-ai/protocol';
