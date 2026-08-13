@@ -44,9 +44,9 @@ describe('ToolCallComponent', () => {
     );
 
     const out = strip(component.render(100).join('\n'));
-    expect(out).toContain(`${STATUS_BULLET}Used Read`);
-    expect(out).not.toContain(`\u23FA Used Read`);
-    expect(out).not.toContain(`${String.fromCodePoint(0x23fa, 0xfe0e)} Used Read`);
+    expect(out).toContain(`${STATUS_BULLET}Read(foo.ts)`);
+    expect(out).not.toContain('⏺');
+    expect(out).not.toContain(String.fromCodePoint(0x23fa, 0xfe0e));
   });
 
   describe('detach hint for long-running foreground Bash/Agent', () => {
@@ -186,7 +186,7 @@ describe('ToolCallComponent', () => {
     component.appendLiveOutput('line2\n');
 
     const out = strip(component.render(100).join('\n'));
-    expect(out).toContain('Running a command');
+    expect(out).toContain('Bash(printf output)');
     expect(out).toContain('line1');
     expect(out).toContain('line2');
   });
@@ -209,7 +209,7 @@ describe('ToolCallComponent', () => {
     });
 
     const out = strip(component.render(100).join('\n'));
-    expect(out).toContain('Ran a command');
+    expect(out).toContain('Bash(printf output)');
     expect(out).toContain('final-only');
     expect(out).not.toContain('streamed-only');
   });
@@ -226,7 +226,7 @@ describe('ToolCallComponent', () => {
       );
 
       const collapsed = strip(component.render(100).join('\n'));
-      expect(collapsed).toContain('Running a command');
+      expect(collapsed).toContain('Bash(echo step1');
       expect(collapsed).toContain('echo step1');
       expect(collapsed).toContain('echo step10');
       expect(collapsed).not.toContain('echo step11');
@@ -254,7 +254,7 @@ describe('ToolCallComponent', () => {
       // not collapse the card. The command is owned by buildCallPreview, so it
       // must appear exactly once — the result renderer no longer renders it.
       const out = strip(component.render(100).join('\n'));
-      expect(out).toContain('Ran a command');
+      expect(out).toContain('Bash(echo step1');
       expect(out).toContain('$ echo step1');
       expect(out).toContain('echo step10');
       expect(out).not.toContain('echo step11');
@@ -277,7 +277,7 @@ describe('ToolCallComponent', () => {
       // (owned by buildCallPreview) must still render so the card does not
       // collapse to just the header.
       const out = strip(component.render(100).join('\n'));
-      expect(out).toContain('Ran a command');
+      expect(out).toContain('Bash(mkdir -p a/b/c');
       expect(out).toContain('$ mkdir -p a/b/c');
       expect(out).toContain('echo done');
     });
@@ -300,7 +300,7 @@ describe('ToolCallComponent', () => {
     );
 
     const collapsed = strip(component.render(100).join('\n'));
-    expect(collapsed).toContain(`${STATUS_BULLET}Ran a command`);
+    expect(collapsed).toContain(`${STATUS_BULLET}Bash(echo hi)`);
     expect(collapsed).not.toContain('system-reminder');
     expect(collapsed).not.toContain('task tools');
 
@@ -663,7 +663,7 @@ describe('ToolCallComponent', () => {
     );
 
     const out = strip(component.render(100).join('\n'));
-    expect(out).toContain('Used EnterPlanMode');
+    expect(out).toContain(`${STATUS_BULLET}EnterPlanMode`);
     expect(out).not.toContain('Plan mode is now active');
     expect(out).not.toContain('Plan file:');
     expect(out).not.toContain('read-only tools');
@@ -892,7 +892,7 @@ describe('ToolCallComponent', () => {
     );
 
     const out = strip(component.render(100).join('\n'));
-    expect(out).toContain('Used Read');
+    expect(out).toContain('Read(foo.ts)');
     expect(out).toContain('· 3 lines');
   });
 
@@ -933,7 +933,7 @@ describe('ToolCallComponent', () => {
     const out = strip(component.render(100).join('\n'));
     const expectedReadPath =
       process.platform === 'win32' ? 'apps\\kimi-code\\src\\main.ts' : 'apps/kimi-code/src/main.ts';
-    expect(out).toContain(`Used Read (${expectedReadPath})`);
+    expect(out).toContain(`Read(${expectedReadPath})`);
     expect(out).not.toContain('/tmp/proj-a/apps');
     expect(component.getReadSnapshot().filePath).toBe(expectedReadPath);
   });
@@ -951,7 +951,7 @@ describe('ToolCallComponent', () => {
     );
 
     const out = strip(component.render(100).join('\n'));
-    expect(out).toContain('Using Read (/tmp/proj-ab/src/main.ts)');
+    expect(out).toContain('Read(/tmp/proj-ab/src/main.ts)');
     expect(component.getReadSnapshot().filePath).toBe('/tmp/proj-ab/src/main.ts');
   });
 
@@ -966,7 +966,7 @@ describe('ToolCallComponent', () => {
     );
 
     const out = strip(component.render(100).join('\n'));
-    expect(out).toContain('Using Read');
+    expect(out).toContain('Read(foo.ts)');
     expect(out).not.toContain('lines');
   });
 
@@ -1605,33 +1605,6 @@ describe('ToolCallComponent', () => {
     });
   });
 
-  it('scrolls the Write streaming preview to the last COMMAND_PREVIEW_LINES', () => {
-    const lines: string[] = [];
-    for (let i = 1; i <= 30; i++) lines.push(`line${String(i)}`);
-    const escaped = lines.join('\\n');
-    const component = new ToolCallComponent(
-      {
-        id: 'call_write_stream',
-        name: 'Write',
-        args: { file_path: 'foo.ts', content: lines.join('\n') },
-        streamingArguments: `{"file_path":"foo.ts","content":"${escaped}`,
-      },
-      undefined,
-    );
-
-    const out = strip(component.render(100).join('\n'));
-    expect(out).toContain('Using Write');
-    // Streaming preview caps at COMMAND_PREVIEW_LINES (10) and shows the tail.
-    expect(out).not.toContain('line1');
-    expect(out).not.toContain('line20');
-    expect(out).toContain('line21');
-    expect(out).toContain('line30');
-    // Line numbers should reflect actual file positions.
-    expect(out).toContain('  21');
-    expect(out).toContain('  30');
-    expect(out).not.toContain('ctrl+o to expand');
-  });
-
   it('switches a streaming tool call to Truncated when the step ended with max_tokens', () => {
     const lines: string[] = [];
     for (let i = 1; i <= 10; i++) lines.push(`line${String(i)}`);
@@ -1648,7 +1621,7 @@ describe('ToolCallComponent', () => {
     );
 
     const out = strip(component.render(100).join('\n'));
-    expect(out).toContain('Truncated Write');
+    expect(out).toContain(`${STATUS_BULLET}Write(foo.ts)`);
     expect(out).not.toContain('Preparing Write');
     expect(out).toContain('Tool call arguments truncated by max_tokens');
     // The live argument preview must NOT render once the call is
@@ -1656,45 +1629,6 @@ describe('ToolCallComponent', () => {
     // was the original "preparing write" bug.
     expect(out).not.toContain('line1');
     expect(out).not.toContain('line10');
-  });
-
-  it('renders a stable Edit progress placeholder during the streaming delta window', () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(4000);
-    const oldLines: string[] = [];
-    const newLines: string[] = [];
-    for (let i = 1; i <= 20; i++) {
-      oldLines.push(`old${String(i)}`);
-      newLines.push(`new${String(i)}`);
-    }
-    const oldEscaped = oldLines.join('\\n');
-    const newEscaped = newLines.join('\\n');
-    const streaming = `{"file_path":"foo.ts","old_string":"${oldEscaped}","new_string":"${newEscaped}`;
-    const component = new ToolCallComponent(
-      {
-        id: 'call_edit_stream',
-        name: 'Edit',
-        args: {
-          file_path: 'foo.ts',
-          old_string: oldLines.join('\n'),
-          new_string: newLines.join('\n'),
-        },
-        streamingArguments: streaming,
-        streamingStartedAtMs: 0,
-      },
-      undefined,
-    );
-
-    const out = strip(component.render(100).join('\n'));
-    expect(out).toContain('Using Edit');
-    expect(out).toContain('foo.ts');
-    expect(out).toContain('Preparing changes for foo.ts...');
-    expect(out).toContain('4s elapsed');
-    expect(out).toMatch(/\d+(?:\.\d+)? (?:B|KB|MB)/);
-    expect(out).not.toContain('old20');
-    expect(out).not.toContain('new20');
-    expect(out).not.toMatch(/^\s*\d+\s+[+-]\s/m);
-    expect(out).not.toContain('ctrl+o to expand');
   });
 
   it('caps the Write preview between finalized args and result to keep transcript height stable', () => {
@@ -1725,20 +1659,20 @@ describe('ToolCallComponent', () => {
     expect(out).toContain('ctrl+o to expand');
   });
 
-  it('snaps a long Write preview to the collapsed cap when the result arrives', () => {
+  it('keeps a long Write preview capped across the result boundary', () => {
     const lines: string[] = [];
     for (let i = 1; i <= 30; i++) lines.push(`line${String(i)}`);
-    const escaped = lines.join('\\n');
     const component = new ToolCallComponent(
       {
         id: 'call_write_snap',
         name: 'Write',
         args: { file_path: 'big.txt', content: lines.join('\n') },
-        streamingArguments: `{"file_path":"big.txt","content":"${escaped}"}`,
       },
       undefined,
     );
-    expect(strip(component.render(100).join('\n'))).toContain('line25');
+    // No streaming tail: Write content is capped from the moment args finalize.
+    expect(strip(component.render(100).join('\n'))).toContain('line1');
+    expect(strip(component.render(100).join('\n'))).not.toContain('line25');
 
     component.setResult({
       tool_call_id: 'call_write_snap',
@@ -1764,7 +1698,7 @@ describe('ToolCallComponent', () => {
       undefined,
     );
     const before = strip(component.render(100).join('\n'));
-    expect(before).toContain('Using Write');
+    expect(before).toContain(`${STATUS_BULLET}Write`);
     expect(before).not.toContain('foo.ts');
 
     // Later delta: file_path is now parseable from streamingArguments.
@@ -1804,24 +1738,24 @@ describe('ToolCallComponent', () => {
     expect(out).toMatch(/^\s*2\s+b\s*$/m);
   });
 
-  it('builds the Edit diff when finalized args arrive after streaming', () => {
+  it('builds the Edit diff only after the result arrives', () => {
     const component = new ToolCallComponent(
       {
         id: 'call_edit_seq',
         name: 'Edit',
-        args: { file_path: 'foo.ts' },
-        streamingArguments: '{"file_path":"foo.ts","old_string":"a\\nb","new_string":"a\\nB',
-        streamingStartedAtMs: Date.now(),
+        args: { file_path: 'foo.ts', old_string: 'a\nb', new_string: 'a\nB' },
       },
       undefined,
     );
-    expect(strip(component.render(100).join('\n'))).toContain('Preparing changes');
-    expect(strip(component.render(100).join('\n'))).not.toMatch(/^\s*\d+\s+[+-]\s/m);
+    // No diff before the result lands — the card is just header + blinking bullet.
+    const before = strip(component.render(100).join('\n'));
+    expect(before).toContain('Edit(foo.ts)');
+    expect(before).not.toMatch(/^\s*\d+\s+[+-]\s/m);
 
-    component.updateToolCall({
-      id: 'call_edit_seq',
-      name: 'Edit',
-      args: { file_path: 'foo.ts', old_string: 'a\nb', new_string: 'a\nB' },
+    component.setResult({
+      tool_call_id: 'call_edit_seq',
+      output: 'Replaced 1 occurrence in foo.ts',
+      is_error: false,
     });
     const out = strip(component.render(100).join('\n'));
     expect(out).toContain('foo.ts');
@@ -1829,7 +1763,7 @@ describe('ToolCallComponent', () => {
     expect(out).toMatch(/^\s*2\s+\+ B\s*$/m);
   });
 
-  it('refreshes and stops the Edit streaming progress timer', () => {
+  it('blinks the header bullet while running and stops on result', () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const ui = { requestRender: vi.fn() };
@@ -1837,42 +1771,40 @@ describe('ToolCallComponent', () => {
       {
         id: 'call_edit_timer',
         name: 'Edit',
-        args: { file_path: 'foo.ts' },
-        streamingArguments: '{"file_path":"foo.ts","old_string":"a',
-        streamingStartedAtMs: 0,
+        args: { file_path: 'foo.ts', old_string: 'a', new_string: 'b' },
       },
       undefined,
       ui as never,
     );
 
-    expect(strip(component.render(100).join('\n'))).toContain('0s elapsed');
-    vi.advanceTimersByTime(1000);
-    expect(ui.requestRender).toHaveBeenCalled();
-    expect(strip(component.render(100).join('\n'))).toContain('1s elapsed');
-
+    // Running with no result → the blink timer is armed and repaints the header.
     ui.requestRender.mockClear();
+    vi.advanceTimersByTime(700);
+    expect(ui.requestRender).toHaveBeenCalled();
+
+    // Result stops the blink timer.
     component.setResult({
       tool_call_id: 'call_edit_timer',
       output: 'Replaced 1 occurrence in foo.ts',
       is_error: false,
     });
-    vi.advanceTimersByTime(1000);
+    ui.requestRender.mockClear();
+    vi.advanceTimersByTime(700);
     expect(ui.requestRender).not.toHaveBeenCalled();
 
+    // dispose also clears the blink timer.
     const componentToDispose = new ToolCallComponent(
       {
         id: 'call_edit_dispose',
         name: 'Edit',
-        args: { file_path: 'bar.ts' },
-        streamingArguments: '{"file_path":"bar.ts","old_string":"a',
-        streamingStartedAtMs: 0,
+        args: { file_path: 'bar.ts', old_string: 'a', new_string: 'b' },
       },
       undefined,
       ui as never,
     );
     ui.requestRender.mockClear();
     componentToDispose.dispose();
-    vi.advanceTimersByTime(1000);
+    vi.advanceTimersByTime(700);
     expect(ui.requestRender).not.toHaveBeenCalled();
   });
 

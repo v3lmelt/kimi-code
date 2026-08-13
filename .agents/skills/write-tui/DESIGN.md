@@ -17,7 +17,7 @@
 | 开关项状态：开 | 名称后 `  enabled`（`success`） | `chalk.hex(colors.success)` |
 | 开关项状态：关 | 名称后 `  disabled`（`textDim`） | `chalk.hex(colors.textDim)` |
 | 列表 / 选择器边框 | 平直 `─`（`primary`），仅顶/底各一条 | — |
-| 输入框边框 | 圆角 `╭ ╮ ╰ ╯`（`primary`） | — |
+| 输入框边框 | 平直 `─`（`border`），仅顶/底各一条，无圆角无侧栏；bash 模式 `shellMode` | — |
 
 - **不要**自造选中指针（`>` / `▶` / `→` 等）；统一用 `SELECT_POINTER`。
 - **不要**用 `● ` / `(current)` 表示当前项；统一用 `CURRENT_MARK`（行尾、`success`、前置一个空格）。

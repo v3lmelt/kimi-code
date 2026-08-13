@@ -64,6 +64,7 @@ export async function applyReloadedTuiConfig(
     editorCommand: config.editorCommand,
     disablePasteBurst: config.disablePasteBurst,
     cacheExpiryHint: config.cacheExpiryHint,
+    hideThinking: config.hideThinking,
     notifications: config.notifications,
     upgrade: config.upgrade,
     statusLine: config.statusLine,

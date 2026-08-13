@@ -1,9 +1,10 @@
-import type { Component } from "../tui.ts";
+import { bumpVersion, type Component } from "../tui.ts";
 
 /**
  * Spacer component that renders empty lines
  */
 export class Spacer implements Component {
+	version = 0;
 	private lines: number;
 
 	constructor(lines: number = 1) {
@@ -12,10 +13,11 @@ export class Spacer implements Component {
 
 	setLines(lines: number): void {
 		this.lines = lines;
+		bumpVersion(this);
 	}
 
 	invalidate(): void {
-		// No cached state to invalidate currently
+		bumpVersion(this);
 	}
 
 	render(_width: number): string[] {

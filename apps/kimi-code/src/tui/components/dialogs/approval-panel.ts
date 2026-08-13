@@ -16,6 +16,7 @@ import {
   wrapTextWithAnsi,
 } from '@moonshot-ai/pi-tui';
 import { currentTheme } from '#/tui/theme';
+import { SELECT_POINTER } from '#/tui/constant/symbols';
 import { highlightLines, langFromPath } from '#/tui/components/media/code-highlight';
 import { renderDiffLinesClustered } from '#/tui/components/media/diff-preview';
 import type {
@@ -325,17 +326,15 @@ export class ApprovalPanelComponent extends Container implements Focusable {
     const blockStyles = makeBlockStyles();
     const borderColor = (text: string) => currentTheme.fg('borderFocus', text);
     const borderColorBold = (text: string) => currentTheme.boldFg('borderFocus', text);
-    const selectColorBold = (text: string) => currentTheme.boldFg('accent', text);
+    const pointer = (text: string) => currentTheme.fg('primary', text);
     const dim = (text: string) => currentTheme.fg('textDim', text);
     const strong = (text: string) => currentTheme.fg('textStrong', text);
+    const text = (t: string) => currentTheme.fg('text', t);
     const horizontalBar = borderColor('─'.repeat(width));
     const indent = (s: string): string => `  ${s}`;
 
     const title = headerFor(data.tool_name);
-    const lines: string[] = [
-      horizontalBar,
-      indent(`${borderColorBold('▶')} ${borderColorBold(title)}`),
-    ];
+    const lines: string[] = [horizontalBar, indent(borderColorBold(title))];
 
     const dedupedBlocks = data.display.filter(
       (block) => !isDuplicateBriefBlock(block, data.description),
@@ -375,9 +374,9 @@ export class ApprovalPanelComponent extends Container implements Focusable {
       if (this.feedbackMode && option.requires_feedback === true && isSelected) {
         lines.push(indent(this.renderInlineFeedbackLine(width - 2, labelWithNum)));
       } else if (isSelected) {
-        lines.push(indent(`${selectColorBold('▶')} ${selectColorBold(labelWithNum)}`));
+        lines.push(indent(`${pointer(SELECT_POINTER)} ${strong(labelWithNum)}`));
       } else {
-        lines.push(indent(strong(`  ${labelWithNum}`)));
+        lines.push(indent(text(`  ${labelWithNum}`)));
       }
 
       // Optional helper text under the label, aligned past the pointer/number.
@@ -395,18 +394,11 @@ export class ApprovalPanelComponent extends Container implements Focusable {
 
     lines.push('');
     if (this.feedbackMode) {
-      lines.push(indent(dim('Type feedback · ↵ submit.')));
+      lines.push(indent(dim('type feedback · enter submit')));
     } else {
       const expandHint = hasPreviewable ? ' · ctrl+e preview' : '';
-      lines.push(
-        indent(
-          dim(
-            `↑/↓ select · ${buildNumericHint(data.choices.length)} choose · ↵ confirm${expandHint}`,
-          ),
-        ),
-      );
+      lines.push(indent(dim(`↑↓ navigate · enter confirm · esc cancel${expandHint}`)));
     }
-    lines.push(horizontalBar);
 
     return lines.map((line) => truncateToWidth(line, width));
   }
@@ -438,10 +430,17 @@ export class ApprovalPanelComponent extends Container implements Focusable {
   }
 
   private renderInlineFeedbackLine(width: number, labelWithNum: string): string {
-    const prefix = `${currentTheme.boldFg('accent', '▶')} ${currentTheme.boldFg('accent', labelWithNum)}  `;
+    const prefix = `${currentTheme.fg('primary', SELECT_POINTER)} ${currentTheme.fg('textStrong', labelWithNum)}  `;
     const inputWidth = Math.max(4, width - visibleWidth(prefix) + 2);
     const inputLine = this.feedbackInput.render(inputWidth)[0] ?? '> ';
     const inlineInput = inputLine.startsWith('> ') ? inputLine.slice(2) : inputLine;
+    if (this.feedbackInput.getValue().length === 0) {
+      const placeholder =
+        this.choiceAt(this.selectedIndex)?.response === 'rejected'
+          ? 'tell Kimi what to do differently'
+          : 'tell Kimi what to do next';
+      return prefix + inlineInput.trimEnd() + currentTheme.fg('textDim', placeholder);
+    }
     return prefix + inlineInput;
   }
 
@@ -449,9 +448,4 @@ export class ApprovalPanelComponent extends Container implements Focusable {
     super.invalidate();
     this.feedbackInput.invalidate();
   }
-}
-
-function buildNumericHint(count: number): string {
-  if (count <= 0) return '↵';
-  return Array.from({ length: Math.min(count, 9) }, (_, idx) => String(idx + 1)).join('/');
 }

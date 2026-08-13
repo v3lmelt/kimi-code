@@ -7,7 +7,7 @@
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 
-import { Markdown, truncateToWidth, visibleWidth, type Component, type MarkdownTheme } from '@moonshot-ai/pi-tui';
+import { bumpVersion, Markdown, truncateToWidth, visibleWidth, type Component, type MarkdownTheme } from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
 
 import { toTerminalHyperlink } from '#/utils/terminal-hyperlink';
@@ -25,6 +25,7 @@ export interface PlanBoxOptions {
 }
 
 export class PlanBoxComponent implements Component {
+  version = 0;
   private readonly markdown: Markdown;
   private readonly status: PlanBoxOptions['status'];
   private cachedWidth: number | undefined;
@@ -49,6 +50,7 @@ export class PlanBoxComponent implements Component {
     this.cachedWidth = undefined;
     this.cachedLines = undefined;
     this.markdown.invalidate?.();
+    bumpVersion(this);
   }
 
   render(width: number): string[] {

@@ -3,6 +3,7 @@ import {
   isContentPart,
   isToolCall,
   isToolCallPart,
+  isUsagePart,
   mergeInPlace,
   type Message,
   type StreamedMessagePart,
@@ -157,6 +158,12 @@ export async function generate(
       if (callbacks?.onMessagePart !== undefined) {
         await callbacks.onMessagePart(deepCopyPart(part));
         await throwIfAborted(options?.signal, stream);
+      }
+
+      // Usage parts are forwarded to the raw-part callback above but never
+      // merge into the message; skip the merge/flush machinery for them.
+      if (isUsagePart(part)) {
+        continue;
       }
 
       // Index-based routing for parallel tool call argument deltas.

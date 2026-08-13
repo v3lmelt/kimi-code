@@ -1,6 +1,7 @@
 import type { Component } from '@moonshot-ai/pi-tui';
-import { Container, Text } from '@moonshot-ai/pi-tui';
+import { Container, Text, visibleWidth } from '@moonshot-ai/pi-tui';
 
+import { RESPONSE_GUTTER } from '#/tui/constant/symbols';
 import { currentTheme } from '#/tui/theme';
 import type { ToolCallBlockData, ToolResultBlockData } from '#/tui/types';
 
@@ -22,6 +23,29 @@ export interface ShellExecutionOptions {
   readonly resultPreviewLines?: number;
   readonly tailOutput?: boolean;
   readonly expandHint?: boolean;
+}
+
+/**
+ * Claude Code-style response gutter: the first output line gets the dim
+ * '  ⎿  ' marker, continuation lines align under it in a 5-column gutter.
+ */
+class GutteredOutputComponent implements Component {
+  private readonly gutterWidth = visibleWidth(RESPONSE_GUTTER);
+
+  constructor(private readonly inner: TruncatedOutputComponent) {}
+
+  invalidate(): void {
+    this.inner.invalidate();
+  }
+
+  render(width: number): string[] {
+    const lines = this.inner.render(Math.max(1, width - this.gutterWidth));
+    return lines.map((line, i) =>
+      i === 0
+        ? currentTheme.dim(RESPONSE_GUTTER) + line
+        : ' '.repeat(this.gutterWidth) + line,
+    );
+  }
 }
 
 export class ShellExecutionComponent extends Container {
@@ -51,7 +75,7 @@ export class ShellExecutionComponent extends Container {
       // Distinguish the command (input) from the result (output): the `$`
       // prompt uses the dedicated shell-mode hue, the command body uses
       // `textDim`, and the result below is rendered one step dimmer in
-      // `textMuted` so the two stay separable without a connecting glyph.
+      // `textMuted` under the ⎿ gutter so the two stay separable.
       const text =
         i === 0
           ? currentTheme.fg('shellMode', '$ ') + currentTheme.dim(line)
@@ -69,14 +93,17 @@ export class ShellExecutionComponent extends Container {
   ): void {
     if (!result.output) return;
     this.addChild(
-      new TruncatedOutputComponent(result.output, {
-        expanded,
-        isError: result.is_error ?? false,
-        maxLines: previewLines,
-        tail: tailOutput,
-        expandHint,
-        color: 'textMuted',
-      }),
+      new GutteredOutputComponent(
+        new TruncatedOutputComponent(result.output, {
+          expanded,
+          isError: result.is_error ?? false,
+          maxLines: previewLines,
+          tail: tailOutput,
+          expandHint,
+          color: 'textMuted',
+          indent: 0,
+        }),
+      ),
     );
   }
 }

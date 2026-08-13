@@ -90,16 +90,21 @@ describe('UserMessageComponent', () => {
     expect(imageLine).toContain('\u001B\\'); // intact Kitty terminator
   });
 
-  it('omits the sparkles bullet when an empty bullet is provided', () => {
+  it('renders on a full-width background bar without a bullet glyph', () => {
     setCapabilities({ images: null, trueColor: true, hyperlinks: true });
 
-    const withBullet = stripAnsi(new UserMessageComponent('hello', []).render(80).join('\n'));
-    expect(withBullet).toContain('✨');
-    expect(withBullet).toContain('hello');
+    const withTextLines = new UserMessageComponent('hello', []).render(80);
+    const withText = stripAnsi(withTextLines.join('\n'));
+    expect(withText).not.toContain('✨');
+    expect(withText).toContain('hello');
+    // The background bar pads the content line to the full render width.
+    const textLine = withTextLines.find((l) => l.includes('hello'));
+    expect(visibleWidth(textLine ?? '')).toBe(80);
 
     const lines = new UserMessageComponent('$ ls', [], '').render(80).map(stripAnsi);
     const contentLine = lines.find((l) => l.includes('$ ls'));
     expect(contentLine).toBeDefined();
+    // No bullet glyph anywhere — the bar itself is the user marker.
     expect(stripAnsi(lines.join('\n'))).not.toContain('✨');
     // The `$` sits at the leading column where the bullet used to be.
     expect(contentLine?.startsWith('$ ls')).toBe(true);

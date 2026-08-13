@@ -8,6 +8,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import { CustomEditor } from '#/tui/components/editor/custom-editor';
 import { FileMentionProvider } from '#/tui/components/editor/file-mention-provider';
+import { currentTheme } from '#/tui/theme';
 
 function makeEditor(): CustomEditor {
   const tui = {
@@ -640,31 +641,38 @@ describe('CustomEditor shortcut telemetry hooks', () => {
   });
 });
 
-describe('CustomEditor bash mode border label', () => {
+describe('CustomEditor bash mode frame', () => {
   // oxlint-disable-next-line no-control-regex -- ESC (\u001B) is required to match ANSI SGR escape sequences
   const stripAnsi = (s: string): string => s.replaceAll(/\u001B\[[0-9;]*m/g, '');
 
-  it('shows "! shell mode" on the top border in bash mode', () => {
-    const editor = makeEditor();
-    editor.inputMode = 'bash';
-    const top = stripAnsi(editor.render(90)[0] ?? '');
-    expect(top.startsWith('╭')).toBe(true);
-    expect(top).toContain('! shell mode');
-    expect(top.endsWith('╮')).toBe(true);
-  });
-
-  it('does not show the shell mode label in prompt mode', () => {
-    const editor = makeEditor();
-    const top = stripAnsi(editor.render(90)[0] ?? '');
-    expect(top).not.toContain('! shell mode');
-  });
-
-  it('keeps the top border at full width when the label is present', () => {
+  it('renders the input between plain ─ rules with no corners or label in bash mode', () => {
     const editor = makeEditor();
     editor.inputMode = 'bash';
     const width = 90;
-    const top = stripAnsi(editor.render(width)[0] ?? '');
-    expect(top).toHaveLength(width);
+    const lines = editor.render(width).map(stripAnsi);
+    expect(lines[0]).toBe('─'.repeat(width));
+    expect(lines.at(-1)).toBe('─'.repeat(width));
+    expect(lines.join('\n')).not.toContain('! shell mode');
+  });
+
+  it('paints the bash "!" prompt with the shellMode colour', () => {
+    const editor = makeEditor();
+    editor.inputMode = 'bash';
+    const content = editor.render(90)[1] ?? '';
+    expect(content).toContain(currentTheme.fg('shellMode', '!'));
+  });
+
+  it('renders plain ─ rules with no shell-mode label in prompt mode', () => {
+    const editor = makeEditor();
+    const lines = editor.render(90).map(stripAnsi);
+    expect(lines[0]).toBe('─'.repeat(90));
+    expect(lines.join('\n')).not.toContain('! shell mode');
+  });
+
+  it('shows the ❯ prompt on the first content line in prompt mode', () => {
+    const editor = makeEditor();
+    const content = stripAnsi(editor.render(90)[1] ?? '');
+    expect(content).toContain('❯');
   });
 });
 

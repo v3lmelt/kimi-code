@@ -1,4 +1,4 @@
-import { Text, truncateToWidth, type Component } from '@moonshot-ai/pi-tui';
+import { bumpVersion, Text, truncateToWidth, type Component } from '@moonshot-ai/pi-tui';
 
 import { MESSAGE_INDENT } from '#/tui/constant/rendering';
 import { FAILURE_MARK, STATUS_BULLET } from '#/tui/constant/symbols';
@@ -7,9 +7,12 @@ import type { ColorPalette } from '#/tui/theme/colors';
 import type { BackgroundAgentStatusData } from '#/tui/types';
 
 export class BackgroundAgentStatusComponent implements Component {
+  version = 0;
   constructor(private readonly data: BackgroundAgentStatusData) {}
 
-  invalidate(): void {}
+  invalidate(): void {
+    bumpVersion(this);
+  }
 
   render(width: number): string[] {
     const safeWidth = Math.max(0, width);

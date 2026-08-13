@@ -46,6 +46,10 @@ import {
   subagentDisplayModel,
   wrapSubagentModelError,
 } from '#/session/subagent/configSection';
+import {
+  SECONDARY_MODEL_SECTION,
+  type SecondaryModelConfig,
+} from '#/app/kosongConfig/configSection';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionMetadata, type AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionProcessRunner } from '#/session/process/processRunner';
@@ -177,7 +181,12 @@ export class SessionSwarmService implements ISessionSwarmService {
         labels: subagentLabels(callerAgentId, { swarmItem: options.swarmItem }),
       });
     } catch (error) {
-      throw wrapSubagentModelError(error, binding.model, callerData.modelAlias);
+      throw wrapSubagentModelError(
+        error,
+        binding.model,
+        callerData.modelAlias,
+        this.config.get<SecondaryModelConfig | undefined>(SECONDARY_MODEL_SECTION)?.model,
+      );
     }
     child.accessor
       .get(IAgentPermissionModeService)

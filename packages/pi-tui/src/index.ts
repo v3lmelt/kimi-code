@@ -97,11 +97,13 @@ export {
 	type TerminalCapabilities,
 } from "./terminal-image.ts";
 export {
+	bumpVersion,
 	type Component,
 	Container,
 	CURSOR_MARKER,
 	type Focusable,
 	isFocusable,
+	isVersionCacheEnabled,
 	type OverlayAnchor,
 	type OverlayHandle,
 	type OverlayMargin,

@@ -33,8 +33,9 @@ describe('TUI config', () => {
     expect(result).toEqual(DEFAULT_TUI_CONFIG);
     const text = readFileSync(filePath, 'utf-8');
     expect(text).toContain('Client preferences for kimi-code.');
-    expect(text).toContain('theme = "auto"');
+    expect(text).toContain('theme = "claude"');
     expect(text).toContain('cache_expiry_hint = true');
+    expect(text).toContain('hide_thinking = false');
     expect(text).toContain('command = ""');
     expect(text).toContain('[upgrade]');
     expect(text).toContain('auto_install = true');
@@ -62,6 +63,7 @@ auto_install = false
       theme: 'light',
       disablePasteBurst: false,
       cacheExpiryHint: true,
+      hideThinking: false,
       editorCommand: 'code --wait',
       notifications: { enabled: false, condition: 'always' },
       upgrade: { autoInstall: false },
@@ -87,6 +89,15 @@ cache_expiry_hint = false
     expect(config.cacheExpiryHint).toBe(false);
   });
 
+  it('parses hide_thinking', () => {
+    const config = parseTuiConfig(`
+theme = "dark"
+hide_thinking = true
+`);
+
+    expect(config.hideThinking).toBe(true);
+  });
+
   it('normalizes an empty editor command to auto-detect', () => {
     const config = parseTuiConfig(`
 [editor]
@@ -94,9 +105,10 @@ command = "   "
 `);
 
     expect(config).toEqual({
-      theme: 'auto',
+      theme: 'claude',
       disablePasteBurst: false,
       cacheExpiryHint: true,
+      hideThinking: false,
       editorCommand: null,
       notifications: { enabled: true, condition: 'unfocused' },
       upgrade: { autoInstall: true },
@@ -131,6 +143,7 @@ command = "   "
         theme: 'light',
         disablePasteBurst: false,
         cacheExpiryHint: true,
+        hideThinking: true,
         editorCommand: 'vim',
         notifications: { enabled: false, condition: 'always' },
         upgrade: { autoInstall: false },
@@ -143,6 +156,7 @@ command = "   "
       theme: 'light',
       disablePasteBurst: false,
       cacheExpiryHint: true,
+      hideThinking: true,
       editorCommand: 'vim',
       notifications: { enabled: false, condition: 'always' },
       upgrade: { autoInstall: false },

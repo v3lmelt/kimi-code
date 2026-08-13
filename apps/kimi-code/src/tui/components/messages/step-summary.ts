@@ -1,4 +1,4 @@
-import type { Component } from '@moonshot-ai/pi-tui';
+import { bumpVersion, type Component } from '@moonshot-ai/pi-tui';
 
 import { currentTheme } from '#/tui/theme';
 
@@ -9,6 +9,7 @@ import { currentTheme } from '#/tui/theme';
  * `… thinking 5 times, call 50 tools, 12 messages`.
  */
 export class StepSummaryComponent implements Component {
+  version = 0;
   private thinking = 0;
   private tool = 0;
   private message = 0;
@@ -21,9 +22,12 @@ export class StepSummaryComponent implements Component {
     this.thinking += thinking;
     this.tool += tool;
     this.message += message;
+    bumpVersion(this);
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    bumpVersion(this);
+  }
 
   render(_width: number): string[] {
     const parts: string[] = [];

@@ -179,7 +179,7 @@ describe('e2e: kimi adapter', () => {
         inputCacheRead: 2,
         inputCacheCreation: 0,
       });
-      expect(result.parts).toHaveLength(4);
+      expect(result.parts).toHaveLength(5);
       expect(result.parts[0]).toMatchObject({ type: 'think', think: 'Let me think. ' });
       expect(result.parts[1]).toMatchObject({ type: 'text', text: 'All set. ' });
       expect(result.parts[2]).toMatchObject({
@@ -194,6 +194,10 @@ describe('e2e: kimi adapter', () => {
         argumentsPart: 'Shanghai"}',
       });
       expect(result.parts[3]).toHaveProperty('index', 0);
+      expect(result.parts[4]).toMatchObject({
+        type: 'usage',
+        usage: { inputOther: 10, output: 6, inputCacheRead: 2, inputCacheCreation: 0 },
+      });
     });
   });
 

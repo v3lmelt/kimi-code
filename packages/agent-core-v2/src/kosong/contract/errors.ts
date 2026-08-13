@@ -7,7 +7,9 @@
  * status-error normalizer every dialect's error converter funnels through.
  * Alongside the wire-status classes, `VideoUploadUnsupportedError` marks the
  * by-design capability gap (provider has no video upload hook) so callers
- * can tell it apart from an upload that failed at runtime.
+ * can tell it apart from an upload that failed at runtime, and
+ * `MissingApiKeyError` marks the deterministic client-side credential gap
+ * (no API key available) so the retry verdict fails it fast.
  *
  * The family is born-coded: every class extends `Error2` and computes its
  * wire code (`provider.*` / `context.overflow`) at construction from the
@@ -66,6 +68,20 @@ export class ChatProviderError extends Error2 {
     options?: Error2Options,
   ) {
     super(code, message, { ...options, name: 'ChatProviderError' });
+  }
+}
+
+/**
+ * Client-side credential gap: no API key was available for the request (no
+ * constructor key, no per-request auth, no OAuth login). Deterministic — the
+ * identical request can never succeed — so the retry verdict fails it fast
+ * instead of burning the whole retry budget on backoff. Coded
+ * `provider.auth_error` alongside server-side credential rejections.
+ */
+export class MissingApiKeyError extends ChatProviderError {
+  constructor(message: string) {
+    super(message, PROVIDER_AUTH_ERROR_CODE);
+    this.name = 'MissingApiKeyError';
   }
 }
 
@@ -257,6 +273,11 @@ export function isImageFormatError(error: unknown): boolean {
 }
 
 export function isRetryableGenerateError(error: unknown): boolean {
+  // A missing credential is deterministic: retrying the identical request can
+  // never succeed, so it fails fast instead of burning the retry budget.
+  if (error instanceof MissingApiKeyError) {
+    return false;
+  }
   if (error instanceof APIConnectionError || error instanceof APITimeoutError) {
     return true;
   }

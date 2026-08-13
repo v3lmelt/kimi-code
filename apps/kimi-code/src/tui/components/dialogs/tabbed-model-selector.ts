@@ -89,15 +89,21 @@ export class TabbedModelSelectorComponent extends Container implements Focusable
       if (matchesKey(data, Key.tab)) {
         this.activeIndex = (this.activeIndex + 1) % this.tabs.length;
         this.syncFocusToActive();
+        this.bump();
         return;
       }
       if (matchesKey(data, Key.shift('tab'))) {
         this.activeIndex = (this.activeIndex - 1 + this.tabs.length) % this.tabs.length;
         this.syncFocusToActive();
+        this.bump();
         return;
       }
     }
     this.tabs[this.activeIndex]?.selector.handleInput(data);
+    // The inner selectors are not registered as children (render() composes
+    // them manually), so their bump() never reaches this component — bump here
+    // or a parent container would keep serving its cached lines.
+    this.bump();
   }
 
   override render(width: number): string[] {

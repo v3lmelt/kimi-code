@@ -2,20 +2,20 @@
  * Footer/status bar — multi-line status display at the bottom of the TUI.
  *
  * Layout:
- *   Line 1: [yolo] [plan] <model> <cwd>  <git-badge>  <shortcut hints>
+ *   Line 1: <mode pills> <model> <cwd>  <git-badge>  <esc to interrupt / ? for shortcuts>
  *   Line 2: context: N% (tokens/max)
  */
 
-import type { Component } from '@moonshot-ai/pi-tui';
+import { bumpVersion, type Component } from '@moonshot-ai/pi-tui';
 import { truncateToWidth, visibleWidth } from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
 import { effectiveModelAlias } from '@moonshot-ai/kimi-code-sdk';
 
 import { ALL_TIPS, type ToolbarTip } from '#/tui/constant/tips';
 import { isRainbowDancing, renderDanceFooterModel } from '#/tui/easter-eggs/dance';
-import { currentTheme } from '#/tui/theme';
+import { AUTO_ACCEPT_DARK, AUTO_ACCEPT_LIGHT, currentTheme } from '#/tui/theme';
 import type { ColorPalette } from '#/tui/theme/colors';
-import type { AppState } from '#/tui/types';
+import type { AppState, RunningAgentSummary } from '#/tui/types';
 import {
   StatusLineCommandRunner,
   type StatusLinePayload,
@@ -32,6 +32,7 @@ import {
   usagePercent,
   usagePercentFromRatio,
 } from '#/utils/usage/usage-format';
+import { turnOutputTokens } from '#/tui/utils/turn-usage';
 
 const DEFAULT_STATUS_LINE_ITEMS = ['mode', 'goal', 'model', 'tasks', 'cwd', 'git'] as const;
 
@@ -39,12 +40,17 @@ const MAX_CWD_SEGMENTS = 3;
 const GOAL_TIMER_INTERVAL_MS = 1_000;
 
 // Toolbar tips — rotates every 10s. Most tips are short and pair up (two
-// joined by " | ") when space allows; tips flagged `solo` are long or
+// joined by " · ") when space allows; tips flagged `solo` are long or
 // important enough to take the whole slot on their own. A `priority` weight
 // makes a tip recur more often in the rotation (default 1). Width is always
 // the final arbiter (a pair that doesn't fit falls back to its first tip).
 const TIP_ROTATE_INTERVAL_MS = 10_000;
-const TIP_SEPARATOR = ' | ';
+const TIP_SEPARATOR = ' · ';
+const AGENT_TIMER_INTERVAL_MS = 1_000;
+// Claude Code-style catch-up cadence for the main-agent token counter: the
+// displayed value is nudged toward the true estimate in small steps so it
+// scrolls smoothly instead of jumping straight to the final number.
+const TOKEN_ANIMATION_INTERVAL_MS = 50;
 
 /**
  * Expand tips into a rotation sequence using smooth weighted round-robin
@@ -141,10 +147,31 @@ function formatBadgeElapsed(ms: number): string {
   return `${hours}h${minutes % 60}m`;
 }
 
+function formatFooterAgentElapsed(seconds: number): string {
+  if (seconds < 60) return `${String(seconds)}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${String(minutes)}m`;
+  const hours = Math.floor(minutes / 60);
+  return `${String(hours)}h${String(minutes % 60)}m`;
+}
+
 function modelDisplayName(state: AppState): string {
   const model = state.availableModels[state.model];
   const effective = model === undefined ? undefined : effectiveModelAlias(model);
   return effective?.displayName ?? effective?.model ?? state.model;
+}
+
+/**
+ * Claude's autoAccept violet for the auto-mode pill. Light palettes use
+ * near-black text tokens, so a quick brightness probe on `text` picks the
+ * darker variant that keeps contrast on white.
+ */
+function autoAcceptColor(): string {
+  const hex = currentTheme.palette.text;
+  const r = Number.parseInt(hex.slice(1, 3), 16);
+  const g = Number.parseInt(hex.slice(3, 5), 16);
+  const b = Number.parseInt(hex.slice(5, 7), 16);
+  return r + g + b < 3 * 128 ? AUTO_ACCEPT_LIGHT : AUTO_ACCEPT_DARK;
 }
 
 function shortenCwd(path: string): string {
@@ -189,6 +216,7 @@ export function formatFooterGitBadge(status: GitStatus, colors: ColorPalette): s
 }
 
 export class FooterComponent implements Component {
+  version = 0;
   private state: AppState;
   private readonly onRefresh: () => void;
   private gitCache: GitStatusCache;
@@ -197,6 +225,14 @@ export class FooterComponent implements Component {
   private goalSnapshotKey: string | null = null;
   private goalObservedAtMs = Date.now();
   private goalTimer: ReturnType<typeof setInterval> | null = null;
+  /** Timer that keeps per-agent elapsed counters ticking while agents run. */
+  private agentTimer: ReturnType<typeof setInterval> | null = null;
+  /** Displayed main-agent token count, chased toward the estimate on each render. */
+  private tokenDisplay = 0;
+  /** Supplies the live streamed output-token estimate (see turn-usage.ts). */
+  private tokenTargetProvider: (() => number) | undefined = undefined;
+  /** Last time the catch-up animation advanced (for the 50ms throttle). */
+  private tokenLastTickMs = 0;
   private statusLineRunner: StatusLineCommandRunner | null = null;
   /**
    * Non-terminal background-task counts split by kind so the footer can
@@ -207,6 +243,8 @@ export class FooterComponent implements Component {
    */
   private backgroundBashTaskCount = 0;
   private backgroundAgentCount = 0;
+  /** Live per-agent rows shown below the standard footer lines. */
+  private runningAgents: readonly RunningAgentSummary[] = [];
 
   constructor(state: AppState, onRefresh: () => void = () => {}) {
     this.state = state;
@@ -227,6 +265,7 @@ export class FooterComponent implements Component {
     this.syncGoalTimer(state.goal);
     this.syncStatusLineRunner(state);
     this.state = state;
+    bumpVersion(this);
   }
 
   private syncStatusLineRunner(state: AppState): void {
@@ -252,6 +291,7 @@ export class FooterComponent implements Component {
    */
   setTransientHint(hint: string | null): void {
     this.transientHint = hint;
+    bumpVersion(this);
   }
 
   getTransientHint(): string | null {
@@ -266,13 +306,106 @@ export class FooterComponent implements Component {
   setBackgroundCounts(counts: { bashTasks: number; agentTasks: number }): void {
     this.backgroundBashTaskCount = Math.max(0, counts.bashTasks);
     this.backgroundAgentCount = Math.max(0, counts.agentTasks);
+    bumpVersion(this);
   }
 
-  invalidate(): void {}
+  /**
+   * Replace the per-agent rows rendered below the standard footer lines.
+   * Passing an empty array hides the rows.
+   */
+  setRunningAgents(agents: readonly RunningAgentSummary[]): void {
+    this.runningAgents = agents;
+    this.syncAgentTimer();
+    bumpVersion(this);
+  }
+
+  /**
+   * Supply the live streamed output-token estimate for the in-flight turn. The
+   * footer chases its displayed main-agent token count toward
+   * `turnOutputTokens(turnUsage, estimate)` in small steps on each render
+   * (throttled to ~50ms), so the counter scrolls smoothly like Claude Code's
+   * without a dedicated timer — the footer is already redrawn ~120ms while the
+   * activity spinner animates. The display is seeded to the current target on
+   * set so an already-progressed turn (e.g. resume) shows real tokens
+   * immediately. Pass `undefined` to stop animating (e.g. on shutdown).
+   */
+  setTokenEstimateProvider(provider: (() => number) | undefined): void {
+    this.tokenTargetProvider = provider;
+    if (provider === undefined) {
+      this.stopTokenAnimation();
+      return;
+    }
+    // Seed the display to the current target so the first render reflects
+    // settled output instead of starting a long catch-up from 0.
+    this.tokenDisplay = turnOutputTokens(this.state.turnUsage, provider());
+    this.tokenLastTickMs = Date.now();
+    bumpVersion(this);
+  }
+
+  private stopTokenAnimation(): void {
+    this.tokenDisplay = 0;
+    this.tokenLastTickMs = 0;
+  }
+
+  /**
+   * Claude Code-style catch-up: nudge `tokenDisplay` toward the current target
+   * by a small fixed/ratio step per tick, clamped so it never overshoots. A
+   * shrinking target (turn reset) snaps down instead of animating backwards.
+   * Called from `render` and throttled to `TOKEN_ANIMATION_INTERVAL_MS` so the
+   * counter advances smoothly with the render cadence but never faster than
+   * ~50ms per step.
+   */
+  private tickTokenAnimation(): void {
+    if (this.tokenTargetProvider === undefined) return;
+    const now = Date.now();
+    if (now - this.tokenLastTickMs < TOKEN_ANIMATION_INTERVAL_MS) return;
+    this.tokenLastTickMs = now;
+
+    const target = turnOutputTokens(this.state.turnUsage, this.tokenTargetProvider());
+    if (target <= 0) {
+      this.tokenDisplay = 0;
+    } else if (target < this.tokenDisplay) {
+      this.tokenDisplay = target;
+    } else {
+      const gap = target - this.tokenDisplay;
+      if (gap > 0) {
+        const increment =
+          gap < 70 ? 3 : gap < 200 ? Math.max(8, Math.ceil(gap * 0.15)) : 50;
+        this.tokenDisplay = Math.min(this.tokenDisplay + increment, target);
+      }
+    }
+  }
+
+  private syncAgentTimer(): void {
+    const needsTimer = this.runningAgents.length > 0;
+    if (!needsTimer) {
+      if (this.agentTimer !== null) {
+        clearInterval(this.agentTimer);
+        this.agentTimer = null;
+      }
+      return;
+    }
+    if (this.agentTimer !== null) return;
+    const requestRender = this.onRefresh;
+    this.agentTimer = setInterval(() => {
+      bumpVersion(this);
+      requestRender();
+    }, AGENT_TIMER_INTERVAL_MS);
+    this.agentTimer.unref?.();
+  }
+
+  invalidate(): void {
+    bumpVersion(this);
+  }
 
   render(width: number): string[] {
     const colors = currentTheme.palette;
     const state = this.state;
+
+    // Advance the main-agent token counter's catch-up animation before reading
+    // it below; throttled to ~50ms so it scrolls smoothly with the render
+    // cadence (the spinner redraws ~120ms while animating).
+    this.tickTokenAnimation();
 
     // ── Line 1: slots composed per status_line.items, or a user command ──
     let line1: string;
@@ -291,33 +424,32 @@ export class FooterComponent implements Component {
       const order: readonly string[] = configured ?? DEFAULT_STATUS_LINE_ITEMS;
       const left: string[] = [];
       for (const slot of order) {
-        const pieces = slots[slot as keyof typeof slots];
+        const pieces = slots[slot];
         if (pieces !== undefined) left.push(...pieces);
       }
 
       const leftLine = left.join('  ');
       const leftWidth = visibleWidth(leftLine);
 
-      // Rotating hint tips stay on the right unless they were given an
-      // inline slot in items (rendered above at their configured position)
-      // or the user dropped 'tips' from items.
-      let tipText = '';
-      const tipsInline = order.includes('tips');
-      const showTips = !tipsInline && (configured === null || configured.includes('tips'));
-      if (showTips) {
-        const { primary, pair } = tipsForIndex(currentTipIndex());
+      // Claude-style right hint on the default layout: 'esc to interrupt'
+      // while a turn is running, '? for shortcuts' when idle. Configured
+      // status_line layouts (including an inline 'tips' slot) suppress it,
+      // matching Claude's behaviour around custom status lines.
+      let hintText = '';
+      if (configured === null) {
+        const hint =
+          state.streamingPhase !== 'idle' || state.isCompacting
+            ? 'esc to interrupt'
+            : '? for shortcuts';
         const gap = 2;
-        const remaining = Math.max(0, width - leftWidth - gap);
-        if (pair && visibleWidth(pair) <= remaining) {
-          tipText = pair;
-        } else if (primary && visibleWidth(primary) <= remaining) {
-          tipText = primary;
+        if (leftWidth + gap + visibleWidth(hint) <= width) {
+          hintText = hint;
         }
       }
 
-      if (tipText) {
-        const pad = width - leftWidth - visibleWidth(tipText);
-        line1 = leftLine + ' '.repeat(Math.max(0, pad)) + chalk.hex(colors.textMuted)(tipText);
+      if (hintText) {
+        const pad = width - leftWidth - visibleWidth(hintText);
+        line1 = leftLine + ' '.repeat(Math.max(0, pad)) + chalk.hex(colors.textDim)(hintText);
       } else if (leftWidth <= width) {
         line1 = leftLine;
       } else {
@@ -350,7 +482,93 @@ export class FooterComponent implements Component {
       line2 = ' '.repeat(leftPad) + chalk.hex(colors.text)(contextText);
     }
 
-    return [truncateToWidth(line1, width), truncateToWidth(line2, width)];
+    // ── Agent status rows: one line per running agent when details exist ──
+    const agentLines = this.renderAgentLines(width, colors);
+
+    return [
+      truncateToWidth(line1, width),
+      truncateToWidth(line2, width),
+      ...agentLines.map((line) => truncateToWidth(line, width)),
+    ];
+  }
+
+  /**
+   * Footer agent status rows. One line per running agent, with the main session
+   * agent rendered first. Gated on at least one agent running (subagent or
+   * background task): with `runningAgents` empty the footer keeps its two
+   * standard lines even while a turn is active. When agents run, an idle `main`
+   * row is still shown when the main agent is idle so the footer never lists
+   * subagents without their root.
+   */
+  private renderAgentLines(width: number, colors: ColorPalette): string[] {
+    if (this.runningAgents.length === 0) return [];
+    const lines: string[] = [];
+    const main = this.mainAgentSummary(colors, width);
+    if (main !== undefined) {
+      lines.push(main);
+    } else if (this.runningAgents.length > 0) {
+      // Keep `main` visible as the root row even while it is idle.
+      const idleMain: RunningAgentSummary = {
+        id: 'main',
+        name: 'main',
+        phase: 'running',
+        startedAtMs: Date.now(),
+        tokens: 0,
+      };
+      lines.push(this.formatAgentLine(idleMain, true, colors, width));
+    }
+    for (const agent of this.runningAgents) {
+      lines.push(this.formatAgentLine(agent, false, colors, width));
+    }
+    return lines;
+  }
+
+  private mainAgentSummary(colors: ColorPalette, width: number): string | undefined {
+    if (this.state.streamingPhase === 'idle') return undefined;
+    const summary: RunningAgentSummary = {
+      id: 'main',
+      name: 'main',
+      phase: this.state.streamingPhase === 'waiting' ? 'waiting' : 'running',
+      startedAtMs: this.state.streamingStartTime,
+      // Display-only count chased toward the estimate by the 50ms animation
+      // timer; input tokens are excluded (they are the step's full context,
+      // not output produced this turn — see turnOutputTokens).
+      tokens: this.state.turnUsage === undefined ? 0 : this.tokenDisplay,
+    };
+    return this.formatAgentLine(summary, true, colors, width);
+  }
+
+  private formatAgentLine(
+    agent: RunningAgentSummary,
+    isMain: boolean,
+    colors: ColorPalette,
+    width: number,
+  ): string {
+    const bullet = isMain ? chalk.hex(colors.primary)('●') : chalk.hex(colors.textDim)('○');
+    const name = chalk.hex(colors.text)(agent.name);
+    const parts: string[] = [bullet, name];
+
+    if (agent.description !== undefined && agent.description.length > 0) {
+      parts.push(chalk.hex(colors.textDim)(agent.description));
+    }
+
+    if (agent.latestActivity !== undefined && agent.latestActivity.length > 0) {
+      parts.push(chalk.hex(colors.textDim)(`→ ${agent.latestActivity}`));
+    }
+
+    const elapsedSeconds = Math.max(0, Math.floor((Date.now() - agent.startedAtMs) / 1000));
+    const stats: string[] = [];
+    if (elapsedSeconds > 0) {
+      stats.push(formatFooterAgentElapsed(elapsedSeconds));
+    }
+    if (agent.tokens > 0) {
+      stats.push(`↓ ${formatTokenCount(agent.tokens)} tok`);
+    }
+    if (stats.length > 0) {
+      parts.push(chalk.hex(colors.textDim)(stats.join(' ')));
+    }
+
+    return truncateToWidth(parts.join(' '), Math.max(1, width), '…');
   }
 
   /**
@@ -376,9 +594,11 @@ export class FooterComponent implements Component {
     }
 
     const modes: string[] = [];
-    if (state.permissionMode === 'auto') modes.push(chalk.hex(colors.warning).bold('auto'));
-    if (state.permissionMode === 'yolo') modes.push(chalk.hex(colors.warning).bold('yolo'));
-    if (state.planMode) modes.push(chalk.hex(colors.primary).bold('plan'));
+    if (state.permissionMode === 'auto')
+      modes.push(chalk.hex(autoAcceptColor())('⏵⏵ auto-accept edits on'));
+    if (state.permissionMode === 'yolo')
+      modes.push(chalk.hex(colors.error)('⏵⏵ bypass permissions on'));
+    if (state.planMode) modes.push(chalk.hex(colors.primary)('⏸ plan mode on'));
     if (state.swarmMode) modes.push(chalk.hex(colors.accent).bold('swarm'));
     if (modes.length > 0) slots['mode'] = [modes.join(' ')];
 
@@ -408,9 +628,11 @@ export class FooterComponent implements Component {
       slots['model'] = [renderedModelLabel];
     }
 
-    // Background-task badges. `bash-*` tasks (shell processes) and `agent-*`
-    // tasks (background subagents) stay separate so the user can tell them
-    // apart at a glance.
+    // Background-task badges. `bash-*` tasks (shell processes) are shown as a
+    // count; `agent-*` tasks show a compact count on line 1 regardless of the
+    // detailed per-agent rows below — the badge stays visible even while a
+    // foreground subagent occupies the rows, so a background agent can never
+    // silently disappear.
     const taskBadges: string[] = [];
     if (this.backgroundBashTaskCount > 0) {
       const noun = this.backgroundBashTaskCount === 1 ? 'task' : 'tasks';
@@ -462,6 +684,7 @@ export class FooterComponent implements Component {
     if (goal?.status === 'active') {
       if (this.goalTimer !== null) return;
       this.goalTimer = setInterval(() => {
+        bumpVersion(this);
         this.onRefresh();
       }, GOAL_TIMER_INTERVAL_MS);
       this.goalTimer.unref?.();
@@ -479,6 +702,11 @@ export class FooterComponent implements Component {
       clearInterval(this.goalTimer);
       this.goalTimer = null;
     }
+    if (this.agentTimer !== null) {
+      clearInterval(this.agentTimer);
+      this.agentTimer = null;
+    }
+    this.stopTokenAnimation();
   }
 
   private goalWallClockMs(goal: AppState['goal']): number | undefined {

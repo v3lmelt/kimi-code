@@ -810,7 +810,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     this.activeRequestTrace = undefined;
     await this.hooks.onWillBeginStep.run({ turnId, step: currentStep, signal });
     const markStepStarted = this.beginStep(turnId, signal, currentStep, stepUuid, onStarted);
-    const streamParts = this.createStreamPartHandler(turnId, markStepStarted);
+    const streamParts = this.createStreamPartHandler(turnId, currentStep, markStepStarted);
     const request = this.llmRequester.start(
       { source: { type: 'turn', turnId, step: currentStep } },
       streamParts.handle,
@@ -1059,6 +1059,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
 
   private createStreamPartHandler(
     turnId: number,
+    step: number,
     onResponseEvent: () => void,
   ): StreamPartCollector {
     const callsByIndex = new Map<number | string | undefined, { id: string; name: string }>();
@@ -1115,6 +1116,9 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
             });
             return;
           }
+          case 'usage':
+            this.eventBus.publish({ type: 'turn.step.usage', turnId, step, usage: part.usage });
+            return;
           default: {
             const _exhaustive: never = part;
             return _exhaustive;

@@ -1,6 +1,8 @@
 /**
  * Welcome panel shown at the top of the TUI.
- * Renders a round-bordered box with the logo, session, model, and version.
+ * Renders a round-bordered box in the Claude Code LogoV2 style: the product
+ * name + version embedded in the top border rule, a centered bold greeting,
+ * a Clawd-style pixel mascot, and dim model / directory lines.
  */
 
 import type { Component } from '@moonshot-ai/pi-tui';
@@ -9,9 +11,13 @@ import chalk from 'chalk';
 
 import { effectiveModelAlias } from '@moonshot-ai/kimi-code-sdk';
 
+import { providerDisplayName } from '#/tui/components/dialogs/model-selector';
 import { isRainbowDancing, renderDanceWelcomeHeader } from '#/tui/easter-eggs/dance';
 import type { AppState } from '#/tui/types';
 import { currentTheme } from '#/tui/theme';
+
+/** Clawd-style pixel mascot (2 rows), painted in the brand primary. */
+const MASCOT = [' ▐▛███▜▌', '▝▜██▛▘'] as const;
 
 export class WelcomeComponent implements Component {
   private state: AppState;
@@ -45,53 +51,58 @@ export class WelcomeComponent implements Component {
     const innerWidth = Math.max(1, safeWidth - 4);
     const pad = '  ';
 
-    // Logo + side-by-side text.
-    const logo = ['▐█▛█▛█▌', '▐█████▌'] as const;
-    const logoWidth = Math.max(...logo.map((row) => visibleWidth(row)));
-    const gap = '  ';
-    const textWidth = Math.max(4, innerWidth - logoWidth - gap.length);
-
-    const rightRow0 = truncateToWidth(
-      chalk.bold.hex(currentTheme.palette.primary)('Welcome to Kimi Code!'),
-      textWidth,
-      '…',
-    );
     const dim = chalk.hex(currentTheme.palette.textDim);
-    const labelStyle = chalk.bold.hex(currentTheme.palette.textDim);
+    const center = (line: string): string => {
+      const left = Math.max(0, Math.floor((innerWidth - visibleWidth(line)) / 2));
+      return ' '.repeat(left) + line;
+    };
+
+    // textWidth/rightRow1 only feed the dance easter-egg header, which draws
+    // the mascot and the rainbow title side by side.
+    const mascotWidth = Math.max(...MASCOT.map((row) => visibleWidth(row)));
+    const gap = '  ';
+    const textWidth = Math.max(4, innerWidth - mascotWidth - gap.length);
     const rightRow1 = truncateToWidth(
       dim(isLoggedOut ? 'Run /login or /provider to get started.' : 'Send /help for help information.'),
       textWidth,
       '…',
     );
 
-    let renderedHeaderLines = [
-      primary(logo[0].padEnd(logoWidth)) + gap + rightRow0,
-      primary(logo[1].padEnd(logoWidth)) + gap + rightRow1,
+    // Claude Code style header: centered greeting above the pixel mascot.
+    let contentLines = [
+      center(currentTheme.bold('Welcome back!')),
+      '',
+      center(primary(MASCOT[0])),
+      center(primary(MASCOT[1])),
     ];
     if (isRainbowDancing()) {
-      renderedHeaderLines = renderDanceWelcomeHeader(logo, textWidth, rightRow1);
+      contentLines = renderDanceWelcomeHeader(MASCOT, textWidth, rightRow1);
     }
 
     const modelValue = isLoggedOut
       ? chalk.hex(currentTheme.palette.warning)('not set, run /login or /provider')
       : (effectiveActiveModel?.displayName ?? effectiveActiveModel?.model ?? this.state.model);
+    const providerName =
+      effectiveActiveModel?.provider === undefined
+        ? ''
+        : providerDisplayName(effectiveActiveModel.provider);
+    const modelLine = isLoggedOut
+      ? modelValue
+      : dim(providerName ? `${modelValue} · ${providerName}` : modelValue);
 
-    const infoLines = [
-      labelStyle('Directory: ') + this.state.workDir,
-      labelStyle('Session:   ') + this.state.sessionId,
-      labelStyle('Model:     ') + modelValue,
-      labelStyle('Version:   ') + this.state.version,
-    ];
+    contentLines.push('', center(modelLine), center(dim(this.state.workDir)));
 
-    if (this.state.mcpServersSummary) {
-      infoLines.push(labelStyle('MCP:       ') + this.state.mcpServersSummary);
+    // Top rule carries the border title: ' Kimi Code ' in the brand primary
+    // followed by the dim version, mirroring Claude Code's LogoV2 box.
+    let borderTitle = primary(' Kimi Code ') + dim(` v${this.state.version} `);
+    if (visibleWidth(borderTitle) > safeWidth - 5) {
+      borderTitle = primary(' Kimi Code ');
     }
-
-    const contentLines: string[] = [...renderedHeaderLines, '', ...infoLines];
+    const titleDashCount = Math.max(0, safeWidth - 3 - visibleWidth(borderTitle));
 
     const lines: string[] = [
       '',
-      primary('╭' + '─'.repeat(safeWidth - 2) + '╮'),
+      primary('╭─') + borderTitle + primary('─'.repeat(titleDashCount)) + primary('╮'),
       primary('│') + ' '.repeat(safeWidth - 2) + primary('│'),
     ];
 

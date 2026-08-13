@@ -44,6 +44,7 @@ describe('update preference commands', () => {
       editorCommand: null,
       disablePasteBurst: false,
       cacheExpiryHint: true,
+      hideThinking: false,
       notifications: { enabled: true, condition: 'unfocused' },
       upgrade: { autoInstall: false },
       statusLine: { items: null, command: null },

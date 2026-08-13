@@ -28,6 +28,7 @@ import type {
   TurnStepCompletedEvent,
   TurnStepInterruptedEvent,
   TurnStepStartedEvent,
+  TurnStepUsageEvent,
   TokenUsage,
   WarningEvent,
 } from '@moonshot-ai/kimi-code-sdk';
@@ -59,6 +60,7 @@ import {
   type UpcomingGoal,
 } from '../goal-queue-store';
 import { formatBackgroundTaskTranscript } from '../utils/background-task-status';
+import { estimateStreamedTokens } from '../utils/turn-usage';
 import { formatHookResultMarkdown } from '../utils/hook-result-format';
 import { McpOAuthAuthorizationUrlOpener } from '../utils/mcp-oauth';
 import {
@@ -160,6 +162,9 @@ export class SessionEventHandler {
   private goalCompletionAwaitingClear = false;
   private goalCompletionTurnEnded = false;
   private currentTurnHasAssistantText = false;
+  private estimatedOutputTokens = 0;
+  /** Last wall-clock time the model produced any output (feeds stall detection). */
+  private lastActivityAtMs = 0;
   private pluginCommandTurns: Map<string, string> = new Map();
   private pluginMcpToolsUsedInTurn: Set<string> = new Set();
   private pendingModelBlockedFallback: GoalChange | undefined;
@@ -178,6 +183,8 @@ export class SessionEventHandler {
     this.goalCompletionAwaitingClear = false;
     this.goalCompletionTurnEnded = false;
     this.currentTurnHasAssistantText = false;
+    this.estimatedOutputTokens = 0;
+    this.lastActivityAtMs = 0;
     this.pluginCommandTurns.clear();
     this.pluginMcpToolsUsedInTurn.clear();
     this.pendingModelBlockedFallback = undefined;
@@ -197,6 +204,21 @@ export class SessionEventHandler {
 
   syncAgentSwarmActivitySpinner(spinner: MoonLoader | undefined): void {
     this.subAgentEventHandler.syncAgentSwarmActivitySpinner(spinner);
+  }
+
+  /**
+   * Locally estimated output tokens of the in-flight step, fed from streamed
+   * text so the spinner's ↓ counter ticks per frame the way Claude Code's
+   * does. Read on each spinner frame by the status provider; the provider's
+   * exact usage supersedes it via `turn.step.usage` / `turn.step.completed`.
+   */
+  getEstimatedOutputTokens(): number {
+    return this.estimatedOutputTokens;
+  }
+
+  /** Last time the model streamed output (thinking/text/tool), for stall UI. */
+  getLastActivityAtMs(): number {
+    return this.lastActivityAtMs;
   }
 
   startSubscription(): void {
@@ -255,7 +277,12 @@ export class SessionEventHandler {
   }
 
   handleEvent(event: Event, sendQueued: (item: QueuedMessage) => void): void {
-    if (this.subAgentEventHandler.routeChildAgentEvent(event)) return;
+    if (this.subAgentEventHandler.routeChildAgentEvent(event)) {
+      if (event.type === 'agent.status.updated') {
+        this.syncRunningAgentsFooter();
+      }
+      return;
+    }
 
     if ('turnId' in event && event.turnId !== undefined) {
       this.host.streamingUI.setTurnId(String(event.turnId));
@@ -267,6 +294,7 @@ export class SessionEventHandler {
       case 'turn.step.started': this.handleStepBegin(event); break;
       case 'turn.step.interrupted': this.handleStepInterrupted(event); break;
       case 'turn.step.completed': this.handleStepCompleted(event); break;
+      case 'turn.step.usage': this.handleStepUsage(event); break;
       case 'turn.step.retrying': break;
       case 'tool.progress': this.handleToolProgress(event); break;
       case 'shell.output': this.host.handleShellOutput(event); break;
@@ -293,7 +321,9 @@ export class SessionEventHandler {
       case 'subagent.suspended':
       case 'subagent.completed':
       case 'subagent.failed':
-        this.subAgentEventHandler.handleLifecycleEvent(event); break;
+        this.subAgentEventHandler.handleLifecycleEvent(event);
+        this.syncRunningAgentsFooter();
+        break;
       case 'background.task.started':
       case 'background.task.terminated':
         this.handleBackgroundTaskEvent(event); break;
@@ -317,6 +347,7 @@ export class SessionEventHandler {
 
   private handleTurnBegin(event: TurnStartedEvent): void {
     this.currentTurnHasAssistantText = false;
+    this.estimatedOutputTokens = 0;
     if (event.origin?.kind === 'plugin_command') {
       this.pluginCommandTurns.set(String(event.turnId), event.origin.pluginId);
     }
@@ -331,7 +362,9 @@ export class SessionEventHandler {
     this.host.setAppState({
       streamingPhase: 'waiting',
       streamingStartTime: Date.now(),
+      turnUsage: { input: 0, output: 0, turnStartedAt: Date.now() },
     });
+    this.syncRunningAgentsFooter();
   }
 
   private handleCronFired(event: CronFiredEvent): void {
@@ -369,10 +402,13 @@ export class SessionEventHandler {
     }
     this.host.streamingUI.resetToolUi();
     this.host.streamingUI.finalizeTurn(sendQueued);
+    this.host.setAppState({ turnUsage: undefined });
+    this.estimatedOutputTokens = 0;
     this.host.recordSessionActivity();
     this.renderPendingModelBlockedFallback();
     this.currentTurnHasAssistantText = false;
     this.goalCompletionTurnEnded = true;
+    this.syncRunningAgentsFooter();
     // Plugin usage is reported once the whole turn's output has ended — but a
     // cancelled turn cut the output short, so skip the notice there.
     const reportPluginUsage = event.reason !== 'cancelled';
@@ -393,6 +429,7 @@ export class SessionEventHandler {
   }
 
   private handleStepBegin(event: TurnStepStartedEvent): void {
+    this.estimatedOutputTokens = 0;
     this.host.streamingUI.flushNow();
     this.host.streamingUI.setStep(event.step);
     this.host.streamingUI.resetToolUi();
@@ -408,9 +445,49 @@ export class SessionEventHandler {
     });
   }
 
+  private accumulateTurnUsage(usage: TokenUsage | undefined): void {
+    if (usage === undefined) return;
+    const current = this.host.state.appState.turnUsage;
+    if (current === undefined) return;
+    this.host.setAppState({
+      turnUsage: {
+        // `input` is deliberately not accumulated: it is the full context of
+        // each step request (system + history + tools), not tokens produced
+        // this turn, and no display reads it — the footer and spinner only
+        // show output. Summing it per step would inflate it by the context
+        // size on every step. `live.input` is still replaced per step below.
+        input: current.input,
+        output: current.output + usage.output,
+        turnStartedAt: current.turnStartedAt,
+      },
+    });
+  }
+
+  /**
+   * The event's usage is cumulative for the in-flight step, so it replaces
+   * (not accumulates into) the live slot; the settled totals stay untouched
+   * until the step completes.
+   */
+  private handleStepUsage(event: TurnStepUsageEvent): void {
+    const current = this.host.state.appState.turnUsage;
+    if (current === undefined) return;
+    this.host.setAppState({
+      turnUsage: {
+        ...current,
+        live: {
+          input:
+            event.usage.inputOther + event.usage.inputCacheRead + event.usage.inputCacheCreation,
+          output: event.usage.output,
+        },
+      },
+    });
+  }
+
   private handleStepCompleted(event: TurnStepCompletedEvent): void {
     this.host.streamingUI.flushNow();
     this.host.noteStepUsage(event.usage);
+    this.accumulateTurnUsage(event.usage);
+    this.estimatedOutputTokens = 0;
     this.maybeShowDebugTiming(event);
 
     if (event.providerFinishReason === 'filtered') {
@@ -487,6 +564,8 @@ export class SessionEventHandler {
 
   private handleThinkingDelta(event: ThinkingDeltaEvent): void {
     const { state, streamingUI } = this.host;
+    this.estimatedOutputTokens += estimateStreamedTokens(event.delta);
+    this.lastActivityAtMs = Date.now();
     // Encrypted / redacted reasoning (e.g. Kimi over the Anthropic-compatible
     // protocol) streams thinking deltas whose visible text is empty — only an
     // opaque signature rides along. Models also occasionally stream whitespace-
@@ -506,6 +585,8 @@ export class SessionEventHandler {
 
   private handleAssistantDelta(event: AssistantDeltaEvent): void {
     const { state, streamingUI } = this.host;
+    this.estimatedOutputTokens += estimateStreamedTokens(event.delta);
+    this.lastActivityAtMs = Date.now();
     if (streamingUI.hasThinkingDraft()) {
       streamingUI.flushThinkingToTranscript('idle');
     }
@@ -576,6 +657,8 @@ export class SessionEventHandler {
   }
 
   private handleToolCallDelta(event: ToolCallDeltaEvent): void {
+    this.estimatedOutputTokens += estimateStreamedTokens(event.argumentsPart ?? '');
+    this.lastActivityAtMs = Date.now();
     if (event.toolCallId.length === 0) return;
     const { state, streamingUI } = this.host;
     streamingUI.accumulateToolCallDelta(event.toolCallId, event.name, event.argumentsPart);
@@ -601,6 +684,7 @@ export class SessionEventHandler {
   }
 
   private handleToolProgress(event: ToolProgressEvent): void {
+    this.lastActivityAtMs = Date.now();
     const text = event.update.text;
     if (text === undefined || text.length === 0) return;
     const tc = this.host.streamingUI.getToolComponent(event.toolCallId);
@@ -616,6 +700,7 @@ export class SessionEventHandler {
 
   private handleToolResult(event: ToolResultEvent): void {
     const { streamingUI } = this.host;
+    this.lastActivityAtMs = Date.now();
     streamingUI.flushNow();
     const resultData: ToolResultBlockData = {
       tool_call_id: event.toolCallId,
@@ -671,6 +756,7 @@ export class SessionEventHandler {
         this.renderSwarmModeMarker('ended');
       }
     }
+    this.syncRunningAgentsFooter();
   }
 
   private renderSwarmModeMarker(state: SwarmModeMarkerState): void {
@@ -1124,11 +1210,13 @@ export class SessionEventHandler {
         // `◐ backgrounded` so it doesn't look like it completed.
         this.host.streamingUI.markSubagentBackgrounded(info.agentId);
         this.syncBackgroundTaskBadge();
+        this.syncRunningAgentsFooter();
         this.host.tasksBrowserController.repaint();
         return;
       }
       this.appendBackgroundTaskEntry(info);
       this.syncBackgroundTaskBadge();
+      this.syncRunningAgentsFooter();
       this.host.tasksBrowserController.repaint();
       return;
     }
@@ -1152,12 +1240,14 @@ export class SessionEventHandler {
         this.backgroundTaskTranscriptedTerminal.add(info.taskId);
       }
       this.syncBackgroundTaskBadge();
+      this.syncRunningAgentsFooter();
       this.host.tasksBrowserController.repaint();
       return;
     }
 
     if (previous?.status !== info.status) {
       this.syncBackgroundTaskBadge();
+      this.syncRunningAgentsFooter();
     }
     this.host.tasksBrowserController.repaint();
   }
@@ -1198,5 +1288,10 @@ export class SessionEventHandler {
     }
     state.footer.setBackgroundCounts({ bashTasks, agentTasks });
     state.ui.requestRender();
+  }
+
+  private syncRunningAgentsFooter(): void {
+    this.host.state.footer.setRunningAgents(this.subAgentEventHandler.collectRunningAgents());
+    this.host.state.ui.requestRender();
   }
 }

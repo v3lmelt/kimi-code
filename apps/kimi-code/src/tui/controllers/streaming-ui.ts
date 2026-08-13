@@ -1,7 +1,7 @@
 import type { Session } from '@moonshot-ai/kimi-code-sdk';
 
 import { AgentGroupComponent } from '../components/messages/agent-group';
-import { AssistantMessageComponent } from '../components/messages/assistant-message';
+import { StreamingPreviewComponent } from '../components/messages/streaming-preview';
 import { currentWorkingTip } from '../components/chrome/working-tips';
 import { CompactionComponent } from '../components/dialogs/compaction';
 import { ReadGroupComponent } from '../components/messages/read-group';
@@ -35,6 +35,7 @@ export interface StreamingUIHost {
   deferUserMessages: boolean;
   shiftQueuedMessage(): QueuedMessage | undefined;
   pushTranscriptEntry(entry: TranscriptEntry): void;
+  appendTranscriptEntry(entry: TranscriptEntry, options?: { push?: boolean }): void;
   mergeCurrentTurnSteps(): void;
   mergeCompletedTurnAssistants(): void;
 }
@@ -54,8 +55,12 @@ export class StreamingUIController {
   private _currentStep = 0;
   private _assistantDraft = '';
   private _thinkingDraft = '';
-  private _streamingBlock: { component: AssistantMessageComponent; entry: TranscriptEntry } | null = null;
+  private _streamingBlock: { component: StreamingPreviewComponent; entry: TranscriptEntry } | null = null;
   private _activeThinkingComponent: ThinkingComponent | undefined = undefined;
+  /** Thinking state for the spinner status row: `'thinking'` while streaming,
+   *  a duration in ms after it ends, or `null` when idle. */
+  private _thinkingStatus: 'thinking' | number | null = null;
+  private _thinkingStartedAtMs: number | undefined = undefined;
   private _activeCompactionBlock: CompactionComponent | undefined = undefined;
   private _activeToolCalls = new Map<string, ToolCallBlockData>();
   private _streamingToolCallArguments = new Map<
@@ -84,6 +89,11 @@ export class StreamingUIController {
 
   getTurnContext(): { turnId: string | undefined; step: number } {
     return { turnId: this._currentTurnId, step: this._currentStep };
+  }
+
+  /** Current thinking state for the spinner status row (see `_thinkingStatus`). */
+  getThinkingStatus(): 'thinking' | number | null {
+    return this._thinkingStatus;
   }
 
   setTurnId(turnId: string | undefined): void {
@@ -127,7 +137,7 @@ export class StreamingUIController {
     return this._streamingBlock !== null;
   }
 
-  getStreamingBlockComponent(): AssistantMessageComponent | undefined {
+  getStreamingBlockComponent(): StreamingPreviewComponent | undefined {
     return this._streamingBlock?.component;
   }
 
@@ -314,11 +324,12 @@ export class StreamingUIController {
     const existingComponent = this._pendingToolComponents.get(toolCall.id);
     if (existingComponent !== undefined) {
       existingComponent.updateToolCall(toolCall);
-    } else if (existing === undefined) {
+    } else if (toolCall.name !== 'Agent' && toolCall.name !== 'AgentSwarm') {
+      // The card is created only once the full tool call arrives (no streaming
+      // preview), so create it here regardless of whether the streaming deltas
+      // seeded `_activeToolCalls`.
       this.finalizeLiveTextBuffers('tool');
-      if (toolCall.name !== 'Agent' && toolCall.name !== 'AgentSwarm') {
-        this.onToolCallStart(toolCall);
-      }
+      this.onToolCallStart(toolCall);
     }
     return existing === undefined;
   }
@@ -375,6 +386,11 @@ export class StreamingUIController {
       const component = this._pendingToolComponents.get(toolCall.id);
       if (component !== undefined) {
         component.updateToolCall(toolCall);
+      } else if (toolCall.name !== 'Agent' && toolCall.name !== 'AgentSwarm') {
+        // Streaming never created a card (A1), so mount a truncated card now —
+        // otherwise a max_tokens-truncated call would be invisible.
+        this.finalizeLiveTextBuffers('tool');
+        this.onToolCallStart(toolCall);
       }
       count += 1;
     }
@@ -394,6 +410,7 @@ export class StreamingUIController {
     this._currentStep = 0;
     this._streamingToolCallArguments.clear();
     this.pendingToolCallFlushIds.clear();
+    this.host.state.previewContainer.clear();
     this.host.state.ui.requestRender();
   }
 
@@ -525,8 +542,18 @@ export class StreamingUIController {
     this.pendingThinkingFlush = false;
     this.clearFlushTimerIfIdle();
     this._assistantDraft = '';
+    if (this._streamingBlock !== null) {
+      // Drop the partially-streamed entry from the transcript list; it was
+      // pushed by onStreamingTextStart but never committed.
+      const entry = this._streamingBlock.entry;
+      const i = this.host.state.transcriptEntries.indexOf(entry);
+      if (i >= 0) this.host.state.transcriptEntries.splice(i, 1);
+    }
+    this.host.state.previewContainer.clear();
     this._streamingBlock = null;
     this._thinkingDraft = '';
+    this._thinkingStatus = null;
+    this._thinkingStartedAtMs = undefined;
     this.disposeActiveThinkingComponent();
   }
 
@@ -537,6 +564,8 @@ export class StreamingUIController {
     this.disposeAndClearPendingToolComponents();
     this._pendingAgentGroup = null;
     this._pendingReadGroup = null;
+    this._thinkingStatus = null;
+    this._thinkingStartedAtMs = undefined;
     this.resetToolCallState();
   }
 
@@ -602,10 +631,11 @@ export class StreamingUIController {
       content: '',
       modelText: true,
     };
-    const component = new AssistantMessageComponent();
+    const component = new StreamingPreviewComponent();
     this._streamingBlock = { component, entry };
     this.host.pushTranscriptEntry(entry);
-    state.transcriptContainer.addChild(component);
+    state.previewContainer.clear();
+    state.previewContainer.addChild(component);
     state.ui.requestRender();
   }
 
@@ -622,6 +652,10 @@ export class StreamingUIController {
     const block = this._streamingBlock;
     if (block !== null) {
       block.component.updateContent(block.entry.content, { transient: false });
+      this.host.state.previewContainer.clear();
+      // The entry was already pushed by onStreamingTextStart (for `/copy`),
+      // so mount the committed message without duplicating it in the list.
+      this.host.appendTranscriptEntry(block.entry, { push: false });
     }
     this._streamingBlock = null;
   }
@@ -636,16 +670,20 @@ export class StreamingUIController {
     if (this._activeThinkingComponent === undefined) {
       this._pendingAgentGroup = null;
       this._pendingReadGroup = null;
+      this._thinkingStartedAtMs = Date.now();
+      this._thinkingStatus = 'thinking';
       this._activeThinkingComponent = new ThinkingComponent(
         fullText,
         true,
         'live',
         state.ui,
+        state.appState.hideThinking === true,
       );
       if (state.toolOutputExpanded) this._activeThinkingComponent.setExpanded(true);
       state.transcriptContainer.addChild(this._activeThinkingComponent);
     } else {
       this._activeThinkingComponent.setText(fullText);
+      this._activeThinkingComponent.setCollapse(state.appState.hideThinking === true);
     }
     state.ui.requestRender();
   }
@@ -654,6 +692,10 @@ export class StreamingUIController {
     if (this._activeThinkingComponent === undefined) return;
     this._activeThinkingComponent.finalize();
     this._activeThinkingComponent = undefined;
+    if (this._thinkingStartedAtMs !== undefined) {
+      this._thinkingStatus = Date.now() - this._thinkingStartedAtMs;
+      this._thinkingStartedAtMs = undefined;
+    }
     this.host.state.ui.requestRender();
     this.host.mergeCurrentTurnSteps();
   }
@@ -783,12 +825,8 @@ export class StreamingUIController {
       this.finalizeLiveTextBuffers('tool');
     }
 
-    const existingComponent = this._pendingToolComponents.get(id);
-    if (existingComponent !== undefined) {
-      existingComponent.updateToolCall(toolCall);
-    } else if (toolCall.name !== 'Agent' && toolCall.name !== 'AgentSwarm') {
-      this.onToolCallStart(toolCall);
-    }
+    // No component creation during streaming: the card pops in fully-formed at
+    // `tool.call.started` (see registerToolCall).
   }
 
   private tryAttachAgentToolCall(toolCall: ToolCallBlockData, tc: ToolCallComponent): boolean {

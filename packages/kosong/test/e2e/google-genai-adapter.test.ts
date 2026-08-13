@@ -207,7 +207,15 @@ describe('e2e: Google GenAI adapter bridge', () => {
       const parts = await collectParts(stream);
 
       expect(parts).toEqual([
+        {
+          type: 'usage',
+          usage: { inputOther: 29, output: 4, inputCacheRead: 1, inputCacheCreation: 0 },
+        },
         { type: 'text', text: 'Done.' },
+        {
+          type: 'usage',
+          usage: { inputOther: 29, output: 9, inputCacheRead: 1, inputCacheCreation: 0 },
+        },
         {
           type: 'function',
           id: expect.stringMatching(/^notify_call-1_[0-9a-f]{8}$/),

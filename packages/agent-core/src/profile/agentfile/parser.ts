@@ -121,10 +121,12 @@ function parseModelPreference(
   filePath: string,
 ): AgentFileDefinition['modelPreference'] {
   if (value === undefined || value === null) return undefined;
-  if (value === 'primary' || value === 'secondary') return value;
-  throw new AgentFileParseError(
-    `Frontmatter field "model_preference" in ${filePath} must be "primary" or "secondary"`,
-  );
+  if (typeof value !== 'string' || value.trim().length === 0) {
+    throw new AgentFileParseError(
+      `Frontmatter field "model_preference" in ${filePath} must be a non-empty string: "primary", "secondary", "inherit", or a model alias configured in [models]`,
+    );
+  }
+  return value.trim();
 }
 
 function parseBoolean(value: unknown, field: string, filePath: string): boolean {

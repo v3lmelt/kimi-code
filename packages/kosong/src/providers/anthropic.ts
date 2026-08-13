@@ -2,6 +2,7 @@ import {
   APIConnectionError,
   APITimeoutError,
   ChatProviderError,
+  MissingApiKeyError,
   classifyBaseApiError,
   normalizeAPIStatusError,
   parseRetryAfterMs,
@@ -802,6 +803,9 @@ class AnthropicStreamedMessage implements StreamedMessage {
               cache_creation_input_tokens?: number;
             },
           );
+          // Input token counts are known as soon as the stream opens —
+          // surface them immediately instead of waiting for stream end.
+          yield { type: 'usage', usage: { ...this._usage } };
         } else if (eventType === 'content_block_start') {
           const blockEvt = evt as unknown as RawContentBlockStartEvent;
           const block = blockEvt.content_block;
@@ -872,19 +876,27 @@ class AnthropicStreamedMessage implements StreamedMessage {
         } else if (eventType === 'message_delta') {
           // Update usage from delta
           const deltaUsage = (evt as { usage?: Record<string, unknown> }).usage;
+          let usageChanged = false;
           if (deltaUsage !== undefined) {
             if (typeof deltaUsage['output_tokens'] === 'number') {
               this._usage.output = deltaUsage['output_tokens'];
+              usageChanged = true;
             }
             if (typeof deltaUsage['cache_read_input_tokens'] === 'number') {
               this._usage.inputCacheRead = deltaUsage['cache_read_input_tokens'];
+              usageChanged = true;
             }
             if (typeof deltaUsage['cache_creation_input_tokens'] === 'number') {
               this._usage.inputCacheCreation = deltaUsage['cache_creation_input_tokens'];
+              usageChanged = true;
             }
             if (typeof deltaUsage['input_tokens'] === 'number') {
               this._usage.inputOther = deltaUsage['input_tokens'];
+              usageChanged = true;
             }
+          }
+          if (usageChanged) {
+            yield { type: 'usage', usage: { ...this._usage } };
           }
           // The terminal `stop_reason` lives on `delta.stop_reason` of the
           // last `message_delta` event for this response. Capture it here.
@@ -1167,7 +1179,7 @@ export class AnthropicChatProvider implements ChatProvider {
   private _requireApiKey(auth: ProviderRequestAuth | undefined): string {
     const apiKey = auth?.apiKey ?? this._apiKey;
     if (apiKey === undefined || apiKey.length === 0) {
-      throw new ChatProviderError(
+      throw new MissingApiKeyError(
         'AnthropicChatProvider: apiKey is required. Provide it via constructor options, options.auth.apiKey on each request, or an OAuth login. The Anthropic adapter does not read shell API-key environment variables.',
       );
     }

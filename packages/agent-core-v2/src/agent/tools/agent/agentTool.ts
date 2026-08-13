@@ -88,6 +88,7 @@ import { ISessionSubagentService } from '#/session/subagent/subagent';
 import {
   buildSubagentModelDescriptions,
   formatSubagentTimeoutDescription,
+  resolveSecondaryModel,
   resolveSubagentBinding,
   resolveSubagentTimeoutMs,
   stripSubagentModelParameter,
@@ -331,7 +332,12 @@ export class SubagentTool implements ISubagentTool {
           labels: subagentLabels(this.callerAgentId),
         });
       } catch (error) {
-        throw wrapSubagentModelError(error, binding.model, own.modelAlias);
+        throw wrapSubagentModelError(
+          error,
+          binding.model,
+          own.modelAlias,
+          resolveSecondaryModel(this.config, this.flags)?.model,
+        );
       }
       created.accessor.get(IAgentPermissionModeService).setMode(this.permissionMode.mode);
       created.accessor

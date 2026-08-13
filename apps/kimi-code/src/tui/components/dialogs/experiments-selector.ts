@@ -40,6 +40,7 @@ export class ExperimentsSelectorComponent extends Container implements Focusable
       items: opts.features,
       toSearchText: (feature) => `${feature.title} ${feature.id} ${feature.description}`,
       searchable: true,
+      onChange: () => this.bump(),
     });
   }
 
@@ -120,9 +121,10 @@ export class ExperimentsSelectorComponent extends Container implements Focusable
     const enabled = !this.effectiveEnabled(feature);
     if (enabled === feature.enabled) {
       this.draft.delete(feature.id);
-      return;
+    } else {
+      this.draft.set(feature.id, enabled);
     }
-    this.draft.set(feature.id, enabled);
+    this.bump();
   }
 
   private effectiveEnabled(feature: ExperimentalFeatureState): boolean {

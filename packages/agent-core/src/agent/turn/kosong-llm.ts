@@ -224,6 +224,10 @@ function buildKosongCallbacks(
   return {
     onMessagePart: (part: StreamedMessagePart) => {
       markStreamOutput();
+      if (part.type === 'usage') {
+        params.onUsageDelta?.(part.usage);
+        return;
+      }
       if (part.type === 'text') {
         if (params.onTextDelta === undefined) return;
         params.onTextDelta(part.text);

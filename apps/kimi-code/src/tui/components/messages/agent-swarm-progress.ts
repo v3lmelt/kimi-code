@@ -12,7 +12,7 @@ import { gradientText } from '#/tui/theme/gradient-text';
 
 const TEXT_CELL_PREFERRED_WIDTH = 30;
 const CELL_GAP = '  ';
-const FRAME_INTERVAL_MS = 80;
+const FRAME_INTERVAL_MS = 120;
 const TEXT_BRAILLE_BAR_MIN_WIDTH = 6;
 const BRAILLE_BAR_MAX_WIDTH = 8;
 const BRAILLE_EMPTY = '⣀';

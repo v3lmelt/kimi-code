@@ -124,6 +124,7 @@ export class SessionPickerComponent extends Container implements Focusable {
       pageSize: this.pageSize,
       initialIndex,
       searchable: true,
+      onChange: () => this.bump(),
     });
     const initialLoadedPages = Math.ceil((initialIndex + 1) / this.pageSize);
     this.visibleCount = Math.min(this.sessions.length, initialLoadedPages * this.pageSize);
@@ -177,6 +178,7 @@ export class SessionPickerComponent extends Container implements Focusable {
     if (matchesKey(data, Key.escape)) {
       if (this.list.clearQuery()) {
         this.visibleCount = Math.min(this.filteredSessions().length, this.pageSize);
+        this.bump();
         return;
       }
       this.onCancel();
@@ -190,7 +192,11 @@ export class SessionPickerComponent extends Container implements Focusable {
 
     const previousQuery = this.list.view().query;
     if (this.list.handleKey(data)) {
+      const previousVisibleCount = this.visibleCount;
       this.syncVisibleCount(previousQuery);
+      if (this.visibleCount !== previousVisibleCount) {
+        this.bump();
+      }
     }
   }
 
@@ -205,7 +211,7 @@ export class SessionPickerComponent extends Container implements Focusable {
   // the clamp in `render()` is what guarantees the renderer's invariant and
   // prevents the "Rendered line exceeds terminal width" crash (issue #240).
   private renderLines(width: number): string[] {
-    const lines: string[] = [currentTheme.fg('primary', '─'.repeat(width))];
+    const lines: string[] = [currentTheme.fg('border', '─'.repeat(width))];
     const title = this.scope === 'all' ? 'All sessions' : 'Sessions';
     const scopeHint =
       this.onToggleScope === undefined
@@ -215,11 +221,11 @@ export class SessionPickerComponent extends Container implements Focusable {
           : 'Ctrl+A all';
 
     if (this.loading) {
-      lines.push(currentTheme.boldFg('primary', truncateToWidth(title, width, ELLIPSIS)));
+      lines.push(currentTheme.boldFg('textStrong', truncateToWidth(title, width, ELLIPSIS)));
       lines.push(
         currentTheme.fg('textMuted', truncateToWidth('Loading sessions...', width, ELLIPSIS)),
       );
-      lines.push(currentTheme.fg('primary', '─'.repeat(width)));
+      lines.push(currentTheme.fg('border', '─'.repeat(width)));
       return lines;
     }
 
@@ -227,7 +233,7 @@ export class SessionPickerComponent extends Container implements Focusable {
       const hintParts = [scopeHint, 'Esc cancel'].filter(
         (item): item is string => item !== undefined,
       );
-      lines.push(currentTheme.boldFg('primary', truncateToWidth(title, width, ELLIPSIS)));
+      lines.push(currentTheme.boldFg('textStrong', truncateToWidth(title, width, ELLIPSIS)));
       lines.push(
         currentTheme.fg('textMuted', truncateToWidth(hintParts.join(' · '), width, ELLIPSIS)),
       );
@@ -235,7 +241,7 @@ export class SessionPickerComponent extends Container implements Focusable {
       lines.push(
         currentTheme.fg('textMuted', truncateToWidth('No sessions found.', width, ELLIPSIS)),
       );
-      lines.push(currentTheme.fg('primary', '─'.repeat(width)));
+      lines.push(currentTheme.fg('border', '─'.repeat(width)));
       return lines;
     }
 
@@ -250,7 +256,7 @@ export class SessionPickerComponent extends Container implements Focusable {
       'Esc cancel',
     ].filter((item): item is string => item !== undefined);
 
-    lines.push(currentTheme.boldFg('primary', title) + titleSuffix);
+    lines.push(currentTheme.boldFg('textStrong', title) + titleSuffix);
     lines.push(currentTheme.fg('textMuted', hintParts.join(' · ')));
     lines.push('');
 
@@ -261,7 +267,7 @@ export class SessionPickerComponent extends Container implements Focusable {
     const loadedSessions = this.loadedSessions(view.items);
     if (loadedSessions.length === 0) {
       lines.push(currentTheme.fg('textMuted', truncateToWidth('No matches', width, ELLIPSIS)));
-      lines.push(currentTheme.fg('primary', '─'.repeat(width)));
+      lines.push(currentTheme.fg('border', '─'.repeat(width)));
       return lines;
     }
     const selectedIndex = view.selectedIndex;
@@ -299,7 +305,7 @@ export class SessionPickerComponent extends Container implements Focusable {
       lines.push(currentTheme.fg('textMuted', truncateToWidth(footer, width, ELLIPSIS)));
     }
 
-    lines.push(currentTheme.fg('primary', '─'.repeat(width)));
+    lines.push(currentTheme.fg('border', '─'.repeat(width)));
     return lines;
   }
 
@@ -313,8 +319,7 @@ export class SessionPickerComponent extends Container implements Focusable {
     const indent = '  ';
     const indentWidth = visibleWidth(indent);
     const titleColor: 'primary' | 'text' = isSelected ? 'primary' : 'text';
-    const titleStyle = (text: string) =>
-      isSelected ? currentTheme.boldFg(titleColor, text) : currentTheme.fg(titleColor, text);
+    const titleStyle = (text: string) => currentTheme.fg(titleColor, text);
 
     const time = formatRelativeTime(session.updated_at);
     const badge = isCurrent ? CURRENT_MARK : '';

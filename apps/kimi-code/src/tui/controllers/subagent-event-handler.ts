@@ -13,6 +13,7 @@ import { modelDisplayName } from '../components/dialogs/model-selector';
 import { MAIN_AGENT_ID } from '../constant/kimi-tui';
 import type {
   BackgroundAgentMetadata,
+  RunningAgentSummary,
   ToolCallBlockData,
   ToolResultBlockData,
   TranscriptEntry,
@@ -666,6 +667,73 @@ export class SubAgentEventHandler {
     };
     this.host.streamingUI.onToolCallStart(toolCall);
     return this.host.streamingUI.getToolComponent(event.parentToolCallId);
+  }
+
+  /**
+   * Collect currently-running agent summaries for the footer status area.
+   * Foreground subagents are read from their tool-component snapshots; background
+   * agents come from the live task list. Terminal, backgrounded, and swarm
+   * members are excluded.
+   */
+  collectRunningAgents(): RunningAgentSummary[] {
+    const summaries: RunningAgentSummary[] = [];
+
+    for (const [agentId, info] of this.subagentInfo.entries()) {
+      if (info.runInBackground) continue;
+      // Swarm members are rendered by AgentSwarmProgressComponent; skip them
+      // here to avoid duplicating the swarm grid in the footer.
+      if (info.swarmIndex !== undefined) continue;
+
+      const tc = this.host.streamingUI.getToolComponent(info.parentToolCallId);
+      if (tc === undefined) continue;
+      const snap = tc.getSubagentSnapshot();
+      if (snap.phase === 'done' || snap.phase === 'failed' || snap.phase === 'backgrounded') {
+        continue;
+      }
+
+      summaries.push({
+        id: agentId,
+        name: snap.agentName ?? info.name ?? 'agent',
+        description: snap.toolCallDescription,
+        latestActivity: snap.latestActivity,
+        phase:
+          snap.phase === 'running'
+            ? 'running'
+            : snap.phase === 'queued'
+              ? 'waiting'
+              : 'starting',
+        startedAtMs: tc.getSubagentStartedAtMs() ?? Date.now(),
+        tokens: snap.tokens,
+      });
+    }
+
+    for (const info of this.deps.backgroundTasks.values()) {
+      if (info.status !== 'running') continue;
+      if (info.kind === 'agent') {
+        summaries.push({
+          id: info.agentId ?? info.taskId,
+          name: info.subagentType ?? 'agent',
+          description: info.description,
+          phase: 'running',
+          startedAtMs: info.startedAt,
+          tokens: 0,
+        });
+      } else if (info.kind === 'process') {
+        // Background shell jobs have no token data; the row shows the task
+        // description (falling back to the command) so the job stays visible.
+        summaries.push({
+          id: info.taskId,
+          name: 'bash',
+          description: info.description || info.command,
+          phase: 'running',
+          startedAtMs: info.startedAt,
+          tokens: 0,
+        });
+      }
+      // `question` tasks are rendered by the BTW panel, not the footer rows.
+    }
+
+    return summaries;
   }
 
   private requestRender(): void {

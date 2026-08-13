@@ -7,6 +7,7 @@ const THEME_OPTIONS: readonly ChoiceOption[] = [
   { value: 'auto', label: 'Auto (match terminal)' },
   { value: 'dark', label: 'Dark' },
   { value: 'light', label: 'Light' },
+  { value: 'claude', label: 'Claude' },
 ];
 
 export interface ThemeSelectorOptions {

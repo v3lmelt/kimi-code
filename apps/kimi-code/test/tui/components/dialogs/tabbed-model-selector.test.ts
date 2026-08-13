@@ -1,4 +1,5 @@
 import type { ModelAlias } from '@moonshot-ai/kimi-code-sdk';
+import { Container } from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
@@ -146,6 +147,61 @@ describe('TabbedModelSelectorComponent', () => {
     const out = strip(titled.render(120).join('\n'));
     expect(out).toContain('Select a secondary model (subagents)');
     expect(out).not.toContain('Select a model ');
+  });
+
+  it('bumps render version when switching tabs so parent containers repaint', () => {
+    const component = new TabbedModelSelectorComponent({
+      models: {
+        k2: model('Kimi K2', 'managed:kimi-code'),
+        gpt: model('GPT-5', 'openai'),
+      },
+      currentValue: 'k2',
+      currentThinkingEffort: 'off',
+      onSelect: vi.fn(),
+      onCancel: vi.fn(),
+    });
+
+    const parent = new Container();
+    parent.addChild(component);
+
+    const before = strip(parent.render(120).join('\n'));
+    expect(before).toContain('Kimi K2');
+    expect(before).toContain('GPT-5');
+
+    component.handleInput(TAB);
+    component.handleInput(TAB);
+
+    const after = strip(parent.render(120).join('\n'));
+    expect(after).toContain('GPT-5');
+    expect(after).not.toContain('Kimi K2');
+  });
+
+  it('bumps render version for forwarded ↑/↓/←/→ so parent containers repaint', () => {
+    const component = new TabbedModelSelectorComponent({
+      models: {
+        k2: model('Kimi K2', 'managed:kimi-code'),
+        turbo: model('Kimi Turbo', 'managed:kimi-code'),
+      },
+      currentValue: 'k2',
+      currentThinkingEffort: 'off',
+      onSelect: vi.fn(),
+      onCancel: vi.fn(),
+    });
+
+    const parent = new Container();
+    parent.addChild(component);
+
+    const before = strip(parent.render(120).join('\n'));
+    expect(before).toContain('❯ Kimi K2');
+    expect(before).not.toContain('❯ Kimi Turbo');
+
+    // ↓ is forwarded to the inner selector; the outer version must still bump,
+    // otherwise the parent container reuses its cached lines.
+    component.handleInput(`${ESC}[B`);
+
+    const after = strip(parent.render(120).join('\n'));
+    expect(after).toContain('❯ Kimi Turbo');
+    expect(after).not.toContain('❯ Kimi K2');
   });
 
   it('keeps the tab strip between hint and list when a warning line is present', () => {

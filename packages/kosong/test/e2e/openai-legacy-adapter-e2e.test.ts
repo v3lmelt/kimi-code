@@ -176,7 +176,7 @@ describe('e2e: openai-legacy adapter', () => {
         inputCacheRead: 0,
         inputCacheCreation: 0,
       });
-      expect(result.parts).toHaveLength(3);
+      expect(result.parts).toHaveLength(4);
       expect(result.parts[0]).toMatchObject({ type: 'text', text: 'Checking weather. ' });
       expect(result.parts[1]).toMatchObject({
         type: 'function',
@@ -190,6 +190,10 @@ describe('e2e: openai-legacy adapter', () => {
         argumentsPart: 'Shanghai"}',
       });
       expect(result.parts[2]).toHaveProperty('index', 0);
+      expect(result.parts[3]).toMatchObject({
+        type: 'usage',
+        usage: { inputOther: 12, output: 6, inputCacheRead: 0, inputCacheCreation: 0 },
+      });
     });
   });
 

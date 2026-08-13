@@ -68,6 +68,7 @@ export class CacheHintDialogComponent extends Container implements Focusable {
       toSearchText: (o) => o.label,
       initialIndex: 0,
       searchable: false,
+      onChange: () => this.bump(),
     });
   }
 

@@ -52,6 +52,7 @@ import type {
   TurnStepCompletedEvent,
   TurnStepInterruptedEvent,
   TurnStepStartedEvent,
+  TurnStepUsageEvent,
 } from '@moonshot-ai/agent-core-v2/agent/loop/turnEvents';
 import type {
   McpServerStatusEvent,
@@ -713,6 +714,14 @@ export const turnStepCompletedEventSchema = z.object({
   rawFinishReason: z.string().optional(),
 }) satisfies z.ZodType<TurnStepCompletedEvent>;
 
+export const turnStepUsageEventSchema = z.object({
+  type: z.literal('turn.step.usage'),
+  turnId: z.number(),
+  step: z.number(),
+  stepId: z.string().optional(),
+  usage: tokenUsageSchema,
+}) satisfies z.ZodType<TurnStepUsageEvent>;
+
 export const turnStepRetryingEventSchema = z.object({
   type: z.literal('turn.step.retrying'),
   turnId: z.number(),
@@ -972,6 +981,7 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   turnEndedEventSchema,
   turnStepStartedEventSchema,
   turnStepCompletedEventSchema,
+  turnStepUsageEventSchema,
   turnStepRetryingEventSchema,
   turnStepInterruptedEventSchema,
   assistantDeltaEventSchema,

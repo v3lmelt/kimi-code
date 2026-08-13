@@ -5,7 +5,7 @@
  * to align after the bullet.
  */
 
-import { Container, Markdown, truncateToWidth, visibleWidth, type Component } from '@moonshot-ai/pi-tui';
+import { bumpVersion, Container, Markdown, truncateToWidth, visibleWidth, type Component } from '@moonshot-ai/pi-tui';
 
 import { MESSAGE_INDENT } from '#/tui/constant/rendering';
 import { STATUS_BULLET } from '#/tui/constant/symbols';
@@ -34,6 +34,7 @@ export class AssistantMessageComponent implements Component {
 
   private markRenderDirty(): void {
     this.renderCache = undefined;
+    bumpVersion(this);
   }
 
   setShowBullet(show: boolean): void {

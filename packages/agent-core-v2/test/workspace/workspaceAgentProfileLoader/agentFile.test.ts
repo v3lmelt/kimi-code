@@ -74,12 +74,16 @@ describe('parseAgentFileText', () => {
     expect(def.modelPreference).toBe('primary');
   });
 
-  it('rejects an unsupported model preference', () => {
-    expect(() =>
-      parse(
-        '---\nname: solo\ndescription: d\nmodel_preference: provider/model\n---\n\nbody\n',
-      ),
-    ).toThrow(/"model_preference"/);
+  it('parses "inherit" and a concrete model alias as model_preference', () => {
+    const inherit = parse(
+      '---\nname: solo\ndescription: d\nmodel_preference: inherit\n---\n\nbody\n',
+    );
+    expect(inherit.modelPreference).toBe('inherit');
+
+    const alias = parse(
+      '---\nname: solo\ndescription: d\nmodel_preference: provider/model\n---\n\nbody\n',
+    );
+    expect(alias.modelPreference).toBe('provider/model');
   });
 
   it('rejects missing frontmatter', () => {

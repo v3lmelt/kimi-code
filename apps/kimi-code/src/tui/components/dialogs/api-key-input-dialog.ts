@@ -99,7 +99,7 @@ export class ApiKeyInputDialogComponent extends Container implements Focusable {
     const innerWidth = Math.max(1, safeWidth - 4);
     const pad = '  ';
 
-    const border = (s: string): string => currentTheme.fg('primary', s);
+    const border = (s: string): string => currentTheme.fg('border', s);
     const titleStyled = currentTheme.boldFg('textStrong', this.title);
     const subtitleSource = this.emptyHinted ? [this.emptyHint] : this.subtitleLines;
     const subtitleLines = subtitleSource.map((line) =>

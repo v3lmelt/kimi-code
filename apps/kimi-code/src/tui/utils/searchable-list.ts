@@ -25,6 +25,8 @@ export interface SearchableListOptions<T> {
   readonly initialIndex?: number;
   /** When false, typed characters are ignored. Defaults to false. */
   readonly searchable?: boolean;
+  /** Called whenever the cursor, query, or filtered items change. */
+  readonly onChange?: () => void;
 }
 
 export interface SearchableListView<T> {
@@ -42,6 +44,7 @@ export class SearchableList<T> {
   private readonly toSearchText: (item: T) => string;
   private readonly pageSize: number;
   private readonly searchable: boolean;
+  private readonly onChange?: () => void;
   private query = '';
   private cursor: number;
 
@@ -50,7 +53,12 @@ export class SearchableList<T> {
     this.toSearchText = opts.toSearchText;
     this.pageSize = opts.pageSize ?? DEFAULT_PAGE_SIZE;
     this.searchable = opts.searchable ?? false;
+    this.onChange = opts.onChange;
     this.cursor = Math.max(opts.initialIndex ?? 0, 0);
+  }
+
+  private notifyChange(): void {
+    this.onChange?.();
   }
 
   filtered(): readonly T[] {
@@ -77,18 +85,22 @@ export class SearchableList<T> {
 
   moveUp(): void {
     this.cursor = Math.max(0, this.cursor - 1);
+    this.notifyChange();
   }
 
   moveDown(): void {
     this.cursor = Math.min(Math.max(0, this.filtered().length - 1), this.cursor + 1);
+    this.notifyChange();
   }
 
   pageUp(): void {
     this.cursor = Math.max(0, this.cursor - this.pageSize);
+    this.notifyChange();
   }
 
   pageDown(): void {
     this.cursor = Math.min(Math.max(0, this.filtered().length - 1), this.cursor + this.pageSize);
+    this.notifyChange();
   }
 
   /** Clears the active query and resets the cursor. Returns whether a query was cleared. */
@@ -96,6 +108,7 @@ export class SearchableList<T> {
     if (this.query.length === 0) return false;
     this.query = '';
     this.cursor = 0;
+    this.notifyChange();
     return true;
   }
 
@@ -126,6 +139,7 @@ export class SearchableList<T> {
       if (this.query.length > 0) {
         this.query = this.query.slice(0, -1);
         this.cursor = 0;
+        this.notifyChange();
       }
       return true;
     }
@@ -133,6 +147,7 @@ export class SearchableList<T> {
     if (isPrintableChar(ch)) {
       this.query += ch;
       this.cursor = 0;
+      this.notifyChange();
       return true;
     }
     return false;

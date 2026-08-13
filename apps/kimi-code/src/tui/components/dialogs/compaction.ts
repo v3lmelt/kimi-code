@@ -2,10 +2,10 @@
  * Renders a compaction block in the transcript.
  *
  * Lifecycle:
- *   - constructed on `compaction.started` → blinking white bullet +
- *     "Compacting context..." and optional custom instruction
- *   - `markDone()` on `compaction.completed` → solid green bullet +
- *     "Compaction complete (X → Y tokens)"
+ *   - constructed on `compaction.started` → blinking '✻' +
+ *     "Compacting conversation…" and optional custom instruction
+ *   - `markDone()` on `compaction.completed` → dim
+ *     "✻ Conversation compacted (X → Y tokens) (ctrl+o for history)"
  *   - `markCanceled()` on `compaction.cancelled` → solid warning bullet +
  *     "Compaction cancelled"
  *
@@ -16,10 +16,10 @@
 import { Container, Text, Spacer } from '@moonshot-ai/pi-tui';
 import type { TUI } from '@moonshot-ai/pi-tui';
 
-import { STATUS_BULLET } from '#/tui/constant/symbols';
+import { STATUS_BULLET, TEARDROP } from '#/tui/constant/symbols';
 import { currentTheme } from '#/tui/theme';
 
-const BLINK_INTERVAL = 500;
+const BLINK_INTERVAL = 700;
 
 export class CompactionComponent extends Container {
   private readonly ui: TUI | undefined;
@@ -62,10 +62,7 @@ export class CompactionComponent extends Container {
 
   private removeInstructionChild(): void {
     if (this.instructionText === undefined) return;
-    const index = this.children.indexOf(this.instructionText);
-    if (index !== -1) {
-      this.children.splice(index, 1);
-    }
+    this.removeChild(this.instructionText);
     this.instructionText = undefined;
   }
 
@@ -147,25 +144,26 @@ export class CompactionComponent extends Container {
 
   private buildHeader(): string {
     if (this.done) {
-      const bullet = currentTheme.fg('success', STATUS_BULLET);
-      const label = currentTheme.boldFg('success', 'Compaction complete');
+      // Claude style: the whole boundary line is dim — '✻ Conversation
+      // compacted', optional token delta, optional history hint.
+      const label = currentTheme.dim(`${TEARDROP} Conversation compacted`);
       const detail =
         this.tokensBefore !== undefined && this.tokensAfter !== undefined
           ? currentTheme.dim(` (${String(this.tokensBefore)} → ${String(this.tokensAfter)} tokens)`)
           : '';
       const shortcutHint =
         this.summary !== undefined && this.summary.length > 0
-          ? currentTheme.dim(` (Ctrl-O to ${this.expanded ? 'hide' : 'show'} compaction summary)`)
+          ? currentTheme.dim(' (ctrl+o for history)')
           : '';
-      return `${bullet}${label}${detail}${shortcutHint}`;
+      return `${label}${detail}${shortcutHint}`;
     }
     if (this.canceled) {
       const bullet = currentTheme.fg('warning', STATUS_BULLET);
       const label = currentTheme.boldFg('warning', 'Compaction cancelled');
       return `${bullet}${label}`;
     }
-    const bullet = this.blinkOn ? currentTheme.fg('text', STATUS_BULLET) : '  ';
-    const label = currentTheme.boldFg('primary', 'Compacting context...');
+    const bullet = this.blinkOn ? currentTheme.boldFg('primary', `${TEARDROP} `) : '  ';
+    const label = currentTheme.boldFg('primary', 'Compacting conversation…');
     const tip = this.tip ? currentTheme.fg('textDim', ` · Tip: ${this.tip}`) : '';
     return `${bullet}${label}${tip}`;
   }

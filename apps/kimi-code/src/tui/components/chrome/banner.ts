@@ -1,16 +1,19 @@
-import type { Component } from '@moonshot-ai/pi-tui';
+import { bumpVersion, type Component } from '@moonshot-ai/pi-tui';
 import { visibleWidth, wrapTextWithAnsi } from '@moonshot-ai/pi-tui';
 
 import { currentTheme } from '#/tui/theme';
 import type { BannerState } from '#/tui/types';
 
-const PREFIX_STAR = '✦';
+const PREFIX_STAR = '✻';
 const PADDING = ' ';
 
 export class BannerComponent implements Component {
+  version = 0;
   constructor(private readonly state: BannerState) {}
 
-  invalidate(): void {}
+  invalidate(): void {
+    bumpVersion(this);
+  }
 
   render(width: number): string[] {
     const main = (s: string): string => currentTheme.boldFg('textStrong', s);

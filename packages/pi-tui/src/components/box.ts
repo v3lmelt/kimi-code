@@ -1,4 +1,4 @@
-import type { Component } from "../tui.ts";
+import { bumpVersion, type Component } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth } from "../utils.ts";
 
 type RenderCache = {
@@ -13,6 +13,7 @@ type RenderCache = {
  */
 export class Box implements Component {
 	children: Component[] = [];
+	version = 0;
 	private paddingX: number;
 	private paddingY: number;
 	private bgFn?: (text: string) => string;
@@ -51,6 +52,7 @@ export class Box implements Component {
 
 	private invalidateCache(): void {
 		this.cache = undefined;
+		bumpVersion(this);
 	}
 
 	private matchCache(width: number, childLines: string[], bgSample: string | undefined): boolean {

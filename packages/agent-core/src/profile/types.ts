@@ -13,8 +13,16 @@ export type RawSubagentProfile = z.infer<typeof RawSubagentProfileSchema>;
  * Symbolic model preference a profile declares for subagent spawning: the
  * `Agent` / `AgentSwarm` tools use it as the default for their `model`
  * parameter when the call does not pass one explicitly.
+ *
+ * `'primary'` / `'secondary'` select the caller's model / the configured
+ * secondary model; `'inherit'` explicitly inherits the caller's model (the
+ * behavior when no secondary model is configured); any other non-empty string
+ * is taken as a concrete model alias defined in `[models]`. The reserved
+ * values shadow same-named `[models]` aliases.
  */
-export const AgentModelPreferenceSchema = z.enum(['primary', 'secondary']);
+export const AgentModelPreferenceSchema = z
+  .enum(['primary', 'secondary', 'inherit'])
+  .or(z.string());
 
 export type AgentModelPreference = z.infer<typeof AgentModelPreferenceSchema>;
 

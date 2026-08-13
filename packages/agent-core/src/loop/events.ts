@@ -121,6 +121,16 @@ export interface LoopThinkingDeltaEvent {
   readonly delta: string;
 }
 
+/**
+ * Mid-step token-usage update, fired live whenever the provider reports usage
+ * during streaming. Live-only: never recorded, never replayed.
+ */
+export interface LoopStepUsageEvent {
+  readonly type: 'step.usage';
+  readonly step: number;
+  readonly usage: TokenUsage;
+}
+
 export interface LoopToolCallDeltaEvent {
   readonly type: 'tool.call.delta';
   readonly toolCallId: string;
@@ -146,6 +156,7 @@ export type LoopLiveOnlyEvent =
   | LoopStepRetryingEvent
   | LoopTextDeltaEvent
   | LoopThinkingDeltaEvent
+  | LoopStepUsageEvent
   | LoopToolCallDeltaEvent
   | LoopToolProgressEvent;
 

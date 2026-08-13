@@ -38,7 +38,7 @@ import type {
 
 type ChatStreamingCallbacks = Pick<
   LLMChatParams,
-  'onTextDelta' | 'onThinkDelta' | 'onToolCallDelta' | 'onTextPart' | 'onThinkPart'
+  'onTextDelta' | 'onThinkDelta' | 'onToolCallDelta' | 'onUsageDelta' | 'onTextPart' | 'onThinkPart'
 >;
 
 export interface ExecuteLoopStepDeps {
@@ -562,6 +562,9 @@ function createChatStreamingCallbacks(deps: {
         name: delta.name,
         argumentsPart: delta.argumentsPart,
       });
+    },
+    onUsageDelta: (usage) => {
+      dispatchEvent({ type: 'step.usage', step: currentStep, usage });
     },
     onTextPart: async (part) => {
       await dispatchEvent({

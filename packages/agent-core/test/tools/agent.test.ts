@@ -136,19 +136,25 @@ describe('AgentTool', () => {
     expect(tool.description).toContain('Default to a foreground subagent');
   });
 
-  it('exposes a primary/secondary model parameter in the JSON schema when the experiment is enabled', () => {
+  it('exposes a free-form model parameter in the JSON schema when the experiment is enabled', () => {
     const host = mockSubagentHost({ spawn: vi.fn() });
     const tool = agentTool(host, createBackgroundManager().manager, undefined, {
       modelChoiceEnabled: true,
     });
     const properties = (
       tool.parameters as {
-        properties: Record<string, { description?: string; enum?: string[] }>;
+        properties: Record<string, { description?: string; type?: string; enum?: unknown }>;
       }
     ).properties;
 
-    expect(properties['model']?.enum).toEqual(['primary', 'secondary']);
-    expect(properties['model']?.description).toContain('secondary');
+    // Any model alias configured in [models] is accepted, so the schema is a
+    // bare string — not a primary/secondary enum.
+    expect(properties['model']?.type).toBe('string');
+    expect(properties['model']?.enum).toBeUndefined();
+    const modelDescription = properties['model']?.description ?? '';
+    expect(modelDescription).toContain('primary');
+    expect(modelDescription).toContain('secondary');
+    expect(modelDescription).toContain('inherit');
   });
 
   it('strips the model parameter from the JSON schema by default', () => {

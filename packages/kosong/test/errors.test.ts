@@ -8,6 +8,7 @@ import {
   APIStatusError,
   APITimeoutError,
   ChatProviderError,
+  MissingApiKeyError,
   isImageFormatError,
   isProviderRateLimitError,
   isRecoverableRequestStructureError,
@@ -15,6 +16,7 @@ import {
   isToolExchangeAdjacencyError,
   normalizeAPIStatusError,
 } from '#/errors';
+import { requireProviderApiKey } from '#/providers/request-auth';
 import { describe, expect, it } from 'vitest';
 
 describe('ChatProviderError', () => {
@@ -24,6 +26,26 @@ describe('ChatProviderError', () => {
     expect(err).toBeInstanceOf(ChatProviderError);
     expect(err.message).toBe('base error');
     expect(err.name).toBe('ChatProviderError');
+  });
+});
+
+describe('MissingApiKeyError', () => {
+  it('extends ChatProviderError', () => {
+    const err = new MissingApiKeyError('apiKey is required');
+    expect(err).toBeInstanceOf(Error);
+    expect(err).toBeInstanceOf(ChatProviderError);
+    expect(err.name).toBe('MissingApiKeyError');
+    expect(err.message).toBe('apiKey is required');
+  });
+
+  it('is thrown by requireProviderApiKey when no credential is available', () => {
+    expect(() => requireProviderApiKey('SomeProvider', undefined)).toThrow(MissingApiKeyError);
+    expect(() => requireProviderApiKey('SomeProvider', undefined, '')).toThrow(MissingApiKeyError);
+    expect(() => requireProviderApiKey('SomeProvider', undefined)).toThrow(/apiKey is required/);
+    expect(requireProviderApiKey('SomeProvider', undefined, 'key')).toBe('key');
+    expect(requireProviderApiKey('SomeProvider', { apiKey: 'per-request' }, 'key')).toBe(
+      'per-request',
+    );
   });
 });
 
@@ -179,6 +201,10 @@ describe('isRetryableGenerateError', () => {
     expect(isRetryableGenerateError(new ChatProviderError('unclassified upstream failure'))).toBe(
       true,
     );
+  });
+
+  it('does not retry a missing API key — the failure is deterministic', () => {
+    expect(isRetryableGenerateError(new MissingApiKeyError('apiKey is required'))).toBe(false);
   });
 });
 

@@ -93,6 +93,12 @@ export interface LLMChatParams {
   onThinkDelta?: ((delta: string) => void) | undefined;
   onToolCallDelta?: ((delta: ToolCallDelta) => void) | undefined;
   /**
+   * Fires whenever the provider reports token usage mid-stream (e.g. Anthropic
+   * `message_start` / `message_delta`). Purely informational live counters;
+   * the authoritative per-step usage still arrives with the chat response.
+   */
+  onUsageDelta?: ((usage: TokenUsage) => void) | undefined;
+  /**
    * Fires once per completed text block. Additive relative to
    * `onTextDelta` — deltas still fire chunk-by-chunk for UI streaming.
    * Returned promises are awaited by the adapter to preserve transcript append

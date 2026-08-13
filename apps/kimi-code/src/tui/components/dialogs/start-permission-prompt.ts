@@ -57,11 +57,11 @@ export class StartPermissionPromptComponent<TChoice extends StartPermissionChoic
   }
 
   render(width: number): string[] {
-    const rule = currentTheme.fg('primary', '─'.repeat(width));
+    const rule = currentTheme.fg('border', '─'.repeat(width));
     const lines = [
       rule,
-      currentTheme.boldFg('primary', ` ${this.opts.title}`),
-      currentTheme.fg('textMuted', ' ↑↓ navigate · Enter select · Esc cancel'),
+      currentTheme.boldFg('textStrong', ` ${this.opts.title}`),
+      currentTheme.fg('textMuted', ' ↑↓ navigate · enter select · esc cancel'),
       '',
     ];
 
@@ -93,7 +93,7 @@ export class StartPermissionPromptComponent<TChoice extends StartPermissionChoic
 }
 
 function styleLabel(label: string, selected: boolean): string {
-  if (selected) return currentTheme.boldFg('primary', label);
+  if (selected) return currentTheme.fg('primary', label);
   return styleModeNames(label, 'text');
 }
 

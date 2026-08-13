@@ -191,10 +191,10 @@ describe('built-in slash command registry', () => {
     expect(resolveSlashCommandAvailability(reloadTui!, '')).toBe('always');
   });
 
-  it('gates secondary_model behind the secondary-model experiment, always available', () => {
+  it('registers secondary_model as always available', () => {
     const command = findBuiltInSlashCommand('secondary_model');
     expect(command).toBeDefined();
-    expect((command as KimiSlashCommand).experimentalFlag).toBe('secondary-model');
+    expect((command as KimiSlashCommand).experimentalFlag).toBeUndefined();
     expect(resolveSlashCommandAvailability(command!, '')).toBe('always');
   });
 });
