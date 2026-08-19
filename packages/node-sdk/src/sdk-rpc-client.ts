@@ -98,6 +98,12 @@ export class SDKRpcClient extends SDKRpcClientBase {
               new OpenAIResponsesModelProvider({
                 ...openai,
                 promptCacheKey: openai.promptCacheKey ?? sessionId,
+                tokenProvider:
+                  openai.tokenProvider ??
+                  (openai.authentication === 'chatgpt'
+                    ? this.auth.resolveOpenAICodexTokenProvider()
+                    : undefined),
+                clientVersion: openai.clientVersion ?? this.identity?.version,
               }),
     });
     this.ready = sdkRpc(new ClientAPI(this));

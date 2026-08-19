@@ -1,6 +1,6 @@
 # Providers and models
 
-Hasu CLI supports connecting to multiple LLM platforms simultaneously — one-click login via the Kimi Code managed service, connecting Claude with an Anthropic API key, or connecting third-party inference services via the OpenAI-compatible protocol. Each provider corresponds to a specific API protocol; models are declared on top of providers with their own name, context length, and capabilities. This page explains how to configure each type of provider in `config.toml`.
+Hasu CLI supports connecting to multiple LLM platforms simultaneously — OAuth login for Kimi Code and OpenAI ChatGPT, connecting Claude with an Anthropic API key, or connecting third-party inference services via the OpenAI-compatible protocol. Each provider corresponds to a specific API protocol; models are declared on top of providers with their own name, context length, and capabilities. This page explains how to configure each type of provider in `config.toml`.
 
 ## Supported provider types
 
@@ -12,6 +12,7 @@ The `type` field in the `providers` table determines which protocol implementati
 | `anthropic` | Anthropic Messages | Claude model family |
 | `openai` | OpenAI Chat Completions | OpenAI and compatible services, DeepSeek, Qwen, etc. |
 | `openai_responses` | OpenAI Responses API | OpenAI's newer Responses interface |
+| `openai-codex` | Codex Responses | ChatGPT subscription through OAuth |
 | `google-genai` | Google GenAI | Gemini API |
 | `vertexai` | Google GenAI on Vertex | Google Cloud Vertex AI |
 
@@ -35,7 +36,7 @@ Two paths when adding:
 - **Custom registry (api.json)**: paste a custom registry URL and Bearer token; the CLI automatically creates the `providers` / `models` entries. On later startup, providers from the same registry URL are refreshed together, so upstream provider additions, removals, and model metadata changes are synced.
 
 ::: warning
-Kimi Code OAuth managed accounts logged in via `/login` do not appear in `/provider`. Use `/login` and `/logout` to manage them.
+Kimi Code and OpenAI ChatGPT OAuth accounts do not appear in `/provider`. Use `/login` and `/logout` to manage them.
 :::
 
 The same operations are also available in non-interactive environments via the shell command: [`hasu provider`](../reference/kimi-command.md#hasu-provider).
@@ -107,6 +108,23 @@ base_url = "https://api.openai.com/v1"
 api_key = "sk-xxxxx"
 ```
 
+## `openai-codex`
+
+Run `/login`, select **OpenAI ChatGPT OAuth**, and complete the browser
+authorization. Before opening the browser, the CLI copies the full
+authorization URL to the clipboard so you can paste it manually if needed. The
+CLI listens on `localhost:1455` for the OAuth callback. After authentication
+succeeds, choose a built-in GPT-5.6 model. The CLI writes all built-in OpenAI
+models to `config.toml`, makes the selected model the default, stores the OAuth
+credential under the Hasu home directory, and refreshes access tokens
+automatically. The models then appear under the **OpenAI ChatGPT** tab in
+`/model`. Run `/logout` and select **OpenAI ChatGPT** to remove both the
+credential and the provider configuration.
+
+This login path uses a ChatGPT subscription with the Codex Responses backend.
+It does not use `OPENAI_API_KEY`; OpenAI Platform API-key billing remains a
+separate authentication path.
+
 ### In-process harness
 
 The TypeScript harness has a runtime-only OpenAI entry that does not persist
@@ -124,6 +142,33 @@ const harness = createKimiHarness({
 
 const session = await harness.createSession({ workDir: process.cwd() });
 ```
+
+The harness also supports signing in with a ChatGPT subscription through the
+Codex OAuth flow:
+
+```ts
+const harness = createKimiHarness({
+  openai: {
+    authentication: 'chatgpt',
+    defaultModel: 'gpt-5.6-sol',
+  },
+});
+
+await harness.auth.loginOpenAI({
+  onAuthorization: ({ url }) => {
+    console.log(`Open this URL to sign in: ${url}`);
+  },
+});
+
+const session = await harness.createSession({ workDir: process.cwd() });
+```
+
+The browser flow listens on `localhost:1455` for the OAuth callback. On a
+headless host, use `flow: 'device'` and show the supplied URL and user code.
+The harness stores the credential under its home directory and refreshes it
+automatically. This mode uses the ChatGPT subscription and Codex Responses
+backend, so `OPENAI_API_KEY` is not required. OpenAI Platform API-key usage and
+ChatGPT subscription usage remain separate authentication choices.
 
 The built-in entries are `gpt-5.6-sol`, `gpt-5.6-terra`, and
 `gpt-5.6-luna`. All three use the Responses API with a 1,050,000-token context
@@ -178,7 +223,7 @@ To route Vertex requests through a custom (e.g. proxied) endpoint, set `base_url
 
 ## OAuth and credential injection
 
-The Kimi Code managed service uses OAuth rather than static API keys. After running `/login`, the built-in authentication toolchain automatically writes and refreshes credentials — no manual configuration is needed in `config.toml` for this.
+Kimi Code and OpenAI ChatGPT support OAuth login. After running `/login`, the built-in authentication toolchain writes and refreshes credentials automatically. The OpenAI entry also writes its selected model and provider to `config.toml`.
 
 ## Next steps
 

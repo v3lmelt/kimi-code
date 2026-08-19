@@ -384,6 +384,7 @@ export interface OpenAIResponsesOptions {
   toolMessageConversion?: ToolMessageConversion | undefined;
   clientFactory?: (auth: ProviderRequestAuth) => OpenAI;
   convertError?: (error: unknown) => ChatProviderError | undefined;
+  buildParams?: (params: Record<string, unknown>) => Record<string, unknown>;
 }
 
 export interface OpenAIResponsesGenerationKwargs {
@@ -1048,6 +1049,9 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
   private readonly _httpClient: unknown;
   private readonly _clientFactory: ((auth: ProviderRequestAuth) => OpenAI) | undefined;
   private readonly _convertErrorHook: ((error: unknown) => ChatProviderError | undefined) | undefined;
+  private readonly _buildParamsHook:
+    | ((params: Record<string, unknown>) => Record<string, unknown>)
+    | undefined;
 
   constructor(options: OpenAIResponsesOptions) {
     const apiKey = options.apiKey ?? process.env['OPENAI_API_KEY'];
@@ -1063,6 +1067,7 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
     this._httpClient = options.httpClient;
     this._clientFactory = options.clientFactory;
     this._convertErrorHook = options.convertError;
+    this._buildParamsHook = options.buildParams;
 
     if (options.maxOutputTokens !== undefined) {
       this._generationKwargs.max_output_tokens = options.maxOutputTokens;
@@ -1157,7 +1162,7 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
 
     try {
       const client = this._createClient(options?.auth);
-      const createParams: Record<string, unknown> = {
+      let createParams: Record<string, unknown> = {
         model: this._model,
         input,
         tools: tools.map((t) => convertTool(t)),
@@ -1174,6 +1179,7 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
           ...responseFormatToResponsesText(options.responseFormat),
         };
       }
+      createParams = this._buildParamsHook?.(createParams) ?? createParams;
 
       if (
         !('responses' in client) ||

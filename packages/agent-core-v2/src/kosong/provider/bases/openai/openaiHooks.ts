@@ -51,17 +51,8 @@ export function composeOpenAIChatHooks(
     };
   }
 
-  const paramsBuilders = traits.filter(({ trait }) => trait.buildParams !== undefined);
-  if (paramsBuilders.length > 0) {
-    hooks.buildParams = (params) => {
-      let current = params;
-      for (const { trait, context } of paramsBuilders) {
-        const next = trait.buildParams!(current, context);
-        if (next !== undefined) current = next;
-      }
-      return current;
-    };
-  }
+  const buildParams = traitBuildParams(traits);
+  if (buildParams !== undefined) hooks.buildParams = buildParams;
 
   for (const { trait, context } of traits) {
     if (trait.convertTool !== undefined) {
@@ -101,6 +92,21 @@ export function composeOpenAIChatHooks(
   }
 
   return Object.keys(hooks).length > 0 ? hooks : undefined;
+}
+
+export function traitBuildParams(
+  traits: readonly ResolvedTrait[],
+): ((params: Record<string, unknown>) => Record<string, unknown>) | undefined {
+  const builders = traits.filter(({ trait }) => trait.buildParams !== undefined);
+  if (builders.length === 0) return undefined;
+  return (params) => {
+    let current = params;
+    for (const { trait, context } of builders) {
+      const next = trait.buildParams!(current, context);
+      if (next !== undefined) current = next;
+    }
+    return current;
+  };
 }
 
 export interface AggregatedEndpoint {

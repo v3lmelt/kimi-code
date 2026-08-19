@@ -184,6 +184,7 @@ import {
   IHostEnvironment,
   IHostFileSystem,
   IModelCatalog,
+  IModelOAuthTokens,
   IModelService,
   IProviderService,
   ISessionBtwService,
@@ -433,6 +434,17 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
     });
 
     const identity = assertKimiHostIdentity(this.identity);
+    const modelOAuthTokens: IModelOAuthTokens = {
+      _serviceBrand: undefined,
+      hasCachedAccessToken: async (provider, oauthRef) => {
+        const token = await this.auth.getCachedAccessToken(provider, oauthRef);
+        return token !== undefined && token.trim().length > 0;
+      },
+      getAccessToken: (provider, oauthRef, tokenOptions) =>
+        this.auth
+          .resolveOAuthTokenProvider(provider, oauthRef)
+          .getAccessToken(tokenOptions?.force === true ? { force: true } : undefined),
+    };
     const { app } = bootstrap(
       {
         homeDir: this.homeDir,
@@ -448,7 +460,10 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
           skillDirs: options.skillDirs,
         },
       },
-      [...logSeed(resolveLoggingConfig({ homeDir: this.homeDir, env: process.env }))],
+      [
+        ...logSeed(resolveLoggingConfig({ homeDir: this.homeDir, env: process.env })),
+        [IModelOAuthTokens, modelOAuthTokens],
+      ],
     );
     this.app = app;
     this.klient = createKlient({ scope: app });

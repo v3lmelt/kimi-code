@@ -888,6 +888,39 @@ describe('resolveRuntimeProvider customHeaders propagation', () => {
     });
   });
 
+  it('maps openai-codex to Responses Lite with session headers', () => {
+    const resolved = resolveRuntimeProvider({
+      promptCacheKey: 'session-test',
+      config: {
+        defaultModel: 'codex',
+        providers: {
+          codex: {
+            type: 'openai-codex',
+            apiKey: 'sk-test',
+            baseUrl: 'https://chatgpt.com/backend-api/codex',
+          },
+        },
+        models: {
+          codex: {
+            provider: 'codex',
+            model: 'gpt-5.6-sol',
+            maxContextSize: 1_000_000,
+          },
+        },
+      },
+    });
+
+    expect(resolved.provider).toMatchObject({
+      type: 'openai_responses',
+      codex: { responsesLite: true },
+      defaultHeaders: {
+        conversation_id: 'session-test',
+        session_id: 'session-test',
+        'x-client-request-id': 'session-test',
+      },
+    });
+  });
+
   it('keeps customHeaders isolated between resolved provider instances', () => {
     const config: KimiConfig = {
       defaultModel: 'gpt-alias',

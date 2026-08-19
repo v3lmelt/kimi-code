@@ -53,6 +53,14 @@ registerProviderDefinition({
 });
 
 registerProviderDefinition({
+  id: 'openai-codex',
+  baseProtocol: 'openai_responses',
+  traits: [{ buildParams: shapeOpenAICodexResponsesLiteParams }],
+  endpoint: { defaultBaseUrl: 'https://chatgpt.com/backend-api/codex' },
+  hostHeaders: 'user-agent',
+});
+
+registerProviderDefinition({
   id: 'google-genai',
   baseProtocol: 'google-genai',
   traits: [
@@ -60,6 +68,55 @@ registerProviderDefinition({
     { endpoint: () => ({ apiKeyEnv: 'GOOGLE_API_KEY', baseUrlEnv: 'GOOGLE_GEMINI_BASE_URL' }) },
   ],
 });
+
+function shapeOpenAICodexResponsesLiteParams(
+  params: Record<string, unknown>,
+): Record<string, unknown> {
+  delete params['max_output_tokens'];
+  delete params['max_completion_tokens'];
+
+  const input = Array.isArray(params['input']) ? params['input'] : [];
+  stripImageDetails(input);
+  const tools = Array.isArray(params['tools']) ? params['tools'] : [];
+  const prefix: unknown[] = [{ type: 'additional_tools', role: 'developer', tools }];
+  const instructions = params['instructions'];
+  if (typeof instructions === 'string' && instructions.length > 0) {
+    prefix.push({
+      type: 'message',
+      role: 'developer',
+      content: [{ type: 'input_text', text: instructions }],
+    });
+  }
+  params['input'] = [...prefix, ...input];
+  params['parallel_tool_calls'] = false;
+  if (params['tool_choice'] !== 'none' && params['tool_choice'] !== 'required') {
+    params['tool_choice'] = 'auto';
+  }
+  params['reasoning'] = { ...asRecord(params['reasoning']), context: 'all_turns' };
+  delete params['instructions'];
+  delete params['tools'];
+  return params;
+}
+
+function stripImageDetails(input: unknown[]): void {
+  for (const item of input) {
+    const record = asRecord(item);
+    for (const field of ['content', 'output']) {
+      const parts = record[field];
+      if (!Array.isArray(parts)) continue;
+      for (const part of parts) {
+        const partRecord = asRecord(part);
+        if (partRecord['type'] === 'input_image') delete partRecord['detail'];
+      }
+    }
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : {};
+}
 
 // OpenCode Go — an endpoint-only definition so the OPENCODE_GO_API_KEY env
 // chain resolves (id-level queries read this one). Models route to their wire
