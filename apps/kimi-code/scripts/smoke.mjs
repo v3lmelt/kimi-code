@@ -7,7 +7,6 @@ import { promisify } from 'node:util';
 const execFileAsync = promisify(execFile);
 const appRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const bundlePath = resolve(appRoot, 'dist', 'main.mjs');
-const webIndexPath = resolve(appRoot, 'dist-web', 'index.html');
 const packageJson = JSON.parse(await readFile(resolve(appRoot, 'package.json'), 'utf-8'));
 const expectedVersion = packageJson.version;
 
@@ -21,14 +20,6 @@ async function ensureBundleExists() {
     await stat(bundlePath);
   } catch {
     fail(`Bundle not found at ${bundlePath}. Run \`pnpm build\` first.`);
-  }
-}
-
-async function ensureRuntimeAssetsExist() {
-  try {
-    await stat(webIndexPath);
-  } catch {
-    fail(`Runtime asset not found at ${webIndexPath}. Run \`pnpm build\` first.`);
   }
 }
 
@@ -54,18 +45,14 @@ function assertIncludes(output, expected, command) {
 }
 
 await ensureBundleExists();
-await ensureRuntimeAssetsExist();
 
 const versionOutput = await runBundle(['--version']);
 assertIncludes(versionOutput, expectedVersion, '--version');
 
 const helpOutput = await runBundle(['--help']);
-assertIncludes(helpOutput, 'Usage: kimi', '--help');
+assertIncludes(helpOutput, 'Usage: hasu', '--help');
 
 const exportHelpOutput = await runBundle(['export', '--help']);
-assertIncludes(exportHelpOutput, 'Usage: kimi export', 'export --help');
-
-const webHelpOutput = await runBundle(['web', '--help']);
-assertIncludes(webHelpOutput, 'Usage: kimi web', 'web --help');
+assertIncludes(exportHelpOutput, 'Usage: hasu export', 'export --help');
 
 console.log(`Bundle smoke passed: ${bundlePath}`);

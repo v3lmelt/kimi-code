@@ -7,4 +7,9 @@ export const STREAMING_ARGS_FIELD_RE =
 export const STREAMING_ARGS_PREVIEW_MAX_CHARS = 64 * 1024;
 
 // Coalesces high-frequency model/tool deltas before rebuilding TUI components.
-export const STREAMING_UI_FLUSH_MS = 80;
+export const STREAMING_UI_FLUSH_MS = 120;
+
+// Fixed delay for the very first flush (no prior cadence yet). Slightly delays
+// the first markdown rebuild off the first-delta tick to avoid a synchronous
+// full re-render inside the input hot path.
+export const STREAMING_UI_FIRST_FLUSH_MS = 24;

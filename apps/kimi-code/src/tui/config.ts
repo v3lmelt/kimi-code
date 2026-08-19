@@ -24,6 +24,11 @@ export const NotificationConditionSchema = z.enum(['unfocused', 'always']);
 export const NotificationsConfigSchema = z.object({
   enabled: z.boolean(),
   condition: NotificationConditionSchema,
+  /** Also fire a Windows desktop toast (via PowerShell) on top of the
+   *  terminal OSC 9 / BEL notification. Present in every normalized config
+   *  (defaults to false); optional only so hand-built test fixtures from
+   *  before this field existed still typecheck. */
+  system: z.boolean().optional(),
 });
 
 export const UpgradePreferencesSchema = z.object({
@@ -65,6 +70,7 @@ export const TuiConfigFileSchema = z.object({
     .object({
       enabled: z.boolean().optional(),
       notification_condition: NotificationConditionSchema.optional(),
+      system: z.boolean().optional(),
     })
     .optional(),
   upgrade: z
@@ -100,6 +106,7 @@ export type UpgradePreferences = z.infer<typeof UpgradePreferencesSchema>;
 export const DEFAULT_NOTIFICATIONS_CONFIG: NotificationsConfig = {
   enabled: true,
   condition: 'unfocused',
+  system: false,
 };
 
 export const DEFAULT_UPGRADE_PREFERENCES: UpgradePreferences = {
@@ -203,6 +210,7 @@ export function normalizeTuiConfig(
       enabled: config.notifications?.enabled ?? DEFAULT_NOTIFICATIONS_CONFIG.enabled,
       condition:
         config.notifications?.notification_condition ?? DEFAULT_NOTIFICATIONS_CONFIG.condition,
+      system: config.notifications?.system ?? DEFAULT_NOTIFICATIONS_CONFIG.system,
     },
     upgrade: {
       autoInstall: config.upgrade?.auto_install ?? DEFAULT_UPGRADE_PREFERENCES.autoInstall,
@@ -241,7 +249,7 @@ export function renderTuiConfig(config: TuiConfig): string {
 # command = "~/.kimi-code/statusline.sh"
 `;
   return `# ~/.kimi-code/tui.toml
-# Client preferences for kimi-code.
+# Client preferences for hasu.
 # Agent/runtime settings stay in ~/.kimi-code/config.toml.
 
 theme = "${escapeTomlBasicString(config.theme)}" # "auto" | "dark" | "light" | "claude" | custom theme name
@@ -255,6 +263,7 @@ command = "${escapeTomlBasicString(config.editorCommand ?? '')}" # Empty uses $V
 [notifications]
 enabled = ${String(config.notifications.enabled)} # true | false
 notification_condition = "${config.notifications.condition}" # "unfocused" | "always"
+system = ${String(config.notifications.system)} # true | false — Windows desktop toast
 
 [upgrade]
 auto_install = ${String(config.upgrade.autoInstall)} # true | false

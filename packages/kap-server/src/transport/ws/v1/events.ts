@@ -175,10 +175,18 @@ export interface QuestionTaskInfo extends TaskInfoBase {
   readonly toolCallId?: string;
 }
 
+export interface WorkflowTaskInfo extends TaskInfoBase {
+  readonly kind: 'workflow';
+  readonly runId: string;
+  readonly workflowName: string;
+  readonly scriptSha256: string;
+}
+
 export type TaskInfo =
   | ProcessTaskInfo
   | AgentTaskInfo
-  | QuestionTaskInfo;
+  | QuestionTaskInfo
+  | WorkflowTaskInfo;
 
 /**
  * Legacy background-task lifecycle events (`background.task.started` /

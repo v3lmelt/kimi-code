@@ -271,7 +271,7 @@ function toKosongProviderConfig(
   adaptiveThinking: boolean | undefined,
   betaApi: boolean | undefined,
 ): KosongProviderConfig {
-  const effectiveType = modelProtocol === 'anthropic' ? 'anthropic' : provider.type;
+  const effectiveType = modelProtocol ?? provider.type;
   const envCustomHeaders = parseKimiCodeCustomHeaders();
   switch (effectiveType) {
     case 'anthropic': {
@@ -314,6 +314,25 @@ function toKosongProviderConfig(
         ),
       };
     }
+    case 'opencode-go':
+      // Fallback for a hand-written opencode-go alias without a model-level
+      // `protocol`: default to the OpenAI chat/completions transport (the
+      // gateway's most common wire). Provisioned models carry an explicit
+      // protocol and route through their own branch above.
+      return {
+        type: 'openai',
+        model,
+        baseUrl: modelBaseUrl ?? provider.baseUrl,
+        apiKey: providerApiKey(provider),
+        reasoningKey,
+        offEffort,
+        generationKwargs: { prompt_cache_key: promptCacheKey },
+        ...defaultHeadersField({
+          ...envCustomHeaders,
+          ...kimiUserAgentHeader(kimiRequestHeaders),
+          ...provider.customHeaders,
+        }),
+      };
     case 'openai':
       return {
         type: 'openai',
@@ -445,6 +464,8 @@ function providerApiKey(provider: ProviderConfig): string | undefined {
       return providerValue(provider.apiKey, provider.env, 'OPENAI_API_KEY');
     case 'kimi':
       return providerValue(provider.apiKey, provider.env, 'KIMI_API_KEY');
+    case 'opencode-go':
+      return providerValue(provider.apiKey, provider.env, 'OPENCODE_GO_API_KEY');
     case 'google-genai':
       return providerValue(provider.apiKey, provider.env, 'GOOGLE_API_KEY');
     case 'vertexai':

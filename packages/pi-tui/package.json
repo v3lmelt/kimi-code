@@ -54,6 +54,7 @@
 		"build": "tsdown",
 		"typecheck": "tsc -p tsconfig.json --noEmit",
 		"test": "node --test test/*.test.ts",
+		"bench:markdown": "node bench/markdown-incremental-bench.ts",
 		"clean": "rm -rf dist"
 	},
 	"dependencies": {

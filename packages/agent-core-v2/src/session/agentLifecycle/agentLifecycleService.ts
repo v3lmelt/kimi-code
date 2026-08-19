@@ -3,7 +3,9 @@
  *
  * Creates and tracks the session's agents as child scopes in a flat registry,
  * serializing same-id bootstrap and dropping incomplete handles after startup
- * failure. Seeds each agent's identity through `agent` scopeContext, wires
+ * failure. Enforces the subagent nesting depth cap against the persisted
+ * parent chain, stamping each subagent with its depth label. Seeds each
+ * agent's identity through `agent` scopeContext, wires
  * per-agent wire records and the wire state machine, the blob store, and MCP,
  * and registers the agent in the session registry. Binds the agent id into the
  * Agent-scoped telemetry view. New logs receive a metadata
@@ -56,7 +58,9 @@ import {
   type CreateAgentOptions,
   type ForkAgentOptions,
   IAgentLifecycleService,
+  SUBAGENT_DEPTH_CAP,
 } from './agentLifecycle';
+import { SUBAGENT_DEPTH_LABEL, subagentDepth } from './subagentMetadata';
 
 let nextAgentId = 0;
 
@@ -161,12 +165,13 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     try {
       const wire = handle.accessor.get(IWireService);
       await wire.seal();
+      const labels = await this.depthCheckedLabels(agentId, opts);
       await this.sessionMetadata.registerAgent(agentId, {
         homedir: agentHomedir,
         type: agentId === 'main' ? 'main' : 'sub',
         parentAgentId: agentId === 'main' ? undefined : 'main',
         forkedFrom: opts.forkedFrom,
-        labels: opts.labels,
+        labels,
       });
       this.onDidCreateEmitter.fire(handle);
       await wire.restore();
@@ -183,12 +188,36 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     }
   }
 
+  private async depthCheckedLabels(
+    agentId: string,
+    opts: CreateAgentOptions,
+  ): Promise<Readonly<Record<string, string>> | undefined> {
+    const parentAgentId = opts.labels?.['parentAgentId'];
+    if (parentAgentId === undefined) return opts.labels;
+    const parentMeta = (await this.sessionMetadata.read()).agents?.[parentAgentId];
+    const depth = (subagentDepth(parentMeta) ?? 0) + 1;
+    if (depth > SUBAGENT_DEPTH_CAP) {
+      throw new Error2(
+        ErrorCodes.AGENT_DEPTH_LIMIT_EXCEEDED,
+        `Subagent nesting limit reached (depth ${String(depth)} of ${String(SUBAGENT_DEPTH_CAP)})`,
+        { details: { agentId, parentAgentId, depth, limit: SUBAGENT_DEPTH_CAP } },
+      );
+    }
+    return { ...opts.labels, [SUBAGENT_DEPTH_LABEL]: String(depth) };
+  }
+
   private async bindBootstrap(
     handle: IAgentScopeHandle,
     opts: CreateAgentOptions,
   ): Promise<void> {
     if (opts.binding !== undefined) {
       await handle.accessor.get(IAgentProfileService).bind(opts.binding);
+    } else {
+      // Session resume: the wire replay restores the persisted profile binding
+      // but `bind` never runs, so re-point the memory file scope at the bound
+      // profile — otherwise a project-scoped agent would silently fall back
+      // to the user-scoped memory file. No-op while no profile is bound.
+      await handle.accessor.get(IAgentProfileService).syncMemoryScope();
     }
     const wire = handle.accessor.get(IWireService);
     const permissionMode = this.config.get<PermissionMode>(DEFAULT_PERMISSION_MODE_SECTION);
@@ -225,6 +254,10 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
       childProfile.applyBindingSnapshot(sourceData);
       if (override?.model !== undefined) await childProfile.setModel(override.model);
       if (override?.thinking !== undefined) childProfile.setThinking(override.thinking);
+      // The snapshot path rebuilds the binding without `bind`, so re-point the
+      // memory file scope at the resolved profile (the override branch above
+      // already scoped it inside `bind`).
+      await childProfile.syncMemoryScope();
     }
 
     const sourceMessages = source.accessor.get(IAgentContextMemoryService)?.get();

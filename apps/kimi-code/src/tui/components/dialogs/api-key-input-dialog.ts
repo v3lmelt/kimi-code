@@ -84,6 +84,10 @@ export class ApiKeyInputDialogComponent extends Container implements Focusable {
       this.emptyHinted = false;
     }
     this.input.handleInput(data);
+    // Version-cache: the input line renders into this panel's hand-drawn
+    // output, so a bare Input mutation would let a parent container serve
+    // its cached lines.
+    this.bump();
   }
 
   override invalidate(): void {

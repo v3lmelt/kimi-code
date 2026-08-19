@@ -15,10 +15,12 @@
  */
 
 import { toDisposable } from '#/_base/di/lifecycle';
+import { IInstantiationService } from '#/_base/di/instantiation';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { AsyncEmitter, type Event } from '#/_base/event';
 import { defineState } from '#/_base/state/stateRegistry';
+import { IConfigService } from '#/app/config/config';
 import type { ContentPart, ToolCall } from '#/kosong/contract/message';
 import type { ToolInputDisplay } from '@moonshot-ai/protocol';
 
@@ -65,17 +67,21 @@ import {
   type ToolExecutorExecuteOptions,
   type UnavailableToolDescriber,
 } from './toolExecutor';
-import { ToolScheduler } from './toolScheduler';
+import { ToolScheduler, isAbortedBeforeDispatchError } from './toolScheduler';
+import { TOOL_EXECUTOR_SECTION, type ToolExecutorConfig } from './configSection';
 import './toolExecutorEvents';
 
 const ABORT_GRACE_MS = 2_000;
 const TOOL_OUTPUT_EMPTY = 'Tool output is empty.';
 const TOOL_OUTPUT_NON_TEXT = 'Tool returned non-text content.';
+const TOOL_UI_PREVIEW_MAX_CHARS = 2_000;
+const BASH_TOOL_NAME = 'Bash';
 
 const validators = new WeakMap<ExecutableTool, ToolArgsValidator>();
 
 export interface ToolExecutionTask {
   readonly accesses: ToolAccesses;
+  readonly toolName?: string;
   readonly execute: (signal: AbortSignal) => Promise<ToolExecutionRunResult>;
 }
 
@@ -106,6 +112,7 @@ type ToolExecutionStreamEvent =
   | { readonly type: 'timedRejected'; readonly reason: unknown }
   | {
       readonly type: 'finalized';
+      readonly index: number;
       readonly promise: ToolExecutionResultPromise;
       readonly settled: SettledToolExecutionResult;
     };
@@ -167,6 +174,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     @IAgentToolResultTruncationService
     private readonly resultTruncation: IAgentToolResultTruncationService,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IInstantiationService private readonly instantiation: IInstantiationService,
     @ILogService private readonly log?: ILogService,
   ) {
     this.states.register(toolExecutorToolCallDupTypesKey);
@@ -237,10 +245,30 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
       options.signal,
     )[Symbol.asyncIterator]();
     let nextTimed: Promise<IteratorResult<TimedToolResult>> | undefined = timedResults.next();
-    const finalizations = new Set<ToolExecutionResultPromise>();
+    // Keyed by model call index so results commit in model order: a result is
+    // only yielded once every earlier call's result is ready, even though
+    // dispatch and finalization overlap in completion order.
+    const finalizations = new Map<number, ToolExecutionResultPromise>();
+    const committedByIndex = new Map<number, ToolExecutionResult>();
+    let nextCommitIndex = 0;
+
+    const flushReady = (): ToolExecutionResult | undefined => {
+      const value = committedByIndex.get(nextCommitIndex);
+      if (value === undefined) return undefined;
+      committedByIndex.delete(nextCommitIndex);
+      nextCommitIndex += 1;
+      return value;
+    };
 
     try {
-      while (nextTimed !== undefined || finalizations.size > 0) {
+      for (;;) {
+        let ready = flushReady();
+        while (ready !== undefined) {
+          yield ready;
+          ready = flushReady();
+        }
+        if (nextTimed === undefined && finalizations.size === 0) break;
+
         const candidates: Array<Promise<ToolExecutionStreamEvent>> = [];
         if (nextTimed !== undefined) {
           candidates.push(
@@ -250,10 +278,11 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
             ),
           );
         }
-        for (const promise of finalizations) {
+        for (const [index, promise] of finalizations) {
           candidates.push(
             promise.then((settled): ToolExecutionStreamEvent => ({
               type: 'finalized',
+              index,
               promise,
               settled,
             })),
@@ -270,22 +299,23 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
             continue;
           }
 
+          const index = event.result.value.index;
           const finalization = this.finalizeTimedResult(
-            preparedTasks[event.result.value.index]!,
+            preparedTasks[index]!,
             event.result.value,
             options,
           ).then(
             (value): SettledToolExecutionResult => ({ status: 'fulfilled', value }),
             (reason): SettledToolExecutionResult => ({ status: 'rejected', reason }),
           );
-          finalizations.add(finalization);
+          finalizations.set(index, finalization);
           nextTimed = timedResults.next();
           continue;
         }
 
-        finalizations.delete(event.promise);
+        finalizations.delete(event.index);
         if (event.settled.status === 'rejected') throw event.settled.reason;
-        yield event.settled.value;
+        committedByIndex.set(event.index, event.settled.value);
       }
     } finally {
       await timedResults.return?.();
@@ -342,6 +372,21 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     };
     if (result.isError === true) properties['error_type'] = toolTelemetryErrorType(outcome);
     this.telemetry.track2('tool_call', properties);
+  }
+
+  /** Resolves the bounded dispatch-pool bound from the `[tool_executor]`
+   *  config section. `IConfigService` may be absent in minimal scopes (e.g.
+   *  unit-test containers), in which case dispatch stays unbounded. */
+  private resolveMaxParallelToolCalls(): number | undefined {
+    try {
+      return this.instantiation.invokeFunction((accessor) =>
+        (accessor.get(IConfigService) as IConfigService | undefined)
+          ?.get<ToolExecutorConfig>(TOOL_EXECUTOR_SECTION)
+          ?.maxParallelToolCalls,
+      );
+    } catch {
+      return undefined;
+    }
   }
 
   private async prepareToolCall(
@@ -445,6 +490,7 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     return {
       task: {
         accesses: execution.accesses ?? ToolAccesses.all(),
+        toolName: call.toolName,
         execute: async (taskSignal) =>
           this.runSingleExecution(call, execution, executionMetadata, options, taskSignal),
       },
@@ -468,9 +514,12 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     tasks: ToolExecutionTask[],
     signal: AbortSignal,
   ): AsyncIterable<TimedToolResult> {
-    const scheduler = new ToolScheduler<TimedToolResult>();
+    const scheduler = new ToolScheduler<TimedToolResult>({
+      maxParallel: this.resolveMaxParallelToolCalls(),
+    });
     const allResults: Array<Promise<TimedToolResult>> = [];
     const pendingResults = new Map<number, Promise<SettledTimedToolResult>>();
+    const siblingAbortController = new AbortController();
 
     for (let index = 0; index < tasks.length; index += 1) {
       const task = tasks[index]!;
@@ -478,8 +527,9 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
         accesses: task.accesses,
         start: async () => {
           const startedAt = Date.now();
+          const taskSignal = AbortSignal.any([signal, siblingAbortController.signal]);
           return {
-            result: task.execute(signal).then(({ result, outcome }) => ({
+            result: task.execute(taskSignal).then(({ result, outcome }) => ({
               index,
               result,
               outcome,
@@ -498,12 +548,47 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
       );
     }
 
+    // Settle never-dispatched (still queued) tasks so the batch never waits on
+    // them: a batch abort or a sibling-abort classifies them as aborted-before-
+    // dispatch instead of starting them against an already-aborted signal.
+    if (signal.aborted) {
+      scheduler.abort(signal);
+    } else {
+      signal.addEventListener('abort', () => scheduler.abort(signal), { once: true });
+    }
+    siblingAbortController.signal.addEventListener(
+      'abort',
+      () => scheduler.abort(siblingAbortController.signal),
+      { once: true },
+    );
+
     try {
       while (pendingResults.size > 0) {
         const settled = await Promise.race(pendingResults.values());
         const index = settled.status === 'fulfilled' ? settled.value.index : settled.index;
         pendingResults.delete(index);
-        if (settled.status === 'rejected') throw settled.reason;
+        if (settled.status === 'rejected') {
+          if (isAbortedBeforeDispatchError(settled.reason)) {
+            yield {
+              index,
+              result: {
+                output: abortedToolOutput(tasks[index]?.toolName ?? 'Tool', signal),
+                isError: true,
+              },
+              outcome: 'aborted',
+              durationMs: 0,
+            };
+            continue;
+          }
+          throw settled.reason;
+        }
+        if (
+          tasks[index]?.toolName === BASH_TOOL_NAME &&
+          settled.value.outcome === 'executed' &&
+          settled.value.result.isError === true
+        ) {
+          siblingAbortController.abort();
+        }
         yield settled.value;
       }
     } finally {
@@ -604,11 +689,14 @@ export class AgentToolExecutorService implements IAgentToolExecutorService {
     result: ToolResult,
     options: ToolExecutorExecuteOptions,
   ): void {
+    const { uiPreview, truncated } = buildUiPreview(result.output);
     this.eventBus.publish({
       type: 'tool.result',
       turnId: options.turnId,
       toolCallId: call.toolCall.id,
-      output: result.output,
+      uiPreview,
+      truncated,
+      output: uiPreview,
       isError: result.isError,
     });
   }
@@ -823,6 +911,7 @@ function makeResolvedTask(
 ): ToolExecutionTask {
   return {
     accesses: ToolAccesses.none(),
+    toolName: result.toolName,
     execute: async () => ({ result: result.result, outcome }),
   };
 }
@@ -921,6 +1010,16 @@ function toolOutputText(output: ToolResult['output']): string {
     .filter((part): part is Extract<ContentPart, { type: 'text' }> => part.type === 'text')
     .map((part) => part.text)
     .join('');
+}
+
+function buildUiPreview(
+  output: ToolResult['output'],
+): { uiPreview: string; truncated: boolean } {
+  const text = toolOutputText(output) || TOOL_OUTPUT_NON_TEXT;
+  if (text.length <= TOOL_UI_PREVIEW_MAX_CHARS) {
+    return { uiPreview: text, truncated: false };
+  }
+  return { uiPreview: text.slice(0, TOOL_UI_PREVIEW_MAX_CHARS), truncated: true };
 }
 
 function isMediaContentPart(part: ContentPart): boolean {

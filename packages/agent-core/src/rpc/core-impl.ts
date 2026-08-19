@@ -98,6 +98,7 @@ import type {
   ClientTelemetryInfo,
   EmptyPayload,
   EnterSwarmPayload,
+  EnterUltracodePayload,
   GoalSnapshot,
   GoalToolResult,
   GlobalMcpServerAuthState,
@@ -964,6 +965,18 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
 
   getSwarmMode({ sessionId, ...payload }: SessionAgentPayload<EmptyPayload>) {
     return this.sessionApi(sessionId).getSwarmMode(payload);
+  }
+
+  enterUltracode({ sessionId, ...payload }: SessionAgentPayload<EnterUltracodePayload>) {
+    return this.sessionApi(sessionId).enterUltracode(payload);
+  }
+
+  exitUltracode({ sessionId, ...payload }: SessionAgentPayload<EmptyPayload>) {
+    return this.sessionApi(sessionId).exitUltracode(payload);
+  }
+
+  getUltracode({ sessionId, ...payload }: SessionAgentPayload<EmptyPayload>) {
+    return this.sessionApi(sessionId).getUltracode(payload);
   }
 
   beginCompaction({ sessionId, ...payload }: SessionAgentPayload<BeginCompactionPayload>) {

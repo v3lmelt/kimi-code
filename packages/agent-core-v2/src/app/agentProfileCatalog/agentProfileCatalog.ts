@@ -24,7 +24,9 @@
  * (`undefined` = every tool active); `disallowedTools` denies with the same
  * matching semantics, applied on top of the allowlist result. `subagents` is
  * an allowlist of subagent profile names the agent may delegate to
- * (`undefined` = any type).
+ * (`undefined` = any type). `memory` scopes the agent's cross-session
+ * `MEMORY.md` file: `'user'` (the default) keeps one shared file under the
+ * brand home, `'project'` keeps one file per working directory.
  *
  * Profiles reach agents through the Contribution / Registry / Catalog
  * extension point: loaders (builtin code contributions via
@@ -69,9 +71,12 @@ export interface AgentProfileContext {
   readonly timeZone?: string;
   readonly skills?: string;
   readonly skillActive?: boolean;
+  readonly todoActive?: boolean;
   readonly pluginSections?: string;
   readonly productName?: string;
   readonly replyStyleGuide?: string;
+  readonly modelName?: string;
+  readonly modelId?: string;
   readonly [key: string]: unknown;
 }
 
@@ -96,10 +101,18 @@ export interface AgentProfile {
   readonly disallowedTools?: readonly string[];
   readonly subagents?: readonly string[];
   readonly modelPreference?: AgentModelPreference;
+  // Memory scope for the agent's cross-session MEMORY.md: 'user' (default,
+  // shared across machines under the brand home) or 'project' (per working
+  // directory under <memoryDir>/projects/<projectKey>/).
+  readonly memory?: 'user' | 'project';
   readonly systemPrompt: (context: AgentProfileContext) => string;
   readonly renderSystemPrompt: (context: AgentProfileContext) => SystemPromptRenderResult;
   readonly promptPrefix?: (ctx: AgentProfilePromptPrefixContext) => Promise<string>;
   readonly summaryPolicy?: AgentProfileSummaryPolicy;
+  // Omit the workspace-derived context (AGENTS.md, cwd listing, plugin
+  // sections) from the rendered prompt — for lean, read-only profiles that
+  // must not pay the AGENTS.md / listing token cost.
+  readonly omitContext?: boolean;
 }
 
 /**

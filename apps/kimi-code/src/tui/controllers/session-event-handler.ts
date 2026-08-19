@@ -1,4 +1,5 @@
 import type { Component, Focusable } from '@moonshot-ai/pi-tui';
+import type { WorkflowProgressEvent } from '@moonshot-ai/agent-core-v2';
 import type {
   AgentStatusUpdatedEvent,
   AssistantDeltaEvent,
@@ -27,6 +28,7 @@ import type {
   TurnStartedEvent,
   TurnStepCompletedEvent,
   TurnStepInterruptedEvent,
+  TurnStepRetryingEvent,
   TurnStepStartedEvent,
   TurnStepUsageEvent,
   TokenUsage,
@@ -90,6 +92,18 @@ import type {
 } from '../types';
 import type { TUIState } from '../tui-state';
 import { createGoal as startGoalCommand } from '../commands/goal';
+import {
+  applyWorkflowProgressEvent,
+  extractWorkflowProgressEvent,
+} from '../utils/workflow-model';
+
+/**
+ * Coalesces footer agent-row refreshes from high-frequency events
+ * (`agent.status.updated` per subagent, background-task churn) into a 250ms
+ * window. The footer's own 1s agent timer backstops the display, so the
+ * worst-case staleness stays imperceptible.
+ */
+const FOOTER_SYNC_THROTTLE_MS = 250;
 
 export interface SessionEventHost {
   state: TUIState;
@@ -138,6 +152,9 @@ export class SessionEventHandler {
       syncBackgroundAgentBadge: () => {
         this.syncBackgroundTaskBadge();
       },
+      syncRunningAgentsFooter: () => {
+        this.syncRunningAgentsFooter();
+      },
     });
     this.pluginUpdateNotifier =
       pluginUpdateNotifier ??
@@ -152,6 +169,7 @@ export class SessionEventHandler {
 
   // Runtime state – owned by this handler, reset between sessions.
   backgroundTasks: Map<string, BackgroundTaskInfo> = new Map();
+  private readonly workflowBackgroundTasks = new Map<string, { readonly status: string }>();
   backgroundTaskTranscriptedTerminal: Set<string> = new Set();
 
   renderedSkillActivationIds: Set<string> = new Set();
@@ -165,12 +183,29 @@ export class SessionEventHandler {
   private estimatedOutputTokens = 0;
   /** Last wall-clock time the model produced any output (feeds stall detection). */
   private lastActivityAtMs = 0;
+  /** In-flight step retry (from `turn.step.retrying`), surfaced on the spinner
+   *  status row. Cleared once the step resumes, completes, or the turn ends. */
+  private stepRetry:
+    | {
+        delayMs: number;
+        failedAttempt: number;
+        nextAttempt: number;
+        maxAttempts: number;
+        errorName: string;
+      }
+    | undefined = undefined;
   private pluginCommandTurns: Map<string, string> = new Map();
   private pluginMcpToolsUsedInTurn: Set<string> = new Set();
   private pendingModelBlockedFallback: GoalChange | undefined;
   private queuedGoalPromotionPending = false;
   private queuedGoalPromotionInFlight = false;
   private queuedGoalPromotionTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Pending throttled footer agent-row sync (see `syncRunningAgentsFooter`). */
+  private footerSyncTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Latest in-flight step usage, coalesced into appState on a 250ms trailing timer. */
+  private latestStepUsageLive: { input: number; output: number } | undefined;
+  /** Pending throttled in-flight usage sync (see `syncTurnUsageFooter`). */
+  private turnUsageSyncTimer: ReturnType<typeof setTimeout> | undefined;
 
   resetRuntimeState(): void {
     this.backgroundTasks.clear();
@@ -185,12 +220,17 @@ export class SessionEventHandler {
     this.currentTurnHasAssistantText = false;
     this.estimatedOutputTokens = 0;
     this.lastActivityAtMs = 0;
+    this.stepRetry = undefined;
     this.pluginCommandTurns.clear();
     this.pluginMcpToolsUsedInTurn.clear();
     this.pendingModelBlockedFallback = undefined;
+    this.host.setAppState({ sessionCacheUsage: undefined });
     this.queuedGoalPromotionPending = false;
     this.queuedGoalPromotionInFlight = false;
     this.clearQueuedGoalPromotionTimer();
+    this.clearFooterSyncTimer();
+    this.clearTurnUsageTimer();
+    this.latestStepUsageLive = undefined;
     this.stopAllMcpServerStatusSpinners();
   }
 
@@ -219,6 +259,19 @@ export class SessionEventHandler {
   /** Last time the model streamed output (thinking/text/tool), for stall UI. */
   getLastActivityAtMs(): number {
     return this.lastActivityAtMs;
+  }
+
+  /** Live step-retry info for the spinner's retry/rate-limit status line. */
+  getStepRetryStatus():
+    | {
+        delayMs: number;
+        failedAttempt: number;
+        nextAttempt: number;
+        maxAttempts: number;
+        errorName: string;
+      }
+    | undefined {
+    return this.stepRetry;
   }
 
   startSubscription(): void {
@@ -284,6 +337,18 @@ export class SessionEventHandler {
       return;
     }
 
+    // The engine's `workflow.progress` wire event reaches the client through
+    // the SDK event channel (a closed v1 union, hence the runtime extract).
+    // Fold it into appState.workflowRuns so the /workflows command renders live
+    // run progress without polling. Deliberately handled before the turn-scoped
+    // block below: workflow runs are background tasks and may settle outside
+    // any in-flight turn.
+    const workflowProgress = extractWorkflowProgressEvent(event);
+    if (workflowProgress !== undefined) {
+      this.handleWorkflowProgress(workflowProgress);
+      return;
+    }
+
     if ('turnId' in event && event.turnId !== undefined) {
       this.host.streamingUI.setTurnId(String(event.turnId));
     }
@@ -295,7 +360,7 @@ export class SessionEventHandler {
       case 'turn.step.interrupted': this.handleStepInterrupted(event); break;
       case 'turn.step.completed': this.handleStepCompleted(event); break;
       case 'turn.step.usage': this.handleStepUsage(event); break;
-      case 'turn.step.retrying': break;
+      case 'turn.step.retrying': this.handleStepRetrying(event); break;
       case 'tool.progress': this.handleToolProgress(event); break;
       case 'shell.output': this.host.handleShellOutput(event); break;
       case 'shell.started': this.host.handleShellStarted(event); break;
@@ -359,6 +424,10 @@ export class SessionEventHandler {
       pendingApproval: null,
       pendingQuestion: null,
     });
+    // Drop any leftover usage-coalesce timer from the previous turn so its
+    // pending live value cannot bleed into the fresh turn's usage slot.
+    this.clearTurnUsageTimer();
+    this.latestStepUsageLive = undefined;
     this.host.setAppState({
       streamingPhase: 'waiting',
       streamingStartTime: Date.now(),
@@ -387,6 +456,7 @@ export class SessionEventHandler {
 
   private handleTurnEnd(event: TurnEndedEvent, sendQueued: (item: QueuedMessage) => void): void {
     this.host.streamingUI.flushNow();
+    this.stepRetry = undefined;
     if (event.reason === 'cancelled') {
       this.markActiveAgentSwarmsCancelled();
     }
@@ -402,7 +472,17 @@ export class SessionEventHandler {
     }
     this.host.streamingUI.resetToolUi();
     this.host.streamingUI.finalizeTurn(sendQueued);
-    this.host.setAppState({ turnUsage: undefined });
+    this.clearTurnUsageTimer();
+    this.latestStepUsageLive = undefined;
+    // Fold the turn's settled output into the session-cumulative counter
+    // (read before the clear) and reset the live slot in the same setAppState
+    // so the AppState reference stays stable across the update.
+    this.host.setAppState({
+      turnUsage: undefined,
+      sessionOutputTokens:
+        (this.host.state.appState.sessionOutputTokens ?? 0) +
+        (this.host.state.appState.turnUsage?.output ?? 0),
+    });
     this.estimatedOutputTokens = 0;
     this.host.recordSessionActivity();
     this.renderPendingModelBlockedFallback();
@@ -430,6 +510,7 @@ export class SessionEventHandler {
 
   private handleStepBegin(event: TurnStepStartedEvent): void {
     this.estimatedOutputTokens = 0;
+    this.stepRetry = undefined;
     this.host.streamingUI.flushNow();
     this.host.streamingUI.setStep(event.step);
     this.host.streamingUI.resetToolUi();
@@ -464,29 +545,93 @@ export class SessionEventHandler {
   }
 
   /**
-   * The event's usage is cumulative for the in-flight step, so it replaces
-   * (not accumulates into) the live slot; the settled totals stay untouched
-   * until the step completes.
+   * Fold a completed step's exact usage into the session-cumulative cache
+   * counters that feed the footer's cache-hit-rate slot. Unlike
+   * {@link accumulateTurnUsage} the input split is kept: the hit rate is
+   * cache-read over all input tokens, so the three input buckets must be
+   * summed across steps (output is not needed for the rate).
    */
-  private handleStepUsage(event: TurnStepUsageEvent): void {
-    const current = this.host.state.appState.turnUsage;
-    if (current === undefined) return;
+  private accumulateSessionCacheUsage(usage: TokenUsage | undefined): void {
+    if (usage === undefined) return;
+    const current = this.host.state.appState.sessionCacheUsage;
     this.host.setAppState({
-      turnUsage: {
-        ...current,
-        live: {
-          input:
-            event.usage.inputOther + event.usage.inputCacheRead + event.usage.inputCacheCreation,
-          output: event.usage.output,
-        },
+      sessionCacheUsage: {
+        inputOther: (current?.inputOther ?? 0) + usage.inputOther,
+        inputCacheRead: (current?.inputCacheRead ?? 0) + usage.inputCacheRead,
+        inputCacheCreation: (current?.inputCacheCreation ?? 0) + usage.inputCacheCreation,
       },
     });
   }
 
+  /**
+   * The event's usage is cumulative for the in-flight step, so it replaces
+   * (not accumulates into) the live slot; the settled totals stay untouched
+   * until the step completes. Pushed through a 250ms trailing throttle (see
+   * {@link syncTurnUsageFooter}) because `turn.step.usage` fires repeatedly
+   * while streaming and every event used to re-render the whole footer.
+   */
+  private handleStepUsage(event: TurnStepUsageEvent): void {
+    const current = this.host.state.appState.turnUsage;
+    if (current === undefined) return;
+    this.latestStepUsageLive = {
+      input:
+        event.usage.inputOther + event.usage.inputCacheRead + event.usage.inputCacheCreation,
+      output: event.usage.output,
+    };
+    this.syncTurnUsageFooter();
+  }
+
+  /**
+   * Trailing 250ms throttle for the in-flight usage slot, mirroring
+   * `syncRunningAgentsFooter`: a burst of usage events coalesces into one
+   * appState push, while the timer still renders the last event of the burst
+   * after the stream pauses. The coalesced apply re-reads
+   * `latestStepUsageLive`, so the final applied value always equals the last
+   * event received.
+   */
+  private syncTurnUsageFooter(): void {
+    if (this.turnUsageSyncTimer !== undefined) return;
+    this.turnUsageSyncTimer = setTimeout(() => {
+      this.turnUsageSyncTimer = undefined;
+      const current = this.host.state.appState.turnUsage;
+      const live = this.latestStepUsageLive;
+      if (current === undefined || live === undefined) return;
+      this.latestStepUsageLive = undefined;
+      this.host.setAppState({
+        turnUsage: {
+          ...current,
+          live,
+        },
+      });
+    }, FOOTER_SYNC_THROTTLE_MS);
+  }
+
+  private clearTurnUsageTimer(): void {
+    if (this.turnUsageSyncTimer === undefined) return;
+    clearTimeout(this.turnUsageSyncTimer);
+    this.turnUsageSyncTimer = undefined;
+  }
+
+  /** Surfaces the in-flight step retry on the spinner status row so the user
+   *  sees it waiting out the delay (e.g. rate limits / transient provider
+   *  errors) instead of a silent spinner. */
+  private handleStepRetrying(event: TurnStepRetryingEvent): void {
+    this.stepRetry = {
+      delayMs: event.delayMs,
+      failedAttempt: event.failedAttempt,
+      nextAttempt: event.nextAttempt,
+      maxAttempts: event.maxAttempts,
+      errorName: event.errorName,
+    };
+    this.host.state.ui.requestRender();
+  }
+
   private handleStepCompleted(event: TurnStepCompletedEvent): void {
     this.host.streamingUI.flushNow();
+    this.stepRetry = undefined;
     this.host.noteStepUsage(event.usage);
     this.accumulateTurnUsage(event.usage);
+    this.accumulateSessionCacheUsage(event.usage);
     this.estimatedOutputTokens = 0;
     this.maybeShowDebugTiming(event);
 
@@ -510,7 +655,7 @@ export class SessionEventHandler {
         ? 'Model hit max_tokens — tool call was truncated before it could run.'
         : 'Model hit max_tokens — no tool call was emitted.';
     const detail = this.isAnthropicSessionActive()
-      ? 'If this limit is wrong for your model, set `max_output_size` on the model alias in your kimi-code config.'
+      ? 'If this limit is wrong for your model, set `max_output_size` on the model alias in your hasu config.'
       : undefined;
     this.host.showNotice(title, detail);
   }
@@ -542,6 +687,7 @@ export class SessionEventHandler {
 
   private handleStepInterrupted(event: TurnStepInterruptedEvent): void {
     this.host.streamingUI.flushNow();
+    this.stepRetry = undefined;
     this.host.streamingUI.resetToolUi();
     this.host.streamingUI.finalizeLiveTextBuffers('idle');
     const reason = event.reason;
@@ -744,6 +890,7 @@ export class SessionEventHandler {
     if (event.maxContextTokens !== undefined) patch.maxContextTokens = event.maxContextTokens;
     if (event.planMode !== undefined) patch.planMode = event.planMode;
     if (event.swarmMode !== undefined) patch.swarmMode = event.swarmMode;
+    if (event.ultracode !== undefined) patch.ultracode = event.ultracode;
     if (event.permission !== undefined) {
       patch.permissionMode = event.permission;
     }
@@ -764,6 +911,24 @@ export class SessionEventHandler {
       new SwarmModeMarkerComponent(state),
     );
     this.host.state.ui.requestRender();
+  }
+
+  /**
+   * Fold one `workflow.progress` event into `appState.workflowRuns`. The
+   * reducer returns the same array reference when the event changes nothing
+   * (unknown run, phase re-entry, late terminal settle), so `setAppState`'s
+   * reference-equality gate skips redundant renders.
+   */
+  private handleWorkflowProgress(progress: WorkflowProgressEvent): void {
+    const current = this.host.state.appState.workflowRuns;
+    const next = applyWorkflowProgressEvent(current, progress);
+    if (next === current) return;
+    this.host.setAppState({ workflowRuns: next });
+    this.syncBackgroundTaskBadge();
+    // The footer workflow rows read this ledger — without a sync they would
+    // keep showing the snapshot from whichever unrelated event last triggered
+    // a recompute.
+    this.syncRunningAgentsFooter();
   }
 
   private handleGoalUpdated(event: GoalUpdatedEvent): void {
@@ -1076,9 +1241,9 @@ export class SessionEventHandler {
     const children = state.transcriptContainer.children;
     const idx = children.indexOf(spinner);
     if (idx >= 0) {
-      // In-place replacement is picked up by the container's ref-checked
-      // render cache; a tree-wide invalidate is unnecessary (and costly).
-      children[idx] = status;
+      // In-place replacement rewires PARENT/version state via replaceChild
+      // without a tree-wide invalidate.
+      state.transcriptContainer.replaceChild(idx, status);
     } else {
       state.transcriptContainer.addChild(status);
     }
@@ -1189,6 +1354,15 @@ export class SessionEventHandler {
   ): void {
     const { state } = this.host;
     const { info } = event;
+    // Workflow runs publish their own progress stream and TUI ledger. Track
+    // only their lifecycle for the footer badge; the background-task browser
+    // and transcript cards accept the legacy process/agent/question union.
+    if (info.kind === 'workflow') {
+      this.workflowBackgroundTasks.set(info.taskId, info);
+      this.syncBackgroundTaskBadge();
+      this.syncRunningAgentsFooter();
+      return;
+    }
     const previous = this.backgroundTasks.get(info.taskId);
     this.backgroundTasks.set(info.taskId, info);
 
@@ -1270,6 +1444,10 @@ export class SessionEventHandler {
     const { state } = this.host;
     let bashTasks = 0;
     let agentTasks = 0;
+    let workflowTasks = 0;
+    for (const info of this.workflowBackgroundTasks.values()) {
+      if (info.status === 'running') workflowTasks += 1;
+    }
     for (const info of this.backgroundTasks.values()) {
       if (
         info.status === 'completed' ||
@@ -1286,12 +1464,30 @@ export class SessionEventHandler {
         bashTasks += 1;
       }
     }
-    state.footer.setBackgroundCounts({ bashTasks, agentTasks });
+    state.footer.setBackgroundCounts({ bashTasks, agentTasks, workflowTasks });
     state.ui.requestRender();
   }
 
+  /**
+   * Throttled footer agent-row refresh. `agent.status.updated` (main and
+   * subagents) and background-task events fire far more often than the footer
+   * needs a recompute — 20+ parallel subagents can emit hundreds of events
+   * per second, each previously re-reading every card snapshot. The trailing
+   * timer coalesces a burst into one sync per FOOTER_SYNC_THROTTLE_MS and
+   * still renders the last event of a burst after the stream pauses.
+   */
   private syncRunningAgentsFooter(): void {
-    this.host.state.footer.setRunningAgents(this.subAgentEventHandler.collectRunningAgents());
-    this.host.state.ui.requestRender();
+    if (this.footerSyncTimer !== undefined) return;
+    this.footerSyncTimer = setTimeout(() => {
+      this.footerSyncTimer = undefined;
+      this.host.state.footer.setRunningAgents(this.subAgentEventHandler.collectRunningAgents());
+      this.host.state.ui.requestRender();
+    }, FOOTER_SYNC_THROTTLE_MS);
+  }
+
+  private clearFooterSyncTimer(): void {
+    if (this.footerSyncTimer === undefined) return;
+    clearTimeout(this.footerSyncTimer);
+    this.footerSyncTimer = undefined;
   }
 }

@@ -78,6 +78,13 @@ export class AuthFlowController {
 
   async activateModelAfterLogin(model: string, effort?: string): Promise<void> {
     const { host } = this;
+    // The virtual 'ultracode' segment of the model/effort picker is a mode
+    // switch, never a real thinking effort: strip it here so it can not leak
+    // into setThinking / session creation as a literal reasoning_effort.
+    // Entering ultracode mode is handled by session.setUltracode callers.
+    if (effort === 'ultracode') {
+      effort = undefined;
+    }
     if (host.session !== undefined) {
       await host.session.setModel(model);
       if (effort !== undefined) {

@@ -15,6 +15,10 @@ import type { ImageAttachment } from '#/tui/utils/image-attachment-store';
 import { isRenderCacheEnabled } from '#/tui/utils/render-cache';
 
 export class UserMessageComponent implements Component {
+  // Versioned from construction so Container's subtree short-circuit can skip
+  // us between mutations; every content change goes through markRenderDirty()
+  // -> bumpVersion(). Without this the transcript container stays alwaysDirty.
+  version = 0;
   private text: string;
   private readonly bullet?: string;
   private spacerComponent: Spacer;
@@ -129,6 +133,9 @@ function paintBackgroundBar(line: string, width: number, bg: string): string {
  * folding (and window trimming) can find the turn edges. Renders zero lines.
  */
 export class ReplayTurnBoundaryComponent implements Component {
+  // Renders nothing and never mutates, but must still be versioned so the
+  // transcript container's fast path is not disabled by this child.
+  version = 0;
   invalidate(): void {}
   render(_width: number): string[] {
     return [];

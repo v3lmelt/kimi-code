@@ -3,13 +3,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import {
+  AGENT_WIRE_RECORD_KEY,
   IAgentContextMemoryService,
   IAgentLifecycleService,
+  IAgentScopeContext,
+  IAppendLogStore,
   IWireService,
   getLiveSessionById,
   IModelCatalog,
   type ContextMessage,
   type ScopeSeed,
+  type WireRecord,
 } from '@moonshot-ai/agent-core-v2';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
@@ -362,5 +366,76 @@ describe('server-v2 /api/v1/sessions/{sid}/messages', () => {
     // … and 40403 for an unknown message id in the same cold session.
     const missing = await getJson<null>(`/api/v1/sessions/${id}/messages/msg_does_not_exist`);
     expect(missing.body.code).toBe(40403);
+  });
+
+  // Read-path cache (perf Top 5): the incremental fold must pick up records
+  // appended after the cache warmed — the cached fold is a state machine that
+  // keeps folding, not a snapshot.
+  it('serves messages appended after the history cache warmed (incremental fold)', async () => {
+    const id = await createSession();
+    await seedMainAgentMessages(id, [
+      { role: 'user', content: [{ type: 'text', text: 'm0' }], toolCalls: [] },
+      { role: 'assistant', content: [{ type: 'text', text: 'm1' }], toolCalls: [] },
+    ]);
+
+    // Warm the cache with two messages.
+    const warm = await getJson<PageWire>(`/api/v1/sessions/${id}/messages?page_size=100`);
+    expect(warm.body.data.items).toHaveLength(2);
+
+    // Append one more message and read again — the cache must not hide it.
+    const session = getLiveSessionById(server!.core.accessor, id);
+    const agent = session?.accessor.get(IAgentLifecycleService).get('main');
+    agent?.accessor
+      .get(IAgentContextMemoryService)
+      .append({ role: 'user', content: [{ type: 'text', text: 'm2' }], toolCalls: [] });
+    await agent?.accessor.get(IWireService).flush();
+
+    const after = await getJson<PageWire>(`/api/v1/sessions/${id}/messages?page_size=100`);
+    expect(after.body.data.items).toHaveLength(3);
+    expect(after.body.data.items[0]!.content).toMatchObject([{ type: 'text', text: 'm2' }]);
+  });
+
+  // Read-path cache invalidation: a journal rewrite (fewer records than
+  // folded, with different content) must force a full rebuild — the cached
+  // fold must not survive the rewrite. We rewrite the journal to a metadata
+  // + [m0, replacement] shape and expect the replacement message to show up:
+  // it only exists if the fold was rebuilt from the new log (the stale cache
+  // would keep serving the old m0..m3 prefix).
+  it('rebuilds the cached history after the journal is rewritten shorter', async () => {
+    const id = await createSession();
+    await seedMainAgentMessages(id, [
+      { role: 'user', content: [{ type: 'text', text: 'm0' }], toolCalls: [] },
+      { role: 'assistant', content: [{ type: 'text', text: 'm1' }], toolCalls: [] },
+      { role: 'user', content: [{ type: 'text', text: 'm2' }], toolCalls: [] },
+      { role: 'assistant', content: [{ type: 'text', text: 'm3' }], toolCalls: [] },
+    ]);
+
+    const warm = await getJson<PageWire>(`/api/v1/sessions/${id}/messages?page_size=100`);
+    expect(warm.body.data.items).toHaveLength(4);
+
+    // Rewrite the journal to metadata + [m0, replacement] — shorter than the
+    // folded prefix, with different content.
+    const session = getLiveSessionById(server!.core.accessor, id);
+    const agent = session?.accessor.get(IAgentLifecycleService).get('main');
+    if (agent === undefined) throw new Error('main agent missing');
+    const scope = agent.accessor.get(IAgentScopeContext).scope();
+    const log = server!.core.accessor.get(IAppendLogStore);
+    const records: WireRecord[] = [];
+    for await (const record of log.read<WireRecord>(scope, AGENT_WIRE_RECORD_KEY)) {
+      records.push(record);
+    }
+    const replacement: WireRecord = {
+      type: 'context.append_message',
+      message: { role: 'assistant', content: [{ type: 'text', text: 'replacement' }], toolCalls: [] },
+    };
+    await log.rewrite(scope, AGENT_WIRE_RECORD_KEY, [records[0]!, replacement]);
+
+    const after = await getJson<PageWire>(`/api/v1/sessions/${id}/messages?page_size=100`);
+    const texts = after.body.data.items.map((m) => (m.content[0] as { text?: string } | undefined)?.text);
+    // The fold was rebuilt from the NEW journal: `replacement` (only in the
+    // new log) is served, while `m0` (only in the old log) is gone — a stale
+    // cache would have kept serving m0..m3 and never seen the replacement.
+    expect(texts).toContain('replacement');
+    expect(texts).not.toContain('m0');
   });
 });

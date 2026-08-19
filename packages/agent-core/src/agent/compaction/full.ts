@@ -23,6 +23,7 @@ import type { Agent } from '..';
 import type { GenerateOptionsWithRequestLogFields } from '../llm-request-logger';
 import type { ContextMessage } from '../context/types';
 import { stripDynamicToolContext } from '../context/dynamic-tools';
+import { trimTrailingOpenToolExchange } from '../context/projector';
 import { isAbortError } from '../../loop/errors';
 import {
   findAPIStatusError,
@@ -456,17 +457,26 @@ export class FullCompaction {
       let overflowShrinkCount = 0;
       let emptyOrTruncatedShrinkCount = 0;
       while (true) {
-        // A request-building projection: close still-open calls in the sliced
-        // prefix (synthesizeMissing) and drop stray results with no call anywhere
-        // (dropOrphanResults), so the summarizer request cannot be rejected by a
-        // strict provider even when the history carries a legacy-restore orphan.
-        const messages = [
-          ...this.agent.context.project(historyForModel, {
-            synthesizeMissing: true,
-            dropOrphanResults: true,
-          }),
-          createUserMessage(instruction),
-        ];
+        // Replay the wire prefix: project with the same options as the normal
+        // wire projection (`context.messages` — dropOrphanResults only), so the
+        // summarizer request shares the exact prefix of the most recent wire
+        // request and hits the provider's KV cache; the instruction appended
+        // below is the only new input. When the replayed prefix still ends on
+        // an unresolved tool call (a delayed result sliced out by overflow
+        // shrink, or a legacy-restore orphan), close it with synthetic results
+        // first — a dangling tool_use followed by the appended user instruction
+        // breaks the alternating-role rule strict providers enforce.
+        const replay = this.agent.context.project(historyForModel, {
+          dropOrphanResults: true,
+        });
+        const prefix =
+          trimTrailingOpenToolExchange(replay).length < replay.length
+            ? this.agent.context.project(historyForModel, {
+                synthesizeMissing: true,
+                dropOrphanResults: true,
+              })
+            : replay;
+        const messages = [...prefix, createUserMessage(instruction)];
         const estimatedCompactionRequestTokens = this.estimateRequestTokens(messages);
         try {
           const trace = new LLMRequestTraceState();

@@ -113,6 +113,8 @@ export function groupMessagesIntoSnapshot(
   /** Next turn ordinal — 0-based, matching the engine's live turn numbering. */
   let nextOrdinal = 0;
   let markerCount = 0;
+  /** turnId → position in `items`; turns are only ever pushed, so appends keep it valid. */
+  const turnIndex = new Map<string, number>();
 
   /** Media parts of a turn-opening user message → attachment entities (+ ids). */
   const collectAttachments = (message: HistoryMessage): string[] | undefined => {
@@ -156,6 +158,7 @@ export function groupMessagesIntoSnapshot(
       nextOrdinal += 1;
       turn = { turnId: `t${ordinal}`, ordinal, origin, steps: [] };
       items.push(draftToTurnItem(turn));
+      turnIndex.set(turn.turnId, items.length - 1);
     }
     return turn;
   };
@@ -165,6 +168,7 @@ export function groupMessagesIntoSnapshot(
     nextOrdinal += 1;
     turn = { turnId: `t${ordinal}`, ordinal, origin, prompt, attachmentIds, steps: [] };
     items.push(draftToTurnItem(turn));
+    turnIndex.set(turn.turnId, items.length - 1);
     return turn;
   };
 
@@ -238,7 +242,7 @@ export function groupMessagesIntoSnapshot(
           input: parseArguments(call.arguments),
         });
       }
-      syncTurnItem(items, current);
+      syncTurnItem(items, turnIndex, current);
       continue;
     }
 
@@ -253,7 +257,7 @@ export function groupMessagesIntoSnapshot(
           error: message.isError ? output : undefined,
         };
         replaceToolFrame(turn!, message.toolCallId!, patched);
-        syncTurnItem(items, turn!);
+        syncTurnItem(items, turnIndex, turn!);
       }
     }
   }
@@ -359,8 +363,18 @@ function draftToTurnItem(draft: TurnDraft): TranscriptItem {
 }
 
 /** Re-project the (mutated) draft into the items array, preserving identity of slots. */
-function syncTurnItem(items: TranscriptItem[], draft: TurnDraft): void {
-  const index = items.findIndex((entry) => entry.kind === 'turn' && entry.turnId === draft.turnId);
+function syncTurnItem(
+  items: TranscriptItem[],
+  turnIndex: Map<string, number> | undefined,
+  draft: TurnDraft,
+): void {
+  let index = turnIndex?.get(draft.turnId) ?? -1;
+  const entry = index >= 0 ? items[index] : undefined;
+  if (entry?.kind !== 'turn' || entry.turnId !== draft.turnId) {
+    // Index drifted (defensive): fall back to a scan and heal the index.
+    index = items.findIndex((item) => item.kind === 'turn' && item.turnId === draft.turnId);
+    if (index >= 0 && turnIndex !== undefined) turnIndex.set(draft.turnId, index);
+  }
   if (index >= 0) items[index] = draftToTurnItem(draft);
 }
 

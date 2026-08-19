@@ -1254,6 +1254,17 @@ function budgetTelemetryProperties(limits: GoalBudgetLimits): GoalBudgetProperti
   };
 }
 
+/** Shared diminishing-returns guard: true when `used` has consumed at least
+ *  `threshold` of a positive `budget`. Extracted from the goal's budget-stop
+ *  detection so the main loop can reuse it for its context-budget nudge. */
+export function isBudgetNearingExhaustion(
+  used: number,
+  budget: number | undefined,
+  threshold = 0.75,
+): boolean {
+  return budget !== undefined && budget > 0 && used >= 0 && used / budget >= threshold;
+}
+
 function normalizeCompletionCriterion(value: string | undefined): string | undefined {
   const trimmed = value?.trim();
   if (!trimmed?.length) return undefined;

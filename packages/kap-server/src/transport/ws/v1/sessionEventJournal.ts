@@ -77,6 +77,13 @@ export class SessionEventJournal {
   private pendingLines: string[] = [];
   private flushPromise: Promise<void> | undefined;
   private headerPending: boolean;
+  /**
+   * Whether `mkdir(dirname(filePath), {recursive:true})` has already
+   * succeeded for this journal. `flushOnce()` skips the mkdir syscall on
+   * every subsequent round; any write failure resets it so the next round
+   * re-creates the directory (self-healing after an external removal).
+   */
+  private dirReady = false;
 
   private constructor(
     private readonly filePath: string,
@@ -212,9 +219,13 @@ export class SessionEventJournal {
     this.pendingLines = [];
     if (lines.length === 0) return;
     try {
-      await mkdir(dirname(this.filePath), { recursive: true });
+      if (!this.dirReady) {
+        await mkdir(dirname(this.filePath), { recursive: true });
+        this.dirReady = true;
+      }
       await appendFile(this.filePath, lines.join('\n') + '\n', 'utf8');
     } catch (error) {
+      this.dirReady = false;
       this.logger.warn(
         { filePath: this.filePath, err: String(error) },
         'event journal write failed; events remain live-only this round',

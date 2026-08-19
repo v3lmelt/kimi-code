@@ -1327,3 +1327,102 @@ describe('resolveRuntimeProvider model overrides', () => {
     expect(resolved.provider).not.toHaveProperty('supportEfforts');
   });
 });
+
+describe('resolveRuntimeProvider opencode-go routing', () => {
+  const OPENCODE_GO_CONFIG: KimiConfig = {
+    defaultModel: 'opencode-go/kimi-k2.7-code',
+    providers: {
+      'opencode-go': {
+        type: 'opencode-go',
+        apiKey: 'sk-opencode',
+        baseUrl: 'https://opencode.ai/zen/go/v1',
+      },
+    },
+    models: {
+      'opencode-go/kimi-k2.7-code': {
+        provider: 'opencode-go',
+        model: 'kimi-k2.7-code',
+        maxContextSize: 256_000,
+        protocol: 'openai',
+        baseUrl: 'https://opencode.ai/zen/go/v1',
+      },
+      'opencode-go/grok-4.5': {
+        provider: 'opencode-go',
+        model: 'grok-4.5',
+        maxContextSize: 256_000,
+        protocol: 'openai_responses',
+        baseUrl: 'https://opencode.ai/zen/go/v1',
+      },
+      'opencode-go/minimax-m3': {
+        provider: 'opencode-go',
+        model: 'minimax-m3',
+        maxContextSize: 128_000,
+        protocol: 'anthropic',
+        baseUrl: 'https://opencode.ai/zen/go',
+      },
+    },
+  };
+
+  it('routes chat/completions models to the openai transport', () => {
+    const resolved = resolveRuntimeProvider({
+      config: OPENCODE_GO_CONFIG,
+      model: 'opencode-go/kimi-k2.7-code',
+    });
+
+    expect(resolved.provider).toMatchObject({
+      type: 'openai',
+      model: 'kimi-k2.7-code',
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+      apiKey: 'sk-opencode',
+    });
+  });
+
+  it('routes responses models to the openai_responses transport', () => {
+    const resolved = resolveRuntimeProvider({
+      config: OPENCODE_GO_CONFIG,
+      model: 'opencode-go/grok-4.5',
+    });
+
+    expect(resolved.provider).toMatchObject({
+      type: 'openai_responses',
+      model: 'grok-4.5',
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+    });
+  });
+
+  it('routes anthropic-protocol models to the anthropic transport with /v1 stripped', () => {
+    const resolved = resolveRuntimeProvider({
+      config: OPENCODE_GO_CONFIG,
+      model: 'opencode-go/minimax-m3',
+    });
+
+    expect(resolved.provider).toMatchObject({
+      type: 'anthropic',
+      model: 'minimax-m3',
+      baseUrl: 'https://opencode.ai/zen/go',
+      apiKey: 'sk-opencode',
+    });
+  });
+
+  it('falls back to chat/completions for a hand-written alias without protocol', () => {
+    const resolved = resolveRuntimeProvider({
+      config: {
+        ...OPENCODE_GO_CONFIG,
+        models: {
+          'opencode-go/kimi-k3': {
+            provider: 'opencode-go',
+            model: 'kimi-k3',
+            maxContextSize: 256_000,
+          },
+        },
+      },
+      model: 'opencode-go/kimi-k3',
+    });
+
+    expect(resolved.provider).toMatchObject({
+      type: 'openai',
+      model: 'kimi-k3',
+      baseUrl: 'https://opencode.ai/zen/go/v1',
+    });
+  });
+});

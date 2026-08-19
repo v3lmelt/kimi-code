@@ -452,12 +452,11 @@ describe('AgentToolExecutorService', () => {
     expect(second.calls).toEqual([]);
   });
 
-  it('yields independent tool results as each call finishes', async () => {
+  it('yields independent tool results in model order, not completion order', async () => {
     const slowRelease = deferred();
     const fastRelease = deferred();
     const slowStarted = deferred();
     const fastStarted = deferred();
-    const firstYielded = deferred();
     const slow = new TestTool('slow', {
       accesses: ToolAccesses.readFile('/repo/slow.txt'),
       execute: async () => {
@@ -488,20 +487,20 @@ describe('AgentToolExecutorService', () => {
       )) {
         const output = item.result.output;
         yielded.push(typeof output === 'string' ? output : JSON.stringify(output));
-        if (yielded.length === 1) firstYielded.resolve();
       }
     })();
 
     await Promise.all([slowStarted.promise, fastStarted.promise]);
+    // The fast call finishes first, but dispatch is overlapped while results
+    // commit in model order — the slow (first) call's result gates the stream.
     fastRelease.resolve();
-    await firstYielded.promise;
-
-    expect(yielded).toEqual(['fast']);
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(yielded).toEqual([]);
 
     slowRelease.resolve();
     await execution;
 
-    expect(yielded).toEqual(['fast', 'slow']);
+    expect(yielded).toEqual(['slow', 'fast']);
   });
 
   it('writes resolveExecution description and display onto tool.call.started events', async () => {
@@ -773,7 +772,7 @@ describe('onBeforeExecuteTool veto semantics', () => {
     expect(tool.calls).toEqual([]);
   });
 
-  it('lets an allow end adjudication before later listeners run', async () => {
+  it('lets a later veto win after an allow (allow does not end adjudication)', async () => {
     const tool = new TestTool('echo');
     registry.register(tool);
     const later = vi.fn();
@@ -787,9 +786,9 @@ describe('onBeforeExecuteTool veto semantics', () => {
 
     const results = await execute([toolCall('call_echo', 'echo', { text: 'hi' })]);
 
-    expect(results).toEqual([expect.objectContaining({ output: 'hi' })]);
-    expect(later).not.toHaveBeenCalled();
-    expect(tool.calls).toHaveLength(1);
+    expect(results).toEqual([expect.objectContaining({ output: 'denied', isError: true })]);
+    expect(later).toHaveBeenCalled();
+    expect(tool.calls).toHaveLength(0);
   });
 
   it('threads pass metadata into the execution context', async () => {

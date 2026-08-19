@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'pathe';
 
@@ -200,5 +200,50 @@ describe('prepareSystemPromptContext additional directories', () => {
     expect(agentsMd.split('shared user instructions').length - 1).toBe(1);
     expect(agentsMd).not.toContain('extra A instructions');
     expect(agentsMd).not.toContain('extra B instructions');
+  });
+});
+
+describe('loadAgentsMd fingerprint cache', () => {
+  it('does not re-read an unchanged AGENTS.md file', async () => {
+    await writeFile(join(workDir, 'AGENTS.md'), 'project instructions', 'utf-8');
+    const readSpy = vi.spyOn(testKaos, 'readText');
+
+    const first = await loadAgentsMd(testKaos);
+    expect(first).toContain('project instructions');
+    expect(readSpy).toHaveBeenCalledTimes(1);
+
+    // Nothing changed — the second call must reuse the cached text.
+    const second = await loadAgentsMd(testKaos);
+    expect(second).toBe(first);
+    expect(readSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('re-reads a modified AGENTS.md file', async () => {
+    await writeFile(join(workDir, 'AGENTS.md'), 'v1', 'utf-8');
+    const readSpy = vi.spyOn(testKaos, 'readText');
+
+    await loadAgentsMd(testKaos);
+    await writeFile(join(workDir, 'AGENTS.md'), 'v2 much longer', 'utf-8');
+    const second = await loadAgentsMd(testKaos);
+
+    expect(second).toContain('v2 much longer');
+    expect(second).not.toContain('v1');
+    expect(readSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('reuses the cached text when only the mtime changes (touch)', async () => {
+    await writeFile(join(workDir, 'AGENTS.md'), 'same content', 'utf-8');
+    const first = await loadAgentsMd(testKaos);
+    const readSpy = vi.spyOn(testKaos, 'readText');
+
+    // `touch`: bump mtime without changing content.
+    const now = new Date();
+    await utimes(join(workDir, 'AGENTS.md'), now, new Date(now.getTime() + 2000));
+    const second = await loadAgentsMd(testKaos);
+
+    expect(second).toBe(first);
+    // Fingerprint changed but the digest still matches: only the
+    // confirmation read ran, and the previous text was reused.
+    expect(readSpy).toHaveBeenCalledTimes(1);
   });
 });

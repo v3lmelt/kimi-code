@@ -1,5 +1,5 @@
 /**
- * `kimi export` sub-command.
+ * `hasu export` sub-command.
  *
  * CLI glue only: session lookup, previous-session confirmation, and output.
  * The actual ZIP/manifest export is owned by the SDK.
@@ -155,7 +155,7 @@ function createDefaultExportDeps(overrides: Partial<ExportDeps> = {}): ExportDep
   };
   const getHarness = (): KimiHarness => {
     const currentTelemetryBootstrap = getTelemetryBootstrap();
-    // Same engine gate as `kimi -p` / the TUI: the SDK's v2-backed harness by
+    // Same engine gate as `hasu -p` / the TUI: the SDK's v2-backed harness by
     // default, the legacy agent-core harness when KIMI_CODE_LEGACY_FLAG is set.
     harness ??= (isKimiV2Enabled() ? createKimiHarnessV2 : createKimiHarness)({
       homeDir: currentTelemetryBootstrap.homeDir,

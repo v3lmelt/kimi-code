@@ -83,7 +83,7 @@ export async function handleDoctor(deps: DoctorDeps, options: DoctorOptions): Pr
 export function registerDoctorCommand(parent: Command, deps?: Partial<DoctorDeps>): void {
   const doctor = parent
     .command('doctor')
-    .description('Validate Kimi Code configuration files.')
+    .description('Validate Hasu configuration files.')
     .action(async () => {
       await runDoctorCommand(deps, {});
     });
@@ -134,7 +134,7 @@ function resolveDeps(deps: Partial<DoctorDeps> | DoctorDeps | undefined): Resolv
       deps?.validateConfigToml ??
       (async (text, filePath) => {
         if (isKimiV2Enabled()) {
-          // Default v2 route (same engine gate as `kimi -p`): validate with
+          // Default v2 route (same engine gate as `hasu -p`): validate with
           // the agent-core-v2 section registry instead of the legacy schema.
           // Loaded lazily so the v2 module graph stays off the legacy path.
           const { validateConfigTomlV2 } = await import('../v2/validate-config');
@@ -250,7 +250,7 @@ function resolveInputPath(input: string, cwd: string): string {
 
 function formatSuccess(results: readonly CheckResult[]): string {
   return [
-    'Kimi doctor',
+    'Hasu doctor',
     '',
     ...formatResults(results),
     '',
@@ -261,7 +261,7 @@ function formatSuccess(results: readonly CheckResult[]): string {
 
 function formatFailure(results: readonly CheckResult[], issueCount: number): string {
   return [
-    `Kimi doctor found ${String(issueCount)} ${issueCount === 1 ? 'issue' : 'issues'}.`,
+    `Hasu doctor found ${String(issueCount)} ${issueCount === 1 ? 'issue' : 'issues'}.`,
     '',
     ...formatResults(results),
     '',

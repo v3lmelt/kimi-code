@@ -33,7 +33,9 @@ const isNativeBundle =
 const hasDisplay =
   process.platform !== 'linux' || Boolean(process.env['DISPLAY'] ?? process.env['WAYLAND_DISPLAY']);
 
-const clipboard: ClipboardModule | null = (() => {
+let clipboardValue: ClipboardModule | null | undefined;
+
+function loadClipboard(): ClipboardModule | null {
   if (process.env['TERMUX_VERSION'] !== undefined || !hasDisplay) return null;
   try {
     const bundledClipboard = loadNativePackage<ClipboardModule>('@mariozechner/clipboard');
@@ -47,6 +49,23 @@ const clipboard: ClipboardModule | null = (() => {
   } catch {
     return null;
   }
-})();
+}
 
-export { clipboard };
+/**
+ * Lazy clipboard binding: the underlying native module (and its SEA asset
+ * extraction) only loads on the first property access, so CLI paths that
+ * never touch the clipboard (`--version`, `--help`, headless prompt runs)
+ * don't pay for it. The export is a proxy because every consumer reads
+ * `clipboard` as a module-level constant; property access on the proxy
+ * returns `undefined` when no clipboard is available, which all consumers
+ * already handle through `?.`/falsy checks. Callers that pass an explicit
+ * `clipboard: null` keep the old null-based short-circuits.
+ */
+export const clipboard: ClipboardModule | null = new Proxy({} as ClipboardModule, {
+  get(_target, property) {
+    if (clipboardValue === undefined) clipboardValue = loadClipboard();
+    if (clipboardValue === null) return undefined;
+    const value = Reflect.get(clipboardValue, property, clipboardValue);
+    return typeof value === 'function' ? value.bind(clipboardValue) : value;
+  },
+});

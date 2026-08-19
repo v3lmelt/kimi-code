@@ -201,7 +201,7 @@ export function renderInstallSuccessMessage(target: UpdateTarget): string {
 
 function renderBackgroundInstallSuccessNotice(version: string): string {
   const displayVersion = version.startsWith('v') ? version : `v${version}`;
-  return `Kimi Code updated to ${displayVersion}\nChangelog: ${CHANGELOG_URL}\n`;
+  return `Hasu updated to ${displayVersion}\nChangelog: ${CHANGELOG_URL}\n`;
 }
 
 function refreshInBackground(): void {

@@ -78,6 +78,11 @@ export interface ColorPalette {
    *  echoed `$ command` line. Its own hue (violet), distinct from
    *  plan-mode (primary) and the user role (roleUser). */
   shellMode: string;
+
+  // ── Ultracode ──
+  /** Ultracode mode hue (yellow): the ultracode pill in
+   *  the footer, the ultracode effort segment, and animated ultracode labels. */
+  effortUltra: string;
 }
 
 export const darkColors: ColorPalette = {
@@ -105,6 +110,7 @@ export const darkColors: ColorPalette = {
 
   roleUser: '#FFCB6B',
   shellMode: '#BD93F9',
+  effortUltra: '#FFC53D',
 };
 
 /**
@@ -138,6 +144,7 @@ export const claudeColors: ColorPalette = {
 
   roleUser: '#FFFFFF',
   shellMode: '#FD5DB1',
+  effortUltra: '#FFC53D',
 };
 
 /**
@@ -170,6 +177,7 @@ export const claudeLightColors: ColorPalette = {
 
   roleUser: '#000000',
   shellMode: '#D6336C',
+  effortUltra: '#8A6A00',
 };
 
 export const lightColors: ColorPalette = {
@@ -197,6 +205,7 @@ export const lightColors: ColorPalette = {
 
   roleUser: '#9A4A00',
   shellMode: '#7C3AED',
+  effortUltra: '#8A6A00',
 };
 
 export type ResolvedTheme = 'dark' | 'light';

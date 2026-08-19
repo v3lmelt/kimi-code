@@ -6,7 +6,9 @@
  * deliberately ignores: line framing (one JSON value per line, a.k.a. JSONL),
  * batching of appends into a single durable `append`, and crash-tolerant
  * decoding (a torn final line is dropped; corruption anywhere else throws).
- * Serializes whole-log rewrites with live appends, preserves queued or
+ * `readFrom` serves the incremental path: the same decoding, but only bytes
+ * from a caller-supplied offset on are pulled from storage. Serializes
+ * whole-log rewrites with live appends, preserves queued or
  * in-flight records across the atomic replacement, keeps ambiguous append and
  * rewrite failures sticky, keeps the shared flush pending until the
  * post-rewrite drain is durable, waits every key before a global flush reports
@@ -23,14 +25,24 @@ import {
   AppendLogCorruptedError,
   IAppendLogStore,
   type AppendLogOptions,
+  type AppendLogReadFromResult,
 } from '#/persistence/interface/appendLogStore';
 
 const textEncoder = new TextEncoder();
+
+/**
+ * 自动 flush 的合并窗口:窗口内到达的 append 合并为一次 durable
+ * `storage.append`(每次 durable append 是一次 open + write + fsync + close),
+ * 避免流式写入期间每条记录都触发一次写盘。flush()/rewrite() 不受影响,
+ * 它们仍然立即排空。
+ */
+const AUTO_FLUSH_WINDOW_MS = 20;
 
 interface LogState {
   pending: unknown[];
   flushPromise: Promise<void> | undefined;
   flushScheduled: boolean;
+  flushTimer: ReturnType<typeof setTimeout> | undefined;
   storageFailure: { readonly error: unknown } | undefined;
   cutoverEpoch: number;
   refCount: number;
@@ -81,6 +93,103 @@ export class AppendLogStore implements IAppendLogStore {
     }
   }
 
+  async readFrom<R>(
+    scope: string,
+    key: string,
+    fromByte: number,
+  ): Promise<AppendLogReadFromResult<R>> {
+    await this.flushLog(scope, key);
+    const size = await this.storage.size(scope, key);
+    if (size === undefined || size <= fromByte) {
+      // Missing log or nothing new: no records. A log SHORTER than `fromByte`
+      // means an atomic rewrite replaced it with less content — the caller's
+      // fold state is stale and must be rebuilt from 0 (`truncated`).
+      return {
+        records: [],
+        nextByte: fromByte,
+        truncated: size !== undefined && size < fromByte,
+      };
+    }
+
+    const records: R[] = [];
+    let nextByte = fromByte;
+    let lineNumber = 0;
+    const textDecoder = new TextDecoder();
+    // The current line, accumulated as byte slices (a line can span chunks).
+    // `'\n'` (0x0A) only occurs as the line terminator: JSON.stringify escapes
+    // embedded newlines as the two bytes `\` `n`.
+    let lineChunks: Uint8Array[] = [];
+    let lineLength = 0;
+    let absolute = fromByte;
+    for await (const chunk of this.storage.readStream(scope, key, {
+      start: fromByte,
+      end: size - 1,
+    })) {
+      let cursor = 0;
+      let newlineIndex = chunk.indexOf(0x0a);
+      while (newlineIndex !== -1) {
+        const piece = chunk.subarray(cursor, newlineIndex);
+        if (piece.byteLength > 0) {
+          lineChunks.push(piece);
+          lineLength += piece.byteLength;
+        }
+        lineNumber++;
+        // The first line may be a torn line cut by the offset (callers pass a
+        // line boundary, but a raw byte offset cannot prove it) — parse
+        // failure there means it is discarded rather than a corruption error.
+        const record = this.parseLine<R>(
+          this.decodeLine(lineChunks, lineLength, textDecoder),
+          scope,
+          key,
+          lineNumber,
+          lineNumber === 1,
+        );
+        lineChunks = [];
+        lineLength = 0;
+        if (record !== undefined) records.push(record);
+        nextByte = absolute + newlineIndex + 1;
+        cursor = newlineIndex + 1;
+        newlineIndex = chunk.indexOf(0x0a, cursor);
+      }
+      if (cursor < chunk.byteLength) {
+        lineChunks.push(chunk.subarray(cursor));
+        lineLength += chunk.byteLength - cursor;
+      }
+      absolute += chunk.byteLength;
+    }
+    if (lineLength > 0) {
+      // Torn final line (crash mid-flush) — same tolerance as `read`.
+      lineNumber++;
+      const record = this.parseLine<R>(
+        this.decodeLine(lineChunks, lineLength, textDecoder),
+        scope,
+        key,
+        lineNumber,
+        true,
+      );
+      if (record !== undefined) {
+        records.push(record);
+        nextByte = absolute;
+      }
+    }
+    return { records, nextByte, truncated: false };
+  }
+
+  private decodeLine(
+    lineChunks: Uint8Array[],
+    lineLength: number,
+    textDecoder: InstanceType<typeof TextDecoder>,
+  ): string {
+    if (lineChunks.length === 1) return textDecoder.decode(lineChunks[0]);
+    const merged = new Uint8Array(lineLength);
+    let offset = 0;
+    for (const piece of lineChunks) {
+      merged.set(piece, offset);
+      offset += piece.byteLength;
+    }
+    return textDecoder.decode(merged);
+  }
+
   private parseLine<R>(
     raw: string,
     scope: string,
@@ -116,7 +225,7 @@ export class AppendLogStore implements IAppendLogStore {
         throw error;
       }
     });
-    await this.ownFlush(scope, key, state, rewrite);
+    await this.ownFlush(scope, key, state, rewrite, false);
   }
 
   async flush(): Promise<void> {
@@ -151,6 +260,7 @@ export class AppendLogStore implements IAppendLogStore {
         pending: [],
         flushPromise: undefined,
         flushScheduled: false,
+        flushTimer: undefined,
         storageFailure: undefined,
         cutoverEpoch: 0,
         refCount: 0,
@@ -166,10 +276,14 @@ export class AppendLogStore implements IAppendLogStore {
   private scheduleFlush(scope: string, key: string, state: LogState): void {
     if (state.flushScheduled || state.flushPromise !== undefined) return;
     state.flushScheduled = true;
-    queueMicrotask(() => {
+    // 时间窗合并:窗口内到达的邻近记录共享一次 durable append。
+    state.flushTimer = setTimeout(() => {
+      state.flushTimer = undefined;
       state.flushScheduled = false;
-      void this.flushState(scope, key, state).catch((error) => state.onError?.(error));
-    });
+      if (state.pending.length > 0) {
+        void this.flushState(scope, key, state, true).catch((error) => state.onError?.(error));
+      }
+    }, AUTO_FLUSH_WINDOW_MS);
   }
 
   private flushLog(scope: string, key: string): Promise<void> {
@@ -177,10 +291,21 @@ export class AppendLogStore implements IAppendLogStore {
     return this.flushState(scope, key, state);
   }
 
-  private flushState(scope: string, key: string, state: LogState): Promise<void> {
+  private flushState(
+    scope: string,
+    key: string,
+    state: LogState,
+    coalesce = false,
+  ): Promise<void> {
     if (state.flushPromise !== undefined) return state.flushPromise;
     if (state.storageFailure !== undefined) return Promise.reject(state.storageFailure.error);
-    return this.ownFlush(scope, key, state, this.drain(scope, key, state));
+    return this.ownFlush(
+      scope,
+      key,
+      state,
+      this.drain(scope, key, state, coalesce),
+      coalesce,
+    );
   }
 
   private release(scope: string, key: string, state: LogState): void {
@@ -204,9 +329,10 @@ export class AppendLogStore implements IAppendLogStore {
     key: string,
     state: LogState,
     operation: Promise<void>,
+    coalesce: boolean,
   ): Promise<void> {
     let owned!: Promise<void>;
-    owned = this.finishOwnedFlush(scope, key, state, operation, () => owned);
+    owned = this.finishOwnedFlush(scope, key, state, operation, () => owned, coalesce);
     state.flushPromise = owned;
     return owned;
   }
@@ -217,6 +343,7 @@ export class AppendLogStore implements IAppendLogStore {
     state: LogState,
     operation: Promise<void>,
     owner: () => Promise<void>,
+    coalesce: boolean,
   ): Promise<void> {
     let failure: { readonly error: unknown } | undefined;
     try {
@@ -229,7 +356,7 @@ export class AppendLogStore implements IAppendLogStore {
       try {
         if (failure === undefined) {
           while (state.flushPromise === owned && state.pending.length > 0) {
-            await this.drain(scope, key, state);
+            await this.drain(scope, key, state, coalesce);
           }
         }
       } finally {
@@ -241,7 +368,12 @@ export class AppendLogStore implements IAppendLogStore {
     if (failure !== undefined) throw failure.error;
   }
 
-  private async drain(scope: string, key: string, state: LogState): Promise<void> {
+  private async drain(
+    scope: string,
+    key: string,
+    state: LogState,
+    coalesce: boolean,
+  ): Promise<void> {
     const cutoverEpoch = state.cutoverEpoch;
     await state.ready;
     if (state.cutoverEpoch !== cutoverEpoch) return;
@@ -255,6 +387,10 @@ export class AppendLogStore implements IAppendLogStore {
       }
       if (state.cutoverEpoch !== cutoverEpoch) return;
       state.pending.splice(0, batch.length);
+      // 批间合并窗口(仅自动 flush 链):流式写入期间让邻近记录积累成批。
+      if (coalesce && state.pending.length > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, AUTO_FLUSH_WINDOW_MS));
+      }
     }
   }
 }

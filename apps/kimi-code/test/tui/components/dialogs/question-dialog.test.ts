@@ -1,4 +1,4 @@
-import { CURSOR_MARKER } from '@moonshot-ai/pi-tui';
+import { CURSOR_MARKER, Container } from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
 import { beforeAll, describe, expect, it } from 'vitest';
 
@@ -519,6 +519,25 @@ describe('QuestionDialogComponent', () => {
       expect(joined).not.toContain('…');
       expect(flat).toContain(longQuestion);
     });
+  });
+
+  it('bumps render version so parent containers do not cache stale output', () => {
+    const { dialog } = makeDialog(
+      makePending([
+        { question: 'Pick one', multi_select: false, options: [{ label: 'A' }, { label: 'B' }] },
+        { question: 'Pick two', multi_select: false, options: [{ label: 'C' }, { label: 'D' }] },
+      ]),
+    );
+    const parent = new Container();
+    parent.addChild(dialog);
+
+    const before = flatten(parent.render(120).join('\n'));
+    expect(before).toContain('Pick one');
+
+    dialog.handleInput('\u001B[C'); // Right → next tab
+
+    const after = flatten(parent.render(120).join('\n'));
+    expect(after).toContain('Pick two');
   });
 
 });

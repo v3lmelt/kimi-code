@@ -8,7 +8,8 @@
  * missing `name` falls back to the file name (OpenCode), a lone `*` in
  * `tools` / `subagents` means unrestricted like an omitted field, and list
  * fields accept either a bare comma-separated string or the YAML list form
- * (Claude Code).
+ * (Claude Code). `memory` accepts `user` | `project` and scopes the agent's
+ * cross-session memory file.
  */
 
 import { CoreErrors } from '#/_base/errors/codes';
@@ -95,6 +96,7 @@ export function parseAgentFileText(options: ParseAgentFileOptions): AgentFileDef
   const subagents =
     rawSubagents?.length === 1 && rawSubagents[0] === '*' ? undefined : rawSubagents;
   const modelPreference = parseModelPreference(frontmatter['model_preference'], options.path);
+  const memory = parseMemoryScope(frontmatter['memory'], options.path);
 
   const prompt = parsed.body.trim();
   if (prompt.length === 0) {
@@ -110,10 +112,21 @@ export function parseAgentFileText(options: ParseAgentFileOptions): AgentFileDef
     disallowedTools,
     subagents,
     modelPreference,
+    memory,
     prompt,
     path: options.path,
     source: options.source,
   };
+}
+
+function parseMemoryScope(value: unknown, filePath: string): AgentFileDefinition['memory'] {
+  if (value === undefined || value === null) return undefined;
+  if (value !== 'user' && value !== 'project') {
+    throw new AgentFileParseError(
+      `Frontmatter field "memory" in ${filePath} must be "user" or "project"`,
+    );
+  }
+  return value;
 }
 
 function parseModelPreference(

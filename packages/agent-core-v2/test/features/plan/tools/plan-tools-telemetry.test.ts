@@ -85,6 +85,7 @@ function planService({
     exit: exit ?? vi.fn(),
     recordRevision: vi.fn(async () => {}),
     status: vi.fn(async () => status),
+    currentPlanFilePath: () => (status === null ? null : status.path),
   };
 }
 

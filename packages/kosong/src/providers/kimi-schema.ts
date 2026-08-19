@@ -119,8 +119,28 @@ const NUMERIC_STRUCTURE_KEYS = new Set([
  * typeless property schemas. The root schema object is treated as a container
  * and is not itself normalized.
  */
+/**
+ * Cache of normalized results keyed by input schema object identity.
+ *
+ * Tool definitions are byte-stable for the lifetime of a session, and the
+ * same `parameters` object is re-normalized on every generate() call
+ * (`tools.map(convertTool)`). The cached result is a detached deep clone of
+ * the input, and callers treat it as read-only wire payload (serialized
+ * straight into the request), so sharing it across calls is safe.
+ */
+const normalizedToolSchemaCache = new WeakMap<
+  Record<string, unknown>,
+  Record<string, unknown>
+>();
+
 export function normalizeKimiToolSchema(schema: Record<string, unknown>): Record<string, unknown> {
-  return ensureKimiPropertyTypes(derefJsonSchema(schema));
+  const cached = normalizedToolSchemaCache.get(schema);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const normalized = ensureKimiPropertyTypes(derefJsonSchema(schema));
+  normalizedToolSchemaCache.set(schema, normalized);
+  return normalized;
 }
 
 function ensureKimiPropertyTypes(schema: Record<string, unknown>): Record<string, unknown> {

@@ -18,7 +18,9 @@ import {
 import { deleteKittyImage, getCapabilities, isImageLine, setCellDimensions } from "./terminal-image.ts";
 import {
 	asciiVisibleWidth,
+	extractAnsiCode,
 	extractSegments,
+	getGraphemeSegmenter,
 	normalizeTerminalOutput,
 	sliceByColumn,
 	sliceWithWidth,
@@ -29,6 +31,51 @@ const KITTY_SEQUENCE_PREFIX = "\x1b_G";
 
 /** Shared empty id list for non-image lines in the per-line image-id cache. */
 const EMPTY_IMAGE_IDS: readonly number[] = [];
+
+/**
+ * Minimum visible width for a line to be eligible for the column-level
+ * (segment) patch in trySegmentPatch. Narrow lines are cheap to rewrite in
+ * full and stay byte-identical with the classic renderer, so only lines wide
+ * enough to make the shorter patch worthwhile are considered.
+ */
+const MIN_SEGMENT_PATCH_WIDTH = 16;
+
+/** Strip ANSI/OSC/APC escape sequences for visible-text diffing. */
+function stripAnsiForDiff(line: string): string {
+	if (!line.includes("\x1b")) return line;
+	let out = "";
+	let i = 0;
+	while (i < line.length) {
+		const ansi = extractAnsiCode(line, i);
+		if (ansi) {
+			i += ansi.length;
+			continue;
+		}
+		out += line[i];
+		i++;
+	}
+	return out;
+}
+
+/**
+ * True when every escape sequence in `text` is a pure SGR sequence
+ * (CSI ... m). Used to guarantee the segment patch never replays an OSC/APC
+ * or non-styling CSI code from the line's prefix while writing the changed
+ * middle of a line.
+ */
+function isSgrOnly(text: string): boolean {
+	let i = 0;
+	while (i < text.length) {
+		if (text[i] === "\x1b") {
+			const ansi = extractAnsiCode(text, i);
+			if (!ansi || !/^\x1b\[[0-9;]*m$/.test(ansi.code)) return false;
+			i += ansi.length;
+		} else {
+			i++;
+		}
+	}
+	return true;
+}
 
 interface KittyImageHeader {
 	ids: number[];
@@ -329,6 +376,16 @@ export class Container implements Component {
 		}
 	}
 
+	/** Replace the child at `index` in place, rewiring PARENT and bumping the structural generation. */
+	replaceChild(index: number, component: Component): void {
+		const current = this.children[index];
+		if (current === component) return;
+		if (current !== undefined) delete (current as WithParent)[PARENT];
+		(component as WithParent)[PARENT] = this;
+		this.children[index] = component;
+		this.afterStructureChange();
+	}
+
 	clear(): void {
 		for (const child of this.children) {
 			delete (child as WithParent)[PARENT];
@@ -387,12 +444,15 @@ export class Container implements Component {
 			cache.childrenVersion === this.childrenVersion &&
 			cache.childRefs.length === this.children.length;
 
-		// Fast path: every child's version matches the snapshot → reuse cached lines.
+		// Fast path: every child's version AND identity matches the snapshot →
+		// reuse cached lines. Identity matters: an in-place replacement can
+		// reuse the same version number, and only a ref check catches it.
 		if (structOk) {
 			let allMatch = true;
 			for (let i = 0; i < this.children.length; i++) {
-				const v = this.children[i]!.version;
-				if (v === undefined || v !== cache.childVersions[i]) {
+				const child = this.children[i]!;
+				const v = child.version;
+				if (v === undefined || cache.childRefs[i] !== child || v !== cache.childVersions[i]) {
 					allMatch = false;
 					break;
 				}
@@ -485,6 +545,41 @@ export class TUI extends Container {
 	private maxLinesRendered = 0; // Track terminal's working area (max lines ever rendered)
 	private previousViewportTop = 0; // Track previous viewport top for resize-aware cursor moves
 	private fullRedrawCount = 0;
+	/**
+	 * Cached decision for CSI 2026 synchronized output (ESC[?2026h / ESC[?2026l).
+	 * Under tmux/screen multiplexers and terminals that do not support it the
+	 * markers are useless (tmux strips/ignores them, some terminals mishandle
+	 * them). Env vars are read once at construction and cached in a single
+	 * boolean so every begin/end pair for a buffer is gated by the SAME decision.
+	 * Conservative default: true (current behaviour) so unknown terminals regress
+	 * nothing.
+	 */
+	private readonly synchronizedOutputEnabled = TUI.isSynchronizedOutputSupported();
+
+	/**
+	 * True when the terminal supports CSI 2026 synchronized output.
+	 * @see {@link synchronizedOutputEnabled}
+	 */
+	private static isSynchronizedOutputSupported(): boolean {
+		// tmux multiplexer: TMUX env is set and TERM is usually "tmux-*" / "screen-*".
+		if (process.env["TMUX"]) return false;
+		const term = (process.env["TERM"] ?? "").toLowerCase();
+		if (term.includes("tmux") || term.includes("screen")) return false;
+		// Clearly non-supporting terminals. Anything unknown defaults to true so
+		// current behaviour is preserved on terminals we have no data about.
+		if (term === "dumb" || term === "cons25") return false;
+		return true;
+	}
+
+	/** Begin marker for synchronized output; only emitted when supported. */
+	private syncBegin(): string {
+		return this.synchronizedOutputEnabled ? "\x1b[?2026h" : "";
+	}
+
+	/** End marker for synchronized output; only emitted when supported. */
+	private syncEnd(): string {
+		return this.synchronizedOutputEnabled ? "\x1b[?2026l" : "";
+	}
 	private stopped = false;
 	private pendingOsc11BackgroundReplies = 0;
 	private pendingOsc11BackgroundQueries: PendingOsc11BackgroundQuery[] = [];
@@ -1333,6 +1428,169 @@ export class TUI extends Container {
 		return this.deleteKittyImages(ids);
 	}
 
+	/**
+	 * Attempt a column-level patch for a single changed line.
+	 *
+	 * When only a small middle region of the visible text changed it is cheaper
+	 * to move the cursor to the diff start, emit the new styling + changed
+	 * characters, and reset, than to clear and rewrite the whole line. This is
+	 * deliberately conservative: any ambiguity (kitty/iTerm2 image, OSC-8
+	 * hyperlink, wide char at a boundary, differing line widths, differing
+	 * styling on the untouched prefix/suffix, a non-SGR escape in the diff, or a
+	 * diff that is not small) returns null and the caller performs the full-line
+	 * rewrite - identical to current behaviour.
+	 *
+	 * @returns The replacement buffer for the line, or null to fall back.
+	 */
+	private trySegmentPatch(oldLine: string, newLine: string): string | null {
+		// Never attempt on image lines or lines carrying OSC-8 hyperlinks:
+		// rewriting part of either can corrupt the placement/link.
+		if (isImageLine(oldLine) || isImageLine(newLine)) return null;
+		if (oldLine.includes("\x1b]8") || newLine.includes("\x1b]8")) return null;
+
+		const newWidth = visibleWidth(newLine);
+		const oldWidth = visibleWidth(oldLine);
+		// Only attempt on lines wide enough that the full rewrite is worth
+		// avoiding (short lines stay byte-identical with the old renderer).
+		if (newWidth < MIN_SEGMENT_PATCH_WIDTH) return null;
+
+		// Common visible-text prefix/suffix at the grapheme level (wide chars
+		// count as 2 columns). Comparing whole graphemes guarantees the diff
+		// boundaries never split a wide character.
+		const seg = getGraphemeSegmenter();
+		const oldGra = [...seg.segment(stripAnsiForDiff(oldLine))].map((s) => s.segment);
+		const newGra = [...seg.segment(stripAnsiForDiff(newLine))].map((s) => s.segment);
+
+		let prefixCols = 0;
+		const prefixLen = Math.min(oldGra.length, newGra.length);
+		let i = 0;
+		while (i < prefixLen && oldGra[i] === newGra[i]) {
+			prefixCols += visibleWidth(oldGra[i]!);
+			i++;
+		}
+		let suffixCols = 0;
+		let oi = oldGra.length - 1;
+		let ni = newGra.length - 1;
+		while (oi >= i && ni >= i && oldGra[oi] === newGra[ni]) {
+			const w = visibleWidth(oldGra[oi]!);
+			if (prefixCols + suffixCols + w > newWidth) break;
+			suffixCols += w;
+			oi--;
+			ni--;
+		}
+
+		const diffWidth = newWidth - prefixCols - suffixCols;
+		if (diffWidth <= 0) return null;
+		// The differing middle must be small (< half the line width).
+		if (diffWidth * 2 >= newWidth) return null;
+		// Require equal widths: otherwise leftover/stale cells or an unpainted
+		// suffix would need an erase-to-end and the suffix would not line up.
+		if (oldWidth !== newWidth) return null;
+
+		// The untouched prefix/suffix must be byte-identical between frames so
+		// the already-painted cells still match the new line (glyphs AND styles).
+		const oldPrefix = sliceWithWidth(oldLine, 0, prefixCols, true);
+		const newPrefix = sliceWithWidth(newLine, 0, prefixCols, true);
+		if (
+			oldPrefix.text !== newPrefix.text ||
+			oldPrefix.width !== prefixCols ||
+			newPrefix.width !== prefixCols
+		) {
+			return null;
+		}
+		const oldSuffix = sliceWithWidth(oldLine, newWidth - suffixCols, suffixCols, true);
+		const newSuffix = sliceWithWidth(newLine, newWidth - suffixCols, suffixCols, true);
+		if (
+			oldSuffix.text !== newSuffix.text ||
+			oldSuffix.width !== suffixCols ||
+			newSuffix.width !== suffixCols
+		) {
+			return null;
+		}
+
+		// Slice the differing middle out of the new line with strict boundary
+		// handling; if a wide char straddles the range the slice shortens and we
+		// fall back to the full rewrite. The diff must be pure SGR (no tabs, no
+		// OSC/APC/non-styling CSI) so replaying it cannot have side effects.
+		const diff = sliceWithWidth(newLine, prefixCols, diffWidth, true);
+		if (diff.width !== diffWidth) return null;
+		if (diff.text.includes("\t") || !isSgrOnly(diff.text)) return null;
+
+		// Move to the diff-start column (1-indexed) and write the styled diff
+		// segment followed by the line's segment reset.
+		return `\x1b[${prefixCols + 1}G${diff.text}${TUI.SEGMENT_RESET}`;
+	}
+
+	/**
+	 * FIX (d): DECSTBM scroll hint.
+	 *
+	 * When the ENTIRE previous buffer is still present shifted up by exactly K
+	 * rows (the oldest K rows were dropped and K rows were appended at the
+	 * bottom, so the visible content scrolled up by K), the terminal can scroll
+	 * its viewport region instead of rewriting every visible row; only the K
+	 * newly revealed rows at the bottom are then patched.
+	 *
+	 * Extremely conservative: fires only when there are no overlays, no kitty
+	 * images anywhere in either frame, the buffer length is unchanged, the
+	 * visible window sits exactly at the bottom of the buffer, the shift K is
+	 * strictly less than height/2, and the whole buffer verifies the shift. Any
+	 * doubt returns null and doRender falls back to the existing range patch.
+	 *
+	 * @returns The full write buffer, or null to fall back.
+	 */
+	private tryBuildScrollUpPatch(
+		newLines: string[],
+		lineImageIds: ReadonlyArray<number>[],
+		height: number,
+	): string | null {
+		// Overlays or images break the "screen mirrors the buffer window"
+		// invariant this relies on; never scroll when they are present.
+		if (this.overlayStack.length > 0) return null;
+		if (this.previousKittyImageIds.size > 0) return null;
+		for (const ids of lineImageIds) {
+			if (ids.length > 0) return null;
+		}
+
+		const prevLen = this.previousLines.length;
+		const newLen = newLines.length;
+		// Same length (a ring-buffer style scroll: K dropped from the top, K
+		// appended at the bottom), a populated previous frame, and the visible
+		// window flush with the bottom of the buffer.
+		if (prevLen === 0 || newLen !== prevLen) return null;
+		if (this.previousViewportTop <= 0) return null;
+		if (prevLen - this.previousViewportTop !== height) return null;
+
+		const maxK = Math.floor((height - 1) / 2); // require K < height/2
+		for (let K = 1; K <= maxK && K < prevLen; K++) {
+			// Verify the whole-buffer shift: newLines[i] === previousLines[i + K].
+			let ok = true;
+			for (let i = 0; i + K < prevLen; i++) {
+				if (newLines[i] !== this.previousLines[i + K]) {
+					ok = false;
+					break;
+				}
+			}
+			if (!ok) continue;
+
+			// Build the scroll buffer. Wrap the whole scroll+patch in
+			// synchronized output so the intermediate scroll is not painted.
+			const bottomStart = this.previousViewportTop + height - K; // first revealed row (buffer idx)
+			let buffer = this.syncBegin();
+			buffer += `\x1b[1;${height}r`; // DECSTBM: scroll region = visible viewport
+			buffer += `\x1b[${K}S`; // SU: scroll content up K rows within the region
+			buffer += `\x1b[${height - K + 1};1H`; // move cursor to the first revealed row
+			for (let r = 0; r < K; r++) {
+				if (r > 0) buffer += "\r\n";
+				buffer += newLines[bottomStart + r]!;
+			}
+			buffer += "\x1b[r"; // reset scroll region (also homes the cursor)
+			buffer += `\x1b[${height};1H`; // put the cursor back on the last written row
+			buffer += this.syncEnd();
+			return buffer;
+		}
+		return null;
+	}
+
 	/** Splice overlay content into a base line at a specific column. Single-pass optimized. */
 	private compositeLineAt(
 		baseLine: string,
@@ -1455,6 +1713,20 @@ export class TUI extends Container {
 		const markerRow = cursorPos?.markerRow;
 		const processedLines: string[] = new Array(rawLines.length);
 		const lineImageIds: ReadonlyArray<number>[] = new Array(rawLines.length);
+		// FIX (b): record which processed lines differ from the previous frame as
+		// we go, so doRender no longer needs a second O(total lines) scan to find
+		// the first/last changed line. Compare PROCESSED output (cursor marker
+		// already stripped) against previousLines - exactly like the old full
+		// scan: an out-of-range old row compares against "" so an appended row
+		// whose processed text is empty is NOT dirty, and a line that is
+		// processed-different but raw-identical (e.g. a re-emitted marker row)
+		// still counts as dirty.
+		let firstChanged = -1;
+		let lastChanged = -1;
+		const markDirty = (i: number): void => {
+			if (firstChanged === -1 || i < firstChanged) firstChanged = i;
+			if (i > lastChanged) lastChanged = i;
+		};
 		for (let i = 0; i < rawLines.length; i++) {
 			const rawLine = rawLines[i]!;
 			if (reuseProcessed && rawLine === this.previousRawLines[i]) {
@@ -1480,13 +1752,16 @@ export class TUI extends Container {
 			}
 			processedLines[i] = line;
 			lineImageIds[i] = imageIds;
+			if (line !== (i < this.previousLines.length ? this.previousLines[i] : "")) {
+				markDirty(i);
+			}
 		}
 		newLines = processedLines;
 
 		// Helper to clear scrollback and viewport and render all new lines
 		const fullRender = (clear: boolean): void => {
 			this.fullRedrawCount += 1;
-			let buffer = "\x1b[?2026h"; // Begin synchronized output
+			let buffer = this.syncBegin(); // Begin synchronized output (gated)
 			if (clear) {
 				buffer += this.deleteKittyImages(this.previousKittyImageIds);
 				buffer += "\x1b[2J\x1b[H\x1b[3J"; // Clear screen, home, then clear scrollback
@@ -1508,7 +1783,7 @@ export class TUI extends Container {
 				}
 				buffer += line;
 			}
-			buffer += "\x1b[?2026l"; // End synchronized output
+			buffer += this.syncEnd(); // End synchronized output (gated)
 			this.terminal.write(buffer);
 			this.cursorRow = Math.max(0, newLines.length - 1);
 			this.hardwareCursorRow = this.cursorRow;
@@ -1569,20 +1844,13 @@ export class TUI extends Container {
 			return;
 		}
 
-		// Find first and last changed lines
-		let firstChanged = -1;
-		let lastChanged = -1;
-		const maxLines = Math.max(newLines.length, this.previousLines.length);
-		for (let i = 0; i < maxLines; i++) {
-			const oldLine = i < this.previousLines.length ? this.previousLines[i] : "";
-			const newLine = i < newLines.length ? newLines[i] : "";
-
-			if (oldLine !== newLine) {
-				if (firstChanged === -1) {
-					firstChanged = i;
-				}
-				lastChanged = i;
-			}
+		// First/last changed lines were already recorded during the processed-lines
+		// pass (see FIX (b) above). Handle the deleted tail rows here: a row that
+		// existed last frame but not this one is dirty only when it actually had
+		// content, mirroring the old full scan where an empty old row compared
+		// equal to the missing "" new row.
+		for (let i = rawLines.length; i < this.previousLines.length; i++) {
+			if (this.previousLines[i] !== "") markDirty(i);
 		}
 		const appendedLines = newLines.length > this.previousLines.length;
 		if (appendedLines) {
@@ -1619,7 +1887,7 @@ export class TUI extends Container {
 		// All changes are in deleted lines (nothing to render, just clear)
 		if (firstChanged >= newLines.length) {
 			if (this.previousLines.length > newLines.length) {
-				let buffer = "\x1b[?2026h";
+				let buffer = this.syncBegin();
 				buffer += this.deleteChangedKittyImages(firstChanged, lastChanged);
 				// Move to end of new content (clamp to 0 for empty content)
 				const targetRow = Math.max(0, newLines.length - 1);
@@ -1651,7 +1919,7 @@ export class TUI extends Container {
 				if (moveBack > 0) {
 					buffer += `\x1b[${moveBack}A`;
 				}
-				buffer += "\x1b[?2026l";
+				buffer += this.syncEnd();
 				this.terminal.write(buffer);
 				this.cursorRow = targetRow;
 				this.hardwareCursorRow = targetRow;
@@ -1667,6 +1935,30 @@ export class TUI extends Container {
 			return;
 		}
 
+		// FIX (d): DECSTBM scroll hint. When the ENTIRE visible content scrolled
+		// up by K rows (oldest K buffer rows dropped, K rows appended), scroll the
+		// viewport region instead of rewriting every visible row, then patch only
+		// the K newly revealed rows. Falls back to the range patch below on any
+		// doubt. Also intercepts the `firstChanged < prevViewportTop` full-redraw
+		// case for a pure ring-buffer scroll, which the scroll makes safe.
+		const scrollPatch = this.tryBuildScrollUpPatch(newLines, lineImageIds, height);
+		if (scrollPatch !== null) {
+			logRedraw("DECSTBM scroll hint");
+			this.terminal.write(scrollPatch);
+			this.cursorRow = Math.max(0, newLines.length - 1);
+			this.hardwareCursorRow = Math.max(0, newLines.length - 1);
+			this.maxLinesRendered = Math.max(this.maxLinesRendered, newLines.length);
+			this.previousViewportTop = Math.max(prevViewportTop, this.hardwareCursorRow - height + 1);
+			this.positionHardwareCursor(cursorPos, newLines.length);
+			this.previousLines = newLines;
+			this.previousRawLines = rawLines;
+			this.previousLineImageIds = lineImageIds;
+			this.previousKittyImageIds = this.unionKittyImageIds(lineImageIds);
+			this.previousWidth = width;
+			this.previousHeight = height;
+			return;
+		}
+
 		// Differential rendering can only touch what was actually visible.
 		// If the first changed line is above the previous viewport, we need a full redraw.
 		if (firstChanged < prevViewportTop) {
@@ -1677,7 +1969,7 @@ export class TUI extends Container {
 
 		// Render from first changed line to end
 		// Build buffer with all updates wrapped in synchronized output
-		let buffer = "\x1b[?2026h"; // Begin synchronized output
+		let buffer = this.syncBegin(); // Begin synchronized output (gated)
 		buffer += this.deleteChangedKittyImages(firstChanged, lastChanged);
 		const prevViewportBottom = prevViewportTop + height - 1;
 		const moveTargetRow = appendStart ? firstChanged - 1 : firstChanged;
@@ -1733,8 +2025,17 @@ export class TUI extends Container {
 				continue;
 			}
 
-			buffer += "\x1b[2K"; // Clear current line
-			buffer += line;
+			// FIX (c): attempt a cheaper column-level patch for this line;
+			// fall back to the full-line rewrite on any ambiguity (see
+			// trySegmentPatch). The cursor is at column 0 of this row.
+			const oldLine = i < this.previousLines.length ? this.previousLines[i]! : "";
+			const segmentPatch = this.trySegmentPatch(oldLine, line);
+			if (segmentPatch !== null) {
+				buffer += segmentPatch;
+			} else {
+				buffer += "\x1b[2K"; // Clear current line
+				buffer += line;
+			}
 		}
 
 		// Track where cursor ended up after rendering
@@ -1756,7 +2057,7 @@ export class TUI extends Container {
 			buffer += `\x1b[${extraLines}A`;
 		}
 
-		buffer += "\x1b[?2026l"; // End synchronized output
+		buffer += this.syncEnd(); // End synchronized output (gated)
 
 		if (process.env['PI_TUI_DEBUG'] === "1") {
 			const debugDir = "/tmp/tui";

@@ -164,6 +164,8 @@ export interface IFileSystemStorageService {
   readonly _serviceBrand: undefined;
 
   read(scope: string, key: string): Promise<Uint8Array | undefined>;
+  /** Current byte length of the stored value; `undefined` when `(scope, key)` does not exist. */
+  size(scope: string, key: string): Promise<number | undefined>;
   readStream(scope: string, key: string, range?: StorageReadRange): AsyncIterable<Uint8Array>;
   write(scope: string, key: string, data: Uint8Array, options?: StorageWriteOptions): Promise<void>;
   writeStream(

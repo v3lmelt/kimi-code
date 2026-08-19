@@ -18,6 +18,10 @@ type AssistantMarkdownOptions = {
 };
 
 export class AssistantMessageComponent implements Component {
+  // Versioned from construction (see UserMessageComponent). All mutations
+  // (updateContent / setShowBullet / theme invalidate) go through
+  // markRenderDirty() -> bumpVersion().
+  version = 0;
   private contentContainer: Container;
   private markdown: Markdown | undefined;
   private markdownTransient = false;

@@ -8,7 +8,7 @@ import { runPrompt } from '#/cli/run-prompt';
 import { runShell } from '#/cli/run-shell';
 import { formatStartupError } from '#/cli/startup-error';
 import { runUpdatePreflight } from '#/cli/update/preflight';
-import { handleMainCommand, handleUpgradeCommand, main } from '#/main';
+import { argvRequestsVersionOrHelp, handleMainCommand, handleUpgradeCommand, main } from '#/main';
 
 const mocks = vi.hoisted(() => {
   const parse = vi.fn();
@@ -49,6 +49,8 @@ const mocks = vi.hoisted(() => {
     },
     KimiHarness: vi.fn(),
     createKimiHarness: vi.fn(),
+    installMinidbTextBuildWorker: vi.fn(() => ({ status: 'not-sea' })),
+    installKapSearchWorker: vi.fn(() => ({ status: 'not-sea' })),
   };
 });
 
@@ -98,6 +100,14 @@ vi.mock('../../src/cli/sub/upgrade', () => ({
 
 vi.mock('../../src/cli/commands', () => ({
   createProgram: mocks.createProgram,
+}));
+
+vi.mock('../../src/native/minidb-worker', () => ({
+  installMinidbTextBuildWorker: mocks.installMinidbTextBuildWorker,
+}));
+
+vi.mock('../../src/native/search-worker', () => ({
+  installKapSearchWorker: mocks.installKapSearchWorker,
 }));
 
 vi.mock('../../src/cli/version', async () => {
@@ -359,13 +369,56 @@ describe('main entry command handling', () => {
     expect(mocks.parse).toHaveBeenCalledWith(process.argv);
   });
 
+  it('skips SEA worker installation for --version/--help invocations', () => {
+    const originalArgv = process.argv;
+    try {
+      process.argv = ['node', 'hasu', '--version'];
+      main();
+
+      expect(mocks.installMinidbTextBuildWorker).not.toHaveBeenCalled();
+      expect(mocks.installKapSearchWorker).not.toHaveBeenCalled();
+      expect(mocks.parse).toHaveBeenCalledWith(process.argv);
+    } finally {
+      process.argv = originalArgv;
+    }
+  });
+
+  it('installs SEA workers for regular invocations', () => {
+    const originalArgv = process.argv;
+    try {
+      process.argv = ['node', 'hasu'];
+      main();
+
+      expect(mocks.installMinidbTextBuildWorker).toHaveBeenCalledTimes(1);
+      expect(mocks.installKapSearchWorker).toHaveBeenCalledTimes(1);
+      expect(mocks.parse).toHaveBeenCalledWith(process.argv);
+    } finally {
+      process.argv = originalArgv;
+    }
+  });
+
+  it('detects bare version/help flags and ignores option values', () => {
+    expect(argvRequestsVersionOrHelp(['node', 'hasu', '--version'])).toBe(true);
+    expect(argvRequestsVersionOrHelp(['node', 'hasu', '-V'])).toBe(true);
+    expect(argvRequestsVersionOrHelp(['node', 'hasu', '--help'])).toBe(true);
+    expect(argvRequestsVersionOrHelp(['node', 'hasu', '-h'])).toBe(true);
+    expect(argvRequestsVersionOrHelp(['node', 'hasu', 'doctor', '--help'])).toBe(true);
+    expect(argvRequestsVersionOrHelp(['node', 'hasu'])).toBe(false);
+    expect(argvRequestsVersionOrHelp(['node', 'hasu', '-p', '--help'])).toBe(false);
+    expect(argvRequestsVersionOrHelp(['node', 'hasu', '--prompt=--help'])).toBe(false);
+    expect(argvRequestsVersionOrHelp(['node', 'hasu', '--agent', '-V'])).toBe(false);
+    expect(argvRequestsVersionOrHelp(['node', 'hasu', '-S', '--help'])).toBe(true);
+    expect(argvRequestsVersionOrHelp(['node', 'hasu', '--', '--help'])).toBe(false);
+    expect(argvRequestsVersionOrHelp(['node', 'hasu', '--version', '--', '--help'])).toBe(true);
+  });
+
   it('sets the process title during startup', () => {
     const originalTitle = process.title;
     try {
       process.title = 'kimi-test-runner';
       main();
 
-      expect(process.title).toBe('kimi-code');
+      expect(process.title).toBe('hasu');
     } finally {
       process.title = originalTitle;
     }

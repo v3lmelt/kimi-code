@@ -4,8 +4,10 @@
  * Manages plan-mode state through `wire`, injects plan-mode context through
  * `contextInjector`, writes optional plan files through `hostFileSystem`,
  * and tags mode telemetry through `telemetry`. Also snapshots submitted plan
- * revisions: `recordRevision` reads the current plan file, writes it
- * atomically through `IBlobStore` under the agent's own persistence scope
+ * revisions: `recordRevision` snapshots the current plan file (or reuses the
+ * caller-provided content, so ExitPlanMode does not read the file twice),
+ * writes it atomically through `IBlobStore` under the agent's own persistence
+ * scope
  * (`agentCtx.scope()`, i.e. the homeDir-relative
  * `sessions/<ws>/<sid>/agents/<agentId>` root) with the key
  * `plan/<id>/v<N>.md`, and dispatches a reference-only `plan.revision` op
@@ -116,26 +118,30 @@ export class AgentPlanService extends Service implements IAgentPlanService {
 
   private async guardToolExecution(event: BeforeToolExecuteEvent): Promise<void> {
     const toolName = event.toolCall.name;
-    const plan = await this.status();
+    // The guard only needs the plan file path, which the replayed wire state
+    // provides synchronously. Never read the plan file here: this listener
+    // runs for every tool call while plan mode is active, and the content is
+    // never used by any branch.
+    const planFilePath = this.currentPlanFilePath();
 
     if (toolName === 'ExitPlanMode') {
-      if (plan !== null && this.modeService.mode !== 'auto') {
+      if (planFilePath !== null && this.modeService.mode !== 'auto') {
         event.waitUntil(() => this.review.requestApproval(event));
       }
       return;
     }
 
-    if (plan === null) {
+    if (planFilePath === null) {
       return;
     }
 
     if (toolName === 'Write' || toolName === 'Edit') {
-      if (writesOnlyPlanFile(event, plan.path)) {
+      if (writesOnlyPlanFile(event, planFilePath)) {
         event.allow();
         return;
       }
       event.veto(
-        denyToolExecution(this.toolApproval.formatDenyMessage(planModeWriteDeniedMessage(plan.path))),
+        denyToolExecution(this.toolApproval.formatDenyMessage(planModeWriteDeniedMessage(planFilePath))),
       );
       return;
     }
@@ -167,7 +173,13 @@ export class AgentPlanService extends Service implements IAgentPlanService {
     return this.wire.getModel(PlanModel).current.active;
   }
 
-  private currentPlanFilePath(): PlanFilePath {
+  /**
+   * Synchronous, file-system-free current plan file path (see
+   * `IAgentPlanService.currentPlanFilePath`). Hot-path callers that only need
+   * the path or the active flag must use this instead of `status()`, which
+   * reads the plan file from disk on every call.
+   */
+  currentPlanFilePath(): PlanFilePath {
     const state = this.wire.getModel(PlanModel).current;
     if (!state.active || state.id === undefined) return null;
     return this.planFilePathFor(state.id);
@@ -220,12 +232,12 @@ export class AgentPlanService extends Service implements IAgentPlanService {
     this.telemetryContext.set({ mode: 'agent' });
   }
 
-  async recordRevision(): Promise<void> {
+  async recordRevision(content?: string): Promise<void> {
     const state = this.wire.getModel(PlanModel).current;
     if (!state.active || state.id === undefined) return;
     const id = state.id;
-    const content = await this.hostFs.readText(this.planFilePathFor(id));
-    const bytes = Buffer.from(content, 'utf8');
+    const planContent = content ?? (await this.hostFs.readText(this.planFilePathFor(id)));
+    const bytes = Buffer.from(planContent, 'utf8');
     const version = (state.revisionCount?.[id] ?? 0) + 1;
     const scope = this.agentCtx.scope();
     const key = `plan/${id}/v${version}.md`;

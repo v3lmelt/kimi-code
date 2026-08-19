@@ -38,7 +38,7 @@ import {
   showSettingsSelector,
 } from './config';
 import { handleGoalCommand } from './goal';
-import { handleFeedbackCommand, showMcpServers, showStatusReport, showUsage } from './info';
+import { handleFeedbackCommand, showContext, showMcpServers, showStatusReport, showUsage } from './info';
 import { handleAddDirCommand } from './add-dir';
 import { parseSlashInput } from './parse';
 import { handlePluginsCommand } from './plugins';
@@ -63,8 +63,9 @@ import {
   handleTitleCommand,
 } from './session';
 import { handleSwarmCommand } from './swarm';
+import { handleUltracodeCommand } from './ultracode';
 import { handleUndoCommand } from './undo';
-import { handleWebCommand } from './web';
+import { handleWorkflowsCommand } from './workflows';
 
 // ---------------------------------------------------------------------------
 // Re-exports — keep existing consumers working
@@ -90,7 +91,9 @@ export {
   showSettingsSelector,
 } from './config';
 export { handleSwarmCommand } from './swarm';
-export { handleFeedbackCommand, showMcpServers, showStatusReport, showUsage } from './info';
+export { handleUltracodeCommand } from './ultracode';
+export { handleWorkflowsCommand } from './workflows';
+export { handleFeedbackCommand, showContext, showMcpServers, showStatusReport, showUsage } from './info';
 export { handlePluginsCommand } from './plugins';
 export { handleReloadCommand, handleReloadTuiCommand } from './reload';
 export { handleGoalCommand } from './goal';
@@ -102,7 +105,6 @@ export {
   handleTitleCommand,
 } from './session';
 export { handleUndoCommand } from './undo';
-export { handleWebCommand } from './web';
 
 // ---------------------------------------------------------------------------
 // Host interface
@@ -343,8 +345,8 @@ const SESSION_REQUIRING_COMMANDS: ReadonlySet<BuiltinSlashCommandName> = new Set
   'init',
   'plan',
   'swarm',
+  'ultracode',
   'undo',
-  'web',
 ]);
 
 async function handleBuiltInSlashCommand(
@@ -380,7 +382,7 @@ async function handleBuiltInSlashCommand(
       host.showHelpPanel();
       return;
     case 'version':
-      host.showStatus(`Kimi Code v${host.state.appState.version}`);
+      host.showStatus(`Hasu v${host.state.appState.version}`);
       return;
     case 'new': {
       // A first-use lazy creation may still be in flight: wait it out so /new
@@ -458,6 +460,9 @@ async function handleBuiltInSlashCommand(
     case 'usage':
       void showUsage(host);
       return;
+    case 'context':
+      showContext(host);
+      return;
     case 'status':
       void showStatusReport(host);
       return;
@@ -481,6 +486,12 @@ async function handleBuiltInSlashCommand(
       return;
     case 'swarm':
       await handleSwarmCommand(host, args);
+      return;
+    case 'ultracode':
+      await handleUltracodeCommand(host, args);
+      return;
+    case 'workflows':
+      await handleWorkflowsCommand(host, args);
       return;
     case 'compact':
       await handleCompactCommand(host, args);
@@ -511,9 +522,6 @@ async function handleBuiltInSlashCommand(
       return;
     case 'undo':
       await handleUndoCommand(host, args);
-      return;
-    case 'web':
-      await handleWebCommand(host);
       return;
     default:
       host.showError(`Unknown slash command: /${String(name)}`);

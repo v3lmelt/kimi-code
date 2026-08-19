@@ -5,7 +5,7 @@
  */
 
 import type { Component } from '@moonshot-ai/pi-tui';
-import { truncateToWidth, visibleWidth } from '@moonshot-ai/pi-tui';
+import { bumpVersion, truncateToWidth, visibleWidth } from '@moonshot-ai/pi-tui';
 import { formatDuration } from '@moonshot-ai/kimi-code-oauth';
 import type { SessionUsage, TokenUsage } from '@moonshot-ai/kimi-code-sdk';
 
@@ -80,6 +80,8 @@ export interface UsageReportOptions {
   readonly maxContextTokens: number;
   readonly managedUsage?: ManagedUsageReport;
   readonly managedUsageError?: string;
+  readonly goUsage?: ManagedUsageReport;
+  readonly goUsageError?: string;
 }
 
 export interface ManagedUsageReportLineOptions {
@@ -137,6 +139,7 @@ function buildSessionUsageSection(
 }
 
 function buildManagedUsageSection(
+  title: string,
   usage: ManagedUsageReport | undefined,
   error: string | undefined,
   accent: Colorize,
@@ -144,11 +147,11 @@ function buildManagedUsageSection(
   muted: Colorize,
   errorStyle: Colorize,
 ): string[] {
-  if (error !== undefined) return [accent('Plan usage'), errorStyle(`  ${error}`)];
+  if (error !== undefined) return [accent(title), errorStyle(`  ${error}`)];
   if (usage === undefined) return [];
   const { summary, limits } = usage;
   if (summary === null && limits.length === 0) {
-    return [accent('Plan usage'), muted('  No usage data available.')];
+    return [accent(title), muted('  No usage data available.')];
   }
 
   const rows: ManagedUsageRow[] = [];
@@ -160,7 +163,7 @@ function buildManagedUsageSection(
   const labelWidth = Math.max(10, ...labels.map((l) => l.length));
   const pctWidth = Math.max(...rows.map((r) => `${Math.round(usedRatio(r) * 100)}% used`.length));
 
-  const out: string[] = [accent('Plan usage')];
+  const out: string[] = [accent(title)];
   for (let i = 0; i < rows.length; i++) {
     const row = rows[i]!;
     const ratioUsed = usedRatio(row);
@@ -267,8 +270,29 @@ export function buildManagedUsageReportLines(options: ManagedUsageReportLineOpti
   const errorStyle = (text: string) => currentTheme.fg('error', text);
 
   return buildManagedUsageSection(
+    'Plan usage',
     options.managedUsage,
     options.managedUsageError,
+    accent,
+    value,
+    muted,
+    errorStyle,
+  );
+}
+
+export function buildGoUsageReportLines(options: {
+  readonly goUsage?: ManagedUsageReport;
+  readonly goUsageError?: string;
+}): string[] {
+  const accent = (text: string) => currentTheme.boldFg('primary', text);
+  const value = (text: string) => currentTheme.fg('text', text);
+  const muted = (text: string) => currentTheme.fg('textDim', text);
+  const errorStyle = (text: string) => currentTheme.fg('error', text);
+
+  return buildManagedUsageSection(
+    'OpenCode Go usage',
+    options.goUsage,
+    options.goUsageError,
     accent,
     value,
     muted,
@@ -330,10 +354,22 @@ export function buildUsageReportLines(options: UsageReportOptions): string[] {
     lines.push(...extraSection);
   }
 
+  const goSection = buildGoUsageReportLines({
+    goUsage: options.goUsage,
+    goUsageError: options.goUsageError,
+  });
+  if (goSection.length > 0) {
+    lines.push('');
+    lines.push(...goSection);
+  }
+
   return lines;
 }
 
 export class UsagePanelComponent implements Component {
+  // Versioned from construction so the transcript container's fast path can
+  // short-circuit unchanged frames; invalidate() bumps after rebuilding.
+  version = 0;
   /** Cached coloured lines; rebuilt from `buildLines` on every invalidate. */
   private lines: readonly string[];
 
@@ -347,8 +383,10 @@ export class UsagePanelComponent implements Component {
 
   invalidate(): void {
     // Report bodies embed palette colours, so a theme switch must re-run the
-    // builder to repaint the cached lines (the data itself is captured).
+    // builder to repaint the cached lines (the data itself is captured). Bump
+    // so the parent container's version short-circuit re-renders us.
     this.lines = this.buildLines();
+    bumpVersion(this);
   }
 
   render(width: number): string[] {

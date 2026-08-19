@@ -535,7 +535,10 @@ export class WritePath<V> {
   private applyOp(op: PreparedOp<V>, out: { prev: StoreRecord | undefined }): void {
     const oldBuf = this.deps.store().get(op.pk);
     out.prev = oldBuf !== undefined ? this.deps.store().map.get(op.pk) : undefined;
-    const oldDoc = oldBuf !== undefined ? this.deps.decode(oldBuf) : undefined;
+    // The previous value is consumed only by the secondary-index branches
+    // below (both gated on deps.indexes.size); skip the decode entirely on
+    // the common no-secondary-index path (the search store never builds one).
+    const oldDoc = this.deps.indexes.size > 0 && oldBuf !== undefined ? this.deps.decode(oldBuf) : undefined;
     if (op.type === TYPE_SET) {
       // Always applied as an in-memory ref; in valueMode 'disk' the caller
       // swaps in the WAL pointer via publishWalRef() once the frame's bytes

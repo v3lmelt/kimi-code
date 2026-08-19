@@ -1,6 +1,6 @@
 # Keyboard Shortcuts
 
-Kimi Code CLI's TUI interactive mode supports a set of keyboard shortcuts. The shortcuts are organized into five groups by usage context: general input, mode switching, during streaming, tool output control, the approval panel, and popup navigation. Type `/help` in the TUI at any time to open the built-in shortcut reference.
+Hasu CLI's TUI interactive mode supports a set of keyboard shortcuts. The shortcuts are organized into five groups by usage context: general input, mode switching, during streaming, tool output control, the approval panel, and popup navigation. Type `/help` in the TUI at any time to open the built-in shortcut reference.
 
 ## General Shortcuts
 
@@ -13,7 +13,7 @@ The following keys are always available in the input box:
 | `↑` / `↓` | Browse input history |
 | `Esc` | Close a popup / cancel completion / interrupt streaming output or context compaction |
 | `Ctrl-C` | Interrupt the current streaming output, or clear the input box |
-| `Ctrl-D` | Exit Kimi Code CLI when the input box is empty |
+| `Ctrl-D` | Exit Hasu CLI when the input box is empty |
 | `Ctrl-T` | Expand or collapse the todo list when it is truncated |
 
 Pressing `Ctrl-C` **during streaming** cancels immediately — no second confirmation needed.
@@ -24,10 +24,10 @@ Pressing `Ctrl-C` **during streaming** cancels immediately — no second confirm
 
 | Shortcut | Function |
 | --- | --- |
-| `Shift-Tab` | Toggle Plan mode |
+| `Shift-Tab` | Cycle modes (Plan → Auto → YOLO) |
 | `!` | Enter shell mode (in an empty input box) |
 
-Press `Shift-Tab` to enable or disable Plan mode. When enabled, the Agent prioritizes read-only tools for research and planning and can write to the current plan file; `Bash` is subject to the current permission mode and regular rules, without any additional separate approval triggered by Plan mode. Simply toggling does not create an empty plan file. Press `Shift-Tab` again to exit Plan mode.
+Press `Shift-Tab` to cycle through modes: Plan → Auto → YOLO → back to the default (manual). In Plan mode the Agent prioritizes read-only tools for research and planning and can write to the current plan file; `Bash` is subject to the current permission mode and regular rules, without any additional separate approval triggered by Plan mode. Auto mode auto-approves every action; YOLO mode auto-approves regular tool calls but still asks before sensitive actions. The modes are mutually exclusive: entering Auto or YOLO turns Plan mode off, and entering Plan mode resets the permission to manual. Simply cycling does not create an empty plan file.
 
 Type `!` in an empty input box to enter shell mode and run terminal commands directly; while a command is running, press `Ctrl+B` to move it to a background task. See [Interaction and input](../guides/interaction.md#shell-mode).
 
@@ -99,4 +99,4 @@ After opening the help panel with `/help`, use the following keys to navigate an
 ## Next steps
 
 - [Slash Commands](./slash-commands.md) — Quick reference for built-in TUI control commands
-- [`kimi` Command](./kimi-command.md) — Complete reference for startup flags and subcommands
+- [`hasu` Command](./kimi-command.md) — Complete reference for startup flags and subcommands

@@ -43,11 +43,20 @@
 import { IAgentTaskService } from '#/agent/task/task';
 import { resolveAgentTaskConfig } from '#/agent/task/configSection';
 import { IConfigService } from '#/app/config/config';
+import { IBashParserService } from '#/app/bashParser/bashParser';
+import type { BashSyntaxNode } from '#/app/bashParser/bashParser';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionProcessRunner, type IProcess } from '#/session/process/processRunner';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
-import type { ExecutableToolResult, ToolExecution, ToolUpdate } from '#/tool/toolContract';
+import {
+  ToolAccesses,
+  type ExecutableToolResult,
+  type ToolExecution,
+  type ToolFileAccessOperation,
+  type ToolResourceAccess,
+  type ToolUpdate,
+} from '#/tool/toolContract';
 import {
   type ExecutableToolResultBuilderResult,
   ToolResultBuilder,
@@ -138,6 +147,7 @@ export class BashTool implements IBashTool {
     @IAgentTaskService private readonly tasks: IAgentTaskService,
     @IAgentToolPolicyService private readonly toolPolicy: IAgentToolPolicyService,
     @IConfigService private readonly config: IConfigService,
+    @IBashParserService private readonly bashParser?: IBashParserService,
   ) {
     this.isWindowsBash = this.env.osKind === 'Windows';
     this.renderedDescription = renderBashDescription(this.env.shellName);
@@ -171,6 +181,16 @@ export class BashTool implements IBashTool {
 
   resolveExecution(args: BashInput): ToolExecution {
     const preview = args.command.length > 50 ? `${args.command.slice(0, 50)}…` : args.command;
+    // Parse once into per-subcommand argv so every `matchesRule` probe (one per
+    // permission rule) reuses the same tree instead of re-parsing. Fails safe:
+    // an unavailable parser, a budget-aborted parse, or a tree with no command
+    // nodes degrades to whole-string matching and conservative `all()` accesses.
+    const subcommands =
+      this.bashParser === undefined ? undefined : splitCommandArgvs(args.command, this.bashParser);
+    const accesses =
+      subcommands === undefined || subcommands.length === 0
+        ? ToolAccesses.all()
+        : (bashFileAccesses(subcommands) ?? ToolAccesses.all());
     return {
       description: args.run_in_background
         ? `Starting background: ${preview}`
@@ -183,7 +203,12 @@ export class BashTool implements IBashTool {
         language: 'bash',
       },
       approvalRule: literalRulePattern(this.name, args.command),
-      matchesRule: (ruleArgs) => matchesGlobRuleSubject(ruleArgs, args.command),
+      matchesRule: (ruleArgs) =>
+        subcommands === undefined || subcommands.length === 0
+          ? matchesGlobRuleSubject(ruleArgs, args.command)
+          : matchesGlobRuleSubject(ruleArgs, args.command) ||
+            subcommands.some((sub) => matchesGlobRuleSubject(ruleArgs, sub.argv.join(' '))),
+      accesses,
       execute: ({ signal, onUpdate, onForegroundTaskStart }) =>
         this.execution(args, signal, onUpdate, onForegroundTaskStart),
     };
@@ -452,6 +477,203 @@ export class BashTool implements IBashTool {
 }
 
 registerAgentToolService(IBashTool, BashTool, { name: 'Bash', domain: 'os/backends' });
+
+export interface BashRedirect {
+  readonly operator: string;
+  readonly target: string;
+}
+
+export interface BashSubcommand {
+  readonly argv: readonly string[];
+  readonly redirects: readonly BashRedirect[];
+}
+
+const BASH_REDIRECT_OPERATORS = new Set(['<', '>', '>>', '>&', '<&', '&>', '&>>', '>|', '<>']);
+const READ_REDIRECT_OPERATORS = new Set(['<']);
+
+// Commands whose positional (non-flag) arguments are file paths. Kept to the
+// unambiguous set so a non-path positional (e.g. `sed`'s script or `chmod`'s
+// mode) is never mistaken for a sensitive file target.
+const PATH_ARG_COMMANDS = new Set([
+  'rm',
+  'rmdir',
+  'mv',
+  'cp',
+  'ln',
+  'touch',
+  'cat',
+  'head',
+  'tail',
+  'less',
+  'more',
+  'wc',
+]);
+
+const READ_PATH_COMMANDS = new Set(['cat', 'head', 'tail', 'less', 'more', 'wc']);
+
+/**
+ * Split a bash command into its top-level subcommand argv lists using the
+ * injected tree-sitter parser. Pure: callers cache the result across
+ * `matchesRule` probes. Returns `undefined` on a budget-aborted parse or when
+ * no command node could be extracted (callers fall back to whole-string
+ * matching).
+ */
+export function splitCommandArgvs(
+  source: string,
+  parser: IBashParserService,
+): readonly BashSubcommand[] | undefined {
+  if (source.trim().length === 0) return [];
+  const parsed = parser.parse(source);
+  if (!parsed.ok) return undefined;
+  const subcommands = collectSubcommands(parsed.root);
+  return subcommands.length === 0 ? undefined : subcommands;
+}
+
+/**
+ * Map parsed subcommands onto resource accesses so the permission chain can
+ * ask/deny for sensitive targets (`.env`, SSH keys, `.git` control files):
+ * redirect targets (`cat < .env`, `echo x > out`) and the positional paths of
+ * path-class commands (`rm -- -/secret`, `mv a b`). Returns `undefined` when
+ * no file access could be extracted, so the caller keeps the conservative
+ * `all()` fallback.
+ */
+export function bashFileAccesses(
+  subcommands: readonly BashSubcommand[],
+): ToolAccesses | undefined {
+  const accesses: ToolResourceAccess[] = [];
+  for (const subcommand of subcommands) {
+    for (const redirect of subcommand.redirects) {
+      if (!isPathLike(redirect.target)) continue;
+      accesses.push({
+        kind: 'file',
+        operation: READ_REDIRECT_OPERATORS.has(redirect.operator) ? 'read' : 'write',
+        path: redirect.target,
+      });
+    }
+    const name = subcommand.argv[0];
+    if (name === undefined || !PATH_ARG_COMMANDS.has(name)) continue;
+    const operation: ToolFileAccessOperation = READ_PATH_COMMANDS.has(name) ? 'read' : 'write';
+    for (const path of positionalPaths(subcommand.argv)) {
+      if (!isPathLike(path)) continue;
+      accesses.push({ kind: 'file', operation, path });
+    }
+  }
+  return accesses.length === 0 ? undefined : accesses;
+}
+
+function collectSubcommands(root: BashSyntaxNode): BashSubcommand[] {
+  type MutableSubcommand = { argv: string[]; redirects: BashRedirect[] };
+  const result: MutableSubcommand[] = [];
+  walk(root, []);
+  return result;
+
+  function walk(node: BashSyntaxNode, pendingRedirects: readonly BashRedirect[]): void {
+    switch (node.type) {
+      case 'command': {
+        const argv = commandArgv(node);
+        const redirects: BashRedirect[] = [];
+        for (const child of node.children) {
+          if (child.type !== 'file_redirect') continue;
+          const redirect = redirectFromNode(child);
+          if (redirect !== undefined) redirects.push(redirect);
+        }
+        result.push({ argv, redirects: [...pendingRedirects, ...redirects] });
+        return;
+      }
+      case 'redirected_statement': {
+        const redirects: BashRedirect[] = [];
+        for (const child of node.children) {
+          if (child.type !== 'file_redirect') continue;
+          const redirect = redirectFromNode(child);
+          if (redirect !== undefined) redirects.push(redirect);
+        }
+        const before = result.length;
+        for (const child of node.children) {
+          if (child.type === 'file_redirect') continue;
+          walk(child, pendingRedirects);
+        }
+        if (redirects.length === 0) return;
+        // A bare redirect (`> file`) is valid bash; represent it as an
+        // empty-argv command so the write is still visible to the chain.
+        if (result.length === before) {
+          result.push({ argv: [], redirects });
+          return;
+        }
+        result[result.length - 1]!.redirects.push(...redirects);
+        return;
+      }
+      case 'comment':
+        return;
+      default:
+        // Structural wrappers (program/list/pipeline/if/for/while/function).
+        for (const child of node.children) walk(child, pendingRedirects);
+    }
+  }
+}
+
+function commandArgv(node: BashSyntaxNode): string[] {
+  const argv: string[] = [];
+  for (const child of node.children) {
+    switch (child.type) {
+      case 'command_name':
+        argv.push(child.text);
+        break;
+      case 'word':
+      case 'string':
+      case 'raw_string':
+      case 'concatenation':
+      case 'number':
+        argv.push(child.text);
+        break;
+      default:
+        // variable_assignment, redirects, expansion nodes: not argv.
+        break;
+    }
+  }
+  return argv;
+}
+
+function redirectFromNode(node: BashSyntaxNode): BashRedirect | undefined {
+  let operator: string | undefined;
+  let target: string | undefined;
+  for (const child of node.children) {
+    if (child.type === 'file_descriptor') continue;
+    if (child.type === 'word' || child.type === 'number' || child.type === 'string') {
+      target = child.text;
+    } else if (!child.isNamed && BASH_REDIRECT_OPERATORS.has(child.type)) {
+      operator = child.type;
+    }
+  }
+  if (operator === undefined || target === undefined) return undefined;
+  return { operator, target };
+}
+
+// Positional (non-flag) arguments, honoring the POSIX `--` end-of-options
+// delimiter so a path that starts with `-` (`rm -- -/secret`) is still seen.
+function positionalPaths(argv: readonly string[]): string[] {
+  const paths: string[] = [];
+  let afterDoubleDash = false;
+  for (let i = 1; i < argv.length; i += 1) {
+    const arg = argv[i]!;
+    if (!afterDoubleDash) {
+      if (arg === '--') {
+        afterDoubleDash = true;
+        continue;
+      }
+      if (arg === '-') continue;
+      if (arg.startsWith('-') && arg.length > 1) continue;
+    }
+    paths.push(arg);
+  }
+  return paths;
+}
+
+function isPathLike(value: string): boolean {
+  if (value.length === 0) return false;
+  if (value === '~') return false;
+  if (/[*?[\]{}]/.test(value)) return false;
+  return true;
+}
 
 function formatTimeoutLabel(timeoutMs: number): string {
   return timeoutMs % 1000 === 0 ? `${String(timeoutMs / 1000)}s` : `${String(timeoutMs)}ms`;

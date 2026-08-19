@@ -7,7 +7,7 @@
  * the richer completion card (the `/goal` box), not this marker.
  */
 
-import { truncateToWidth, type Component } from '@moonshot-ai/pi-tui';
+import { bumpVersion, truncateToWidth, type Component } from '@moonshot-ai/pi-tui';
 import type { GoalChange } from '@moonshot-ai/kimi-code-sdk';
 
 import { STATUS_BULLET } from '#/tui/constant/symbols';
@@ -28,6 +28,10 @@ interface GoalMarkerOptions {
 }
 
 export class GoalMarkerComponent implements Component {
+  // Versioned from construction. setExpanded mutates render output and
+  // invalidate() is required for theme repaints — both bump so the container
+  // fast path never serves stale marker lines.
+  version = 0;
   private expanded = false;
   private readonly marker: string;
   private readonly textToken: ColorToken;
@@ -48,10 +52,15 @@ export class GoalMarkerComponent implements Component {
     this.leadingBlank = options.leadingBlank ?? false;
   }
 
-  invalidate(): void {}
+  invalidate(): void {
+    // render() reads currentTheme colours live, so a theme switch must bump.
+    bumpVersion(this);
+  }
 
   setExpanded(expanded: boolean): void {
+    if (this.expanded === expanded) return;
     this.expanded = expanded;
+    bumpVersion(this);
   }
 
   render(width: number): string[] {

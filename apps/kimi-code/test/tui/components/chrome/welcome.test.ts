@@ -3,6 +3,7 @@ import chalk from 'chalk';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
 import { WelcomeComponent } from '#/tui/components/chrome/welcome';
+import { HASUNOSORA_MEMBERS } from '#/tui/constant/hasunosora-members';
 import { setRainbowDance, type RainbowDanceController } from '#/tui/easter-eggs/dance';
 import { darkColors } from '#/tui/theme/colors';
 import type { AppState } from '#/tui/types';
@@ -35,6 +36,7 @@ const appState: AppState = {
   availableModels: {},
   availableProviders: {},
   mcpServersSummary: null,
+  workflowRuns: [],
 };
 
 function truecolorCodes(text: string): Set<string> {
@@ -106,16 +108,28 @@ describe('WelcomeComponent', () => {
   it('renders the Claude LogoV2 layout: border title, mascot, no right column', () => {
     const wide = new WelcomeComponent(appState).render(120).join('\n');
     expect(wide).toContain('Welcome back!');
-    expect(wide).toContain(' Kimi Code ');
+    expect(wide).toContain(' Hasu ');
     expect(wide).toContain(' v1.2.3 ');
-    expect(wide).toContain('▐▛███▜▌');
+    expect(wide).toContain('▝▜▟██▙▛▘');
     expect(wide).toContain('/tmp/project');
     expect(wide).not.toContain('Tips for getting started');
     expect(wide).not.toContain("What's new");
 
     const narrow = new WelcomeComponent(appState).render(80).join('\n');
     expect(narrow).toContain('Welcome back!');
-    expect(narrow).toContain('▐▛███▜▌');
+    expect(narrow).toContain('▝▜▟██▙▛▘');
     expect(narrow).not.toContain('Tips for getting started');
+  });
+
+  it('renders the injected Hasunosora member icon below the lotus', () => {
+    const out = new WelcomeComponent(appState, 0).render(80).join('\n');
+    expect(out).toContain('  ▄███      ██▄');
+    expect(out).toContain('▀█████▄████▄████▀');
+    expect(out).toContain('日野下花帆');
+  });
+
+  it('picks a Hasunosora member icon by default', () => {
+    const out = new WelcomeComponent(appState).render(80).join('\n');
+    expect(HASUNOSORA_MEMBERS.some((member) => out.includes(member.name))).toBe(true);
   });
 });

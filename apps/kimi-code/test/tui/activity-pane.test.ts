@@ -77,6 +77,11 @@ function startSwarmProgress(driver: ActivityDriver, state: TUIState): AgentSwarm
     (child): child is AgentSwarmProgressComponent => child instanceof AgentSwarmProgressComponent,
   );
   if (progress === undefined) throw new Error('expected AgentSwarm progress');
+  // The card freezes its animation as soon as enough rows follow it to scroll
+  // its bottom edge off screen (see `syncAgentSwarmCardVisibility`). The
+  // harness has a real editor + footer, so force the card visible to keep the
+  // assertions on the live spinner frame deterministic.
+  progress.setViewportVisible(true);
   return progress;
 }
 
@@ -122,23 +127,34 @@ describe('updateActivityPane terminal progress', () => {
     }
   });
 
-  it('keeps compaction visible as terminal progress even though the pane is hidden', () => {
-    const { driver, state, setProgress } = makeDriverWithTerminalProgress();
-    state.appState.isCompacting = true;
-    state.appState.streamingPhase = 'waiting';
+  it('keeps a compacting spinner in the activity pane and terminal progress on', () => {
+    vi.useFakeTimers();
+    try {
+      const { driver, state, setProgress } = makeDriverWithTerminalProgress();
+      state.appState.isCompacting = true;
+      state.appState.streamingPhase = 'waiting';
 
-    driver.updateActivityPane();
-    driver.updateActivityPane();
+      driver.updateActivityPane();
+      driver.updateActivityPane();
 
-    expect(setProgress).toHaveBeenCalledTimes(1);
-    expect(setProgress).toHaveBeenLastCalledWith(true);
+      expect(setProgress).toHaveBeenCalledTimes(1);
+      expect(setProgress).toHaveBeenLastCalledWith(true);
+      expect(state.activitySpinner).not.toBeNull();
+      expect(state.activityContainer.children).toHaveLength(1);
+      expect(strip(state.activitySpinner!.instance.render(80).join('\n'))).toContain(
+        'Compacting conversation…',
+      );
 
-    state.appState.isCompacting = false;
-    state.appState.streamingPhase = 'idle';
-    driver.updateActivityPane();
+      state.appState.isCompacting = false;
+      state.appState.streamingPhase = 'idle';
+      driver.updateActivityPane();
 
-    expect(setProgress).toHaveBeenCalledTimes(2);
-    expect(setProgress).toHaveBeenLastCalledWith(false);
+      expect(setProgress).toHaveBeenCalledTimes(2);
+      expect(setProgress).toHaveBeenLastCalledWith(false);
+      expect(state.activitySpinner).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('keeps terminal progress active and shows a thinking spinner', () => {

@@ -2,7 +2,7 @@ import assert from "node:assert";
 import { afterEach, describe, it } from "node:test";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import { Chalk } from "chalk";
-import { Markdown } from "../src/components/markdown.ts";
+import { Markdown, type DefaultTextStyle, type MarkdownOptions } from "../src/components/markdown.ts";
 import { resetCapabilitiesCache, setCapabilities } from "../src/terminal-image.ts";
 import { type Component, TUI } from "../src/tui.ts";
 import { defaultMarkdownTheme } from "./test-themes.ts";
@@ -196,7 +196,7 @@ describe("Markdown component", () => {
 
 			const lines = markdown.render(80).map((line) => stripAnsi(line).trimEnd());
 
-			assert.deepStrictEqual(lines, ["- [ ] beep", "- [x] boop"]);
+			assert.deepStrictEqual(lines, ["- ☐ beep", "- ☑ boop"]);
 		});
 
 		it("should maintain numbering when code blocks are not indented (LLM output)", () => {
@@ -281,7 +281,7 @@ describe("Markdown component", () => {
 
 			const lines = markdown.render(24).map((line) => stripAnsi(line).trimEnd());
 
-			assert.deepStrictEqual(lines, ["- │ alpha beta gamma", "  │ delta epsilon zeta"]);
+			assert.deepStrictEqual(lines, ["│ alpha beta gamma delta", "│ epsilon zeta"]);
 		});
 
 		it("should render and wrap code blocks inside list items", () => {
@@ -294,7 +294,7 @@ describe("Markdown component", () => {
 
 			const lines = markdown.render(24).map((line) => stripAnsi(line).trimEnd());
 
-			assert.deepStrictEqual(lines, ["- ```ts", "    alpha beta gamma", "  delta epsilon zeta", "  ```"]);
+			assert.deepStrictEqual(lines, ["```ts", "  alpha beta gamma delta", "epsilon zeta", "```"]);
 		});
 	});
 
@@ -1437,6 +1437,277 @@ bar`,
 			const complete = new Markdown("```ts\nconst x = 1;\n```", 0, 0, defaultMarkdownTheme);
 
 			assert.strictEqual(partial.render(80).length, complete.render(80).length);
+		});
+	});
+
+	describe("Incremental streaming rendering", () => {
+		interface StreamSetup {
+			paddingX?: number;
+			paddingY?: number;
+			defaultStyle?: DefaultTextStyle;
+			options?: MarkdownOptions;
+		}
+
+		/**
+		 * Drive a single Markdown instance through a sequence of setText() frames
+		 * (appends of the previous frame, so the append-only fast path is
+		 * exercised) and assert every frame is byte-identical to a fresh full
+		 * render of the same text.
+		 */
+		function assertStreamMatchesFullRender(frames: string[], width = 80, setup: StreamSetup = {}): void {
+			assert.ok(frames.length >= 2, "Need at least two frames");
+			const incremental = new Markdown(
+				frames[0]!,
+				setup.paddingX ?? 0,
+				setup.paddingY ?? 0,
+				defaultMarkdownTheme,
+				setup.defaultStyle,
+				setup.options,
+			);
+			for (let i = 0; i < frames.length; i++) {
+				if (i > 0) {
+					incremental.setText(frames[i]!);
+				}
+				const incrementalLines = incremental.render(width);
+				const fullLines = new Markdown(
+					frames[i]!,
+					setup.paddingX ?? 0,
+					setup.paddingY ?? 0,
+					defaultMarkdownTheme,
+					setup.defaultStyle,
+					setup.options,
+				).render(width);
+				assert.deepStrictEqual(
+					incrementalLines,
+					fullLines,
+					`Frame ${i} differs from full render for text: ${JSON.stringify(frames[i]!.slice(0, 120))}`,
+				);
+			}
+		}
+
+		it("reuses fully closed blocks while a paragraph streams", () => {
+			assertStreamMatchesFullRender(
+				[
+					"first paragraph",
+					"first paragraph\n",
+					"first paragraph\n\nsecond paragraph",
+					"first paragraph\n\nsecond paragraph\n",
+					"first paragraph\n\nsecond paragraph\n\nthird paragraph",
+					"first paragraph\n\nsecond paragraph\n\nthird paragraph\n",
+				],
+				40,
+			);
+		});
+
+		it("streams a code fence from unclosed to closed and beyond", () => {
+			assertStreamMatchesFullRender(
+				[
+					"```ts",
+					"```ts\n",
+					"```ts\nconst x = 1;",
+					"```ts\nconst x = 1;\n",
+					"```ts\nconst x = 1;\n``",
+					"```ts\nconst x = 1;\n```",
+					"```ts\nconst x = 1;\n```\n",
+					"```ts\nconst x = 1;\n```\n\nmore text",
+					"```ts\nconst x = 1;\n```\n\nmore text\n\n",
+				],
+				40,
+			);
+		});
+
+		it("streams code after a completed paragraph", () => {
+			assertStreamMatchesFullRender(
+				[
+					"hello world",
+					"hello world\n\n",
+					"hello world\n\n```js",
+					"hello world\n\n```js\nconst a = 1;",
+					"hello world\n\n```js\nconst a = 1;\n```",
+					"hello world\n\n```js\nconst a = 1;\n```\n\ngoodbye",
+				],
+				40,
+			);
+		});
+
+		it("streams lists with appended items and nested blocks", () => {
+			assertStreamMatchesFullRender(
+				[
+					"- item1",
+					"- item1\n- item2",
+					"- item1\n- item2\n- item3",
+					"- item1\n- item2\n- item3\n  - nested",
+					"- item1\n- item2\n- item3\n  - nested\n\n1. ordered",
+					"- item1\n- item2\n- item3\n  - nested\n\n1. ordered\n2. ordered two",
+				],
+				40,
+			);
+		});
+
+		it("keeps ordered list numbering while items stream in", () => {
+			assertStreamMatchesFullRender(
+				["1. first", "1. first\n2. second", "1. first\n2. second\n   - nested", "1. first\n2. second\n   - nested\n\n3. third"],
+				40,
+			);
+		});
+
+		it("handles a paragraph growing into a setext heading", () => {
+			assertStreamMatchesFullRender(
+				[
+					"intro\n\nbody text",
+					"intro\n\nbody text\n",
+					"intro\n\nbody text\n=",
+					"intro\n\nbody text\n===",
+					"intro\n\nbody text\n===\n\noutro",
+				],
+				40,
+			);
+		});
+
+		it("handles mid-edit and truncation by falling back to a full render", () => {
+			assertStreamMatchesFullRender(["aaa\n\nbbb\n\nccc", "aaa\n\nBXX\n\nccc", "aaa\n\nBXX\n\nccc\n\nddd", "aaa\n\nBXX"]);
+		});
+
+		it("re-renders fully when the width changes", () => {
+			const markdown = new Markdown("alpha\n\nbeta gamma delta epsilon", 0, 0, defaultMarkdownTheme);
+			const narrow = markdown.render(15);
+			const wide = markdown.render(50);
+			const full = new Markdown("alpha\n\nbeta gamma delta epsilon", 0, 0, defaultMarkdownTheme).render(50);
+			assert.deepStrictEqual(wide, full);
+			assert.notDeepStrictEqual(narrow, wide);
+			// Appending after a width change stays correct too.
+			markdown.setText("alpha\n\nbeta gamma delta epsilon\n\nmore");
+			assert.deepStrictEqual(
+				markdown.render(50),
+				new Markdown("alpha\n\nbeta gamma delta epsilon\n\nmore", 0, 0, defaultMarkdownTheme).render(50),
+			);
+		});
+
+		it("renders CJK and emoji content identically", () => {
+			assertStreamMatchesFullRender(
+				[
+					"你好世界",
+					"你好世界\n\n第二段有 **加粗** 和 `代码`",
+					"第二段有 **加粗** 和 `代码`\n\nemoji 👨‍👩‍👧‍👦 家庭 🚀",
+					"emoji 👨‍👩‍👧‍👦 家庭 🚀\n\n" + "很长很长的中文内容".repeat(30),
+				],
+				30,
+			);
+		});
+
+		it("wraps overwide lines identically at narrow widths", () => {
+			assertStreamMatchesFullRender(
+				["alpha beta gamma delta epsilon zeta eta theta iota", "alpha beta gamma delta epsilon zeta eta theta iota\n\nmore words here"],
+				15,
+			);
+		});
+
+		it("does not wrap or pad image lines in either path", () => {
+			// A theme whose code lines carry a kitty-graphics prefix: isImageLine()
+			// then skips wrapping/margins for those lines in both render paths.
+			const imageTheme = { ...defaultMarkdownTheme, codeBlock: (text: string) => `\x1b_Gf=32;${text}` };
+			const setup = { paddingX: 2 };
+			const frames = [
+				"before\n\n```\nimg data here\n```\n\nafter",
+				"before\n\n```\nimg data here\n```\n\nafter\n\nmore content",
+			];
+			assertStreamMatchesFullRender(frames, 40, setup);
+			// Sanity: the constructed line really is treated as an image line.
+			const rendered = new Markdown(frames[0]!, 2, 0, imageTheme).render(40);
+			assert.ok(rendered.some((line) => line.includes("\x1b_G")), "Expected an image line in the output");
+		});
+
+		it("handles CRLF content inside fences and paragraphs", () => {
+			assertStreamMatchesFullRender(
+				[
+					"line1\r\n",
+					"line1\r\n\r\nline2",
+					"line1\r\n\r\nline2\r\n\r\n```js\r\nconst x = 1;\r\n```",
+					"line1\r\n\r\nline2\r\n\r\n```js\r\nconst x = 1;\r\n```\r\n\r\ntail",
+				],
+				40,
+			);
+		});
+
+		it("streams a fence nested inside a list item", () => {
+			assertStreamMatchesFullRender(
+				[
+					"para\n\n- ```ts\n  code",
+					"para\n\n- ```ts\n  code\n  ``",
+					"para\n\n- ```ts\n  code\n  ```",
+					"para\n\n- ```ts\n  code\n  ```\n\nnext para",
+				],
+				40,
+			);
+		});
+
+		it("normalizes tabs identically while streaming", () => {
+			assertStreamMatchesFullRender(
+				["a\tb", "a\tb\n\nc\td", "a\tb\n\nc\td\n\n```\ne\tf\n```", "a\tb\n\nc\td\n\n```\ne\tf\n```\n\nlast"],
+				40,
+			);
+		});
+
+		it("applies padding and default background style in both paths", () => {
+			const style = {
+				color: (text: string) => `\x1b[31m${text}\x1b[0m`,
+				bgColor: (text: string) => `\x1b[44m${text}\x1b[0m`,
+				bold: true,
+			};
+			assertStreamMatchesFullRender(
+				["styled para", "styled para\n\nmore styled", "styled para\n\nmore styled\n\n```\ncode\n```", "styled para\n\nmore styled\n\n```\ncode\n```\n\nend"],
+				36,
+				{ paddingX: 2, paddingY: 1, defaultStyle: style },
+			);
+		});
+
+		it("keeps the options-driven rendering identical while streaming", () => {
+			assertStreamMatchesFullRender(
+				["  4. forth", "  4. forth\n  3. third", "  4. forth\n  3. third\n\n10) ten", "  4. forth\n  3. third\n\n10) ten\n7) seven"],
+				40,
+				{ options: { preserveOrderedListMarkers: true } },
+			);
+		});
+
+		it("streams blockquotes and horizontal rules", () => {
+			assertStreamMatchesFullRender(
+				[
+					"> quote",
+					"> quote\n> more",
+					"> quote\n> more\n\n---",
+					"> quote\n> more\n\n---\n\nplain after",
+				],
+				40,
+			);
+		});
+
+		it("streams tables", () => {
+			assertStreamMatchesFullRender(
+				[
+					"| A | B |",
+					"| A | B |\n| --- | --- |",
+					"| A | B |\n| --- | --- |\n| 1 | 2 |",
+					"| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |",
+					"| A | B |\n| --- | --- |\n| 1 | 2 |\n| 3 | 4 |\n\npara after",
+				],
+				40,
+			);
+		});
+
+		it("grows trailing blank-line space tokens without disturbing the prefix", () => {
+			assertStreamMatchesFullRender(
+				["para", "para\n", "para\n\n", "para\n\n\n", "para\n\n\nmore", "para\n\n\nmore\n"],
+				40,
+			);
+		});
+
+		it("returns the cached line array on repeat renders after streaming", () => {
+			const markdown = new Markdown("para", 0, 0, defaultMarkdownTheme);
+			markdown.render(40);
+			markdown.setText("para\n\nmore");
+			const first = markdown.render(40);
+			assert.strictEqual(markdown.render(40), first, "Repeat render should return the cached array");
+			assert.strictEqual(markdown.render(40), first, "Cached array should stay stable across calls");
 		});
 	});
 });

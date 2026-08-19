@@ -1,5 +1,5 @@
 import type { Component } from '@moonshot-ai/pi-tui';
-import { Container, Text, visibleWidth } from '@moonshot-ai/pi-tui';
+import { bumpVersion, Container, Text, visibleWidth } from '@moonshot-ai/pi-tui';
 
 import { RESPONSE_GUTTER } from '#/tui/constant/symbols';
 import { currentTheme } from '#/tui/theme';
@@ -30,12 +30,17 @@ export interface ShellExecutionOptions {
  * '  ⎿  ' marker, continuation lines align under it in a 5-column gutter.
  */
 class GutteredOutputComponent implements Component {
+  // Versioned from construction so ShellExecutionComponent's container fast
+  // path can skip unchanged results. invalidate() bumps (the gutter colour is
+  // read live from currentTheme) so a theme switch repaints the gutter.
+  version = 0;
   private readonly gutterWidth = visibleWidth(RESPONSE_GUTTER);
 
   constructor(private readonly inner: TruncatedOutputComponent) {}
 
   invalidate(): void {
     this.inner.invalidate();
+    bumpVersion(this);
   }
 
   render(width: number): string[] {

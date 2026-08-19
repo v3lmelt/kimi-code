@@ -24,6 +24,15 @@ export interface RunAgentOptions {
   readonly signal: AbortSignal;
   readonly summaryPolicy?: AgentProfileSummaryPolicy;
   readonly onReady?: () => void;
+  /**
+   * When true (with `structuredSchema`), the target agent's turn is given a
+   * single mandatory `StructuredOutput` tool and the run resolves to the
+   * validated structured value (falling back to the last text output when the
+   * model never produces a valid value).
+   */
+  readonly requiresStructuredOutput?: boolean;
+  /** JSON-schema object the structured result must satisfy. */
+  readonly structuredSchema?: Record<string, unknown>;
 }
 
 export interface AgentRunHandle {

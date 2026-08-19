@@ -8,6 +8,8 @@
 
 import type { AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
 
+export const SUBAGENT_DEPTH_LABEL = 'depth';
+
 export function subagentLabels(
   parentAgentId: string,
   options: { readonly swarmItem?: string } = {},
@@ -48,6 +50,14 @@ export function subagentParentAgentId(meta: AgentMeta | undefined): string | und
 export function subagentSwarmItem(meta: AgentMeta | undefined): string | undefined {
   if (meta === undefined) return undefined;
   return firstNonEmpty(meta.labels?.['swarmItem'], meta.swarmItem);
+}
+
+export function subagentDepth(meta: AgentMeta | undefined): number | undefined {
+  if (meta === undefined) return undefined;
+  const raw = meta.labels?.[SUBAGENT_DEPTH_LABEL];
+  if (raw === undefined) return undefined;
+  const depth = Number(raw);
+  return Number.isInteger(depth) && depth > 0 ? depth : undefined;
 }
 
 function firstNonEmpty(...values: readonly (string | undefined)[]): string | undefined {

@@ -7,7 +7,11 @@ import { isAbsolute, relative, sep } from 'node:path';
 
 import { Container, Spacer, Text, truncateToWidth, visibleWidth } from '@moonshot-ai/pi-tui';
 import type { Component, TUI } from '@moonshot-ai/pi-tui';
-import { highlightLines, langFromPath } from '#/tui/components/media/code-highlight';
+import {
+  highlightLines,
+  highlightLinesFirstN,
+  langFromPath,
+} from '#/tui/components/media/code-highlight';
 import { renderDiffLinesClustered } from '#/tui/components/media/diff-preview';
 import {
   COMMAND_PREVIEW_LINES,
@@ -19,6 +23,7 @@ import {
 import {
   STREAMING_ARGS_FIELD_RE,
   STREAMING_ARGS_PREVIEW_MAX_CHARS,
+  STREAMING_UI_FLUSH_MS,
 } from '#/tui/constant/streaming';
 import { FAILURE_MARK, STATUS_BULLET, SUCCESS_MARK } from '#/tui/constant/symbols';
 import { currentTheme } from '#/tui/theme';
@@ -28,7 +33,7 @@ import type { TokenUsage } from '@moonshot-ai/kimi-code-sdk';
 import { appendStreamingArgsPreview } from '#/tui/utils/event-payload';
 import { decodeMcpToolName } from '#/tui/utils/mcp-tool-name';
 import { isRenderCacheEnabled } from '#/tui/utils/render-cache';
-import { formatTokenCount } from '#/utils/usage/usage-format';
+import { formatTokenCount, usageTotal } from '#/utils/usage/usage-format';
 
 import { agentSwarmResultSummaryFromOutput } from './agent-swarm-progress';
 import { PlanBoxComponent } from './plan-box';
@@ -39,6 +44,10 @@ import { isGenericToolResult, pickResultRenderer } from './tool-renderers/regist
 
 const MAX_ARG_LENGTH = 60;
 const MAX_SUB_TOOL_CALLS_SHOWN = 4;
+// Cap the accumulated child-agent stream text (and thinking text) so a long
+// workflow never grows the buffers without bound. Keeps the tail — the latest
+// activity lines — matching the handler's slice(-MAX) semantics.
+const SUBAGENT_TEXT_MAX = 8_000;
 // Cap the Agent `description` in the single-subagent header so a long prompt
 // cannot wrap the header onto a second row and break the card's stable height.
 const MAX_SUBAGENT_DESCRIPTION_LENGTH = 60;
@@ -48,6 +57,22 @@ const TOOL_BLINK_INTERVAL_MS = 700;
 const PROGRESS_URL_RE = /https?:\/\/\S+/g;
 const ABORTED_MARK = '⊘';
 const MAX_LIVE_OUTPUT_CHARS = 50_000;
+// Expanded Write cards whose content exceeds this size render a head+tail
+// highlight window instead of the whole file — cli-highlight is super-linear
+// on huge blocks (measured ~6.7s at 305KB), so the full-file path must be
+// capped to keep an expanded card off the render loop's critical path.
+const EXPANDED_WRITE_HIGHLIGHT_MAX_CHARS = 50_000;
+/** Each half of the head+tail highlight window for an oversized expanded card. */
+const EXPANDED_WRITE_HIGHLIGHT_WINDOW_LINES = 100;
+/** Per-window highlight input budget (chars) for oversized expanded cards. */
+const EXPANDED_WRITE_HIGHLIGHT_WINDOW_CHARS = 40_000;
+/** A single window line longer than this is truncated (trailing '…') before
+ *  highlighting, so a pathological one-line payload cannot blow the budget. */
+const EXPANDED_WRITE_HIGHLIGHT_MAX_LINE_CHARS = 2_000;
+/** Combined render payload above which setResult/updateToolCall defer the body
+ *  rebuild to a macrotask so the event handler never blocks the render loop on
+ *  a multi-hundred-KB rebuild. */
+const BODY_REBUILD_DEFER_MAX_CHARS = 200_000;
 
 /** Delay before a long-running foreground Bash/Agent card advertises Ctrl+B. */
 const DETACH_HINT_DELAY_MS = 10_000;
@@ -56,14 +81,14 @@ const DETACH_HINT_TEXT = 'Press Ctrl+B to run in background';
 type SubagentTextKind = 'thinking' | 'text';
 type SubagentPhase = 'queued' | 'spawning' | 'running' | 'done' | 'failed' | 'backgrounded';
 
-interface FinishedSubCall {
+export interface FinishedSubCall {
   readonly name: string;
   readonly args: Record<string, unknown>;
   readonly output: string;
   readonly isError: boolean;
 }
 
-interface OngoingSubCall {
+export interface OngoingSubCall {
   readonly name: string;
   readonly args: Record<string, unknown>;
   readonly streamingArguments?: string | undefined;
@@ -114,7 +139,9 @@ export interface ToolCallSubagentSnapshot {
  */
 export interface ToolCallReadSnapshot {
   readonly toolCallId: string;
+  readonly toolName: string;
   readonly filePath: string | undefined;
+  readonly pattern: string | undefined;
   readonly phase: 'pending' | 'done' | 'failed';
   readonly lines: number;
 }
@@ -146,15 +173,6 @@ function formatSubagentContextTokens(contextTokens: number | undefined): string 
   return `${formatTokenCount(contextTokens)} tok`;
 }
 
-function usageInputTotal(usage: TokenUsage): number {
-  return (usage.inputOther ?? 0) + (usage.inputCacheRead ?? 0) + (usage.inputCacheCreation ?? 0);
-}
-
-function usageTotal(usage: TokenUsage | undefined): number {
-  if (usage === undefined) return 0;
-  return usageInputTotal(usage) + usage.output;
-}
-
 function formatSubagentTokens(usage: TokenUsage | undefined): string | undefined {
   const total = usageTotal(usage);
   if (total <= 0) return undefined;
@@ -166,6 +184,10 @@ function formatElapsed(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
   return `${String(minutes)}m ${String(remainder)}s`;
+}
+
+function formatTokens(n: number): string {
+  return `${formatTokenCount(n)} tok`;
 }
 
 function extractApprovedPlan(output: string): string {
@@ -273,7 +295,7 @@ function unescapeJsonString(s: string): string {
   });
 }
 
-function parseArgsPreview(value: string): Record<string, unknown> {
+export function parseArgsPreview(value: string): Record<string, unknown> {
   const previewText = value.slice(0, STREAMING_ARGS_PREVIEW_MAX_CHARS);
   if (previewText.trim().length === 0) return {};
   if (
@@ -410,6 +432,10 @@ function tailNonEmptyLines(text: string, maxLines: number): string[] {
 }
 
 class PrefixedWrappedLine implements Component {
+  // Immutable after construction (prefixes and text are pre-coloured), so a
+  // fixed version lets the owning container skip it on unchanged frames; no
+  // bumpVersion is needed because nothing mutates render output later.
+  version = 0;
   private renderCache: { width: number; lines: string[] } | undefined;
 
   constructor(
@@ -480,6 +506,14 @@ export class ToolCallComponent extends Container {
   private currentPlan: string | undefined;
   private headerText: Text;
   private callPreviewEndIndex = 0;
+  /**
+   * True while a deferred (oversized) body rebuild is queued on a macrotask.
+   * Guards against scheduling a second deferred rebuild when a further state
+   * update lands before the queued one runs. The queued rebuild is idempotent
+   * (rebuildBody rebuilds from current state), so a late run is harmless even
+   * if the component moved between containers.
+   */
+  private bodyRebuildDeferred = false;
 
   // ── Subagent state ───────────────────────────────────────────────
   //
@@ -527,6 +561,10 @@ export class ToolCallComponent extends Container {
   private backgroundTaskTerminalPhase: 'done' | 'failed' | undefined;
   private subagentContextTokens: number | undefined;
   private subagentUsage: TokenUsage | undefined;
+  /** Monotonic footer token counter for this subagent's card: the snapshot
+   *  value is clamped so the footer never appears to jump backwards when the
+   *  source flips between context tokens and cumulative usage. */
+  private subagentDisplayTokens = 0;
   /** Display name of the model the subagent is bound to (from its `agent.status.updated`). */
   private subagentModel: string | undefined;
   /** Thinking effort, set only for concrete levels (boolean on/off hidden). */
@@ -539,6 +577,17 @@ export class ToolCallComponent extends Container {
   private subagentStartedAtMs: number | undefined;
   private subagentEndedAtMs: number | undefined;
   private subagentSpinnerFrame = 0;
+
+  /**
+   * Coalesces subagent stream updates into one card rebuild per
+   * STREAMING_UI_FLUSH_MS window. Data accumulation (text/args/usage) stays
+   * synchronous; only the header/body rebuild, snapshot notify, and render
+   * are deferred, so a burst of child-agent deltas — e.g. a workflow fanning
+   * out 20+ agents — rebuilds the card once per window instead of once per
+   * delta. The trailing timer guarantees the last delta of a window still
+   * renders after the stream pauses.
+   */
+  private subagentFlushTimer: ReturnType<typeof setTimeout> | undefined;
 
   // ── Live progress lines ──────────────────────────────────────────
   //
@@ -670,8 +719,9 @@ export class ToolCallComponent extends Container {
     // rebuildBody (not rebuildContent) so the call preview re-renders
     // with the collapsed cap applied — Write streaming previews and
     // Edit's progress placeholder needs to snap to the final preview on
-    // result.
-    this.rebuildBody();
+    // result. Oversized results defer this so the event handler returns
+    // before the (multi-hundred-KB) rebuild runs.
+    this.applyBodyRebuild();
     // Final results affect group summaries, especially failed/done counts.
     this.notifySnapshotChange();
   }
@@ -680,7 +730,10 @@ export class ToolCallComponent extends Container {
     this.toolCall = toolCall;
     this.syncToolBlinkTimer();
     this.headerText.setText(this.buildHeader());
-    this.rebuildBody();
+    // Oversized args/content defer the rebuild to a macrotask (see
+    // applyBodyRebuild); the requestRender below still paints the old body,
+    // and the deferred rebuild requests its own render once done.
+    this.applyBodyRebuild();
     this.notifySnapshotChange();
     this.ui?.requestRender();
   }
@@ -722,6 +775,7 @@ export class ToolCallComponent extends Container {
     this.stopToolBlinkTimer();
     this.stopSubagentElapsedTimer();
     this.stopDetachHintTimer();
+    this.clearSubagentFlushTimer();
   }
 
   /**
@@ -750,7 +804,7 @@ export class ToolCallComponent extends Container {
     if (subagent === undefined) return;
     this.subagentAgentId = subagent.id;
     this.subagentAgentName = subagent.name;
-    this.subagentText = subagent.text ?? '';
+    this.subagentText = (subagent.text ?? '').slice(-SUBAGENT_TEXT_MAX);
     for (const call of subagent.toolCalls ?? []) {
       if (call.result === undefined) {
         this.ongoingSubCalls.set(call.id, { name: call.name, args: call.args });
@@ -807,10 +861,15 @@ export class ToolCallComponent extends Container {
   getSubagentSnapshot(): ToolCallSubagentSnapshot {
     const finished = this.finishedSubCalls.length + this.hiddenSubCallCount;
     const contextTokens = this.subagentContextTokens;
-    const tokens =
-      contextTokens && contextTokens > 0
-        ? contextTokens
-        : (this.subagentUsage === undefined ? 0 : usageTotal(this.subagentUsage));
+    // Total usage (input + output) wins so the count reflects all consumed
+    // tokens; context tokens remain the fallback until usage is reported.
+    // The result is clamped to the previous snapshot so the footer counter
+    // only grows (sources flip between the two measures early on).
+    const totalTokens = usageTotal(this.subagentUsage);
+    const computed =
+      totalTokens > 0 ? totalTokens : contextTokens && contextTokens > 0 ? contextTokens : 0;
+    if (computed > 0) this.subagentDisplayTokens = Math.max(this.subagentDisplayTokens, computed);
+    const tokens = this.subagentDisplayTokens;
     const latestActivity = computeLatestActivity(
       this.ongoingSubCalls,
       this.finishedSubCalls,
@@ -864,15 +923,20 @@ export class ToolCallComponent extends Container {
       typeof filePathRaw === 'string'
         ? makeWorkspaceRelativePath(filePathRaw, this.workspaceDir)
         : undefined;
+    const patternRaw = args['pattern'];
+    const pattern = typeof patternRaw === 'string' && patternRaw.length > 0 ? patternRaw : undefined;
+    const toolName = this.toolCall.name;
     if (this.result === undefined) {
-      return { toolCallId: this.toolCall.id, filePath, phase: 'pending', lines: 0 };
+      return { toolCallId: this.toolCall.id, toolName, filePath, pattern, phase: 'pending', lines: 0 };
     }
     if (this.result.is_error === true) {
-      return { toolCallId: this.toolCall.id, filePath, phase: 'failed', lines: 0 };
+      return { toolCallId: this.toolCall.id, toolName, filePath, pattern, phase: 'failed', lines: 0 };
     }
     return {
       toolCallId: this.toolCall.id,
+      toolName,
       filePath,
+      pattern,
       phase: 'done',
       lines: countNonEmptyLines(this.result.output),
     };
@@ -1088,7 +1152,12 @@ export class ToolCallComponent extends Container {
     if (payload.contextTokens !== undefined && payload.contextTokens > 0) {
       this.subagentContextTokens = payload.contextTokens;
     }
-    this.subagentUsage = payload.usage;
+    // Keep the last known cumulative usage when the completion event carries
+    // none; clearing it would make the footer fall back to context tokens
+    // and appear to jump backwards.
+    if (payload.usage !== undefined) {
+      this.subagentUsage = payload.usage;
+    }
     this.subagentResultSummary =
       payload.resultSummary.length > 0 ? payload.resultSummary : undefined;
     if (this.subagentText.trim().length === 0 && this.subagentResultSummary !== undefined) {
@@ -1120,10 +1189,17 @@ export class ToolCallComponent extends Container {
     if (payload.effortDisplay !== undefined) {
       this.subagentEffort = payload.effortDisplay;
     }
-    this.headerText.setText(this.buildHeader());
-    this.invalidate();
-    this.notifySnapshotChange();
-    this.ui?.requestRender();
+    if (payload.modelDisplay !== undefined || payload.effortDisplay !== undefined) {
+      // Model/effort arrive once at spawn — show them on the next frame
+      // instead of inside the coalesced flush window, or the card reads as
+      // model-less for its first ~120ms.
+      this.headerText.setText(this.buildHeader());
+      this.rebuildContent();
+      this.notifySnapshotChange();
+      this.ui?.requestRender();
+      return;
+    }
+    this.scheduleSubagentFlush();
   }
 
   /** Handles SDK `subagent.failed`. */
@@ -1241,9 +1317,9 @@ export class ToolCallComponent extends Container {
   appendSubagentText(text: string, kind: SubagentTextKind = 'text'): void {
     this.lastSubagentStreamKind = kind;
     if (kind === 'thinking') {
-      this.subagentThinkingText += text;
+      this.subagentThinkingText = (this.subagentThinkingText + text).slice(-SUBAGENT_TEXT_MAX);
     } else {
-      this.subagentText += text;
+      this.subagentText = (this.subagentText + text).slice(-SUBAGENT_TEXT_MAX);
     }
     // Child-agent activity means it is running unless already terminal/backgrounded.
     if (
@@ -1253,7 +1329,38 @@ export class ToolCallComponent extends Container {
     ) {
       this.subagentPhase = 'running';
     }
+    this.scheduleSubagentFlush();
+  }
+
+  /**
+   * Merges the expensive subagent card update (header + body rebuild +
+   * snapshot notify + render) into one pass per STREAMING_UI_FLUSH_MS window.
+   * The trailing timer guarantees the window's last delta still renders after
+   * the stream pauses.
+   */
+  private scheduleSubagentFlush(): void {
+    if (this.subagentFlushTimer !== undefined) return;
+    this.subagentFlushTimer = setTimeout(() => {
+      this.subagentFlushTimer = undefined;
+      this.flushSubagentRender();
+    }, STREAMING_UI_FLUSH_MS);
+  }
+
+  private clearSubagentFlushTimer(): void {
+    if (this.subagentFlushTimer === undefined) return;
+    clearTimeout(this.subagentFlushTimer);
+    this.subagentFlushTimer = undefined;
+  }
+
+  private flushSubagentRender(): void {
     this.headerText.setText(this.buildHeader());
+    if (this.onSnapshotChange !== undefined) {
+      // Group-borrowed card: the group replaced this card in the transcript
+      // and renders snapshot summaries, so skip the standalone body rebuild —
+      // the snapshot notify below drives the group's own throttled refresh.
+      this.notifySnapshotChange();
+      return;
+    }
     this.rebuildContent();
     this.notifySnapshotChange();
     this.ui?.requestRender();
@@ -1276,10 +1383,7 @@ export class ToolCallComponent extends Container {
     ) {
       this.subagentPhase = 'running';
     }
-    this.headerText.setText(this.buildHeader());
-    this.rebuildContent();
-    this.notifySnapshotChange();
-    this.ui?.requestRender();
+    this.scheduleSubagentFlush();
   }
 
   appendSubToolCallDelta(delta: {
@@ -1306,10 +1410,7 @@ export class ToolCallComponent extends Container {
     ) {
       this.subagentPhase = 'running';
     }
-    this.headerText.setText(this.buildHeader());
-    this.rebuildContent();
-    this.notifySnapshotChange();
-    this.ui?.requestRender();
+    this.scheduleSubagentFlush();
   }
 
   appendSubToolLiveOutput(id: string, text: string): void {
@@ -1325,9 +1426,7 @@ export class ToolCallComponent extends Container {
       output = `[...truncated]\n${output.slice(output.length - MAX_LIVE_OUTPUT_CHARS)}`;
     }
     this.upsertSubToolActivity(id, name, args, activity?.phase ?? 'ongoing', output);
-    this.rebuildContent();
-    this.notifySnapshotChange();
-    this.ui?.requestRender();
+    this.scheduleSubagentFlush();
   }
 
   finishSubToolCall(result: {
@@ -1355,10 +1454,7 @@ export class ToolCallComponent extends Container {
       this.finishedSubCalls.shift();
       this.hiddenSubCallCount += 1;
     }
-    this.headerText.setText(this.buildHeader());
-    this.rebuildContent();
-    this.notifySnapshotChange();
-    this.ui?.requestRender();
+    this.scheduleSubagentFlush();
   }
 
   private buildHeader(): string {
@@ -1485,6 +1581,39 @@ export class ToolCallComponent extends Container {
     this.buildLiveOutputBlock();
     this.buildContent();
     this.buildSubagentBlock();
+  }
+
+  /** Total characters the next body rebuild would render (args payload plus
+   *  result output). Drives the large-result deferral. */
+  private bodyRenderCharEstimate(): number {
+    const args = this.toolCall.args;
+    const argChars =
+      str(args['content']).length +
+      str(args['old_string']).length +
+      str(args['new_string']).length;
+    return argChars + (this.result === undefined ? 0 : this.result.output.length);
+  }
+
+  /**
+   * Rebuild the body, deferring oversized states to a macrotask. A multi-MB
+   * tool result would otherwise rebuild thousands of Text children inside the
+   * event handler and block the render loop (the 4s input-latency spike). By
+   * deferring to setImmediate the handler returns immediately — the caller's
+   * requestRender paints the previous body — and the deferred callback rebuilds
+   * and requests its own render. Small states keep the synchronous path.
+   */
+  private applyBodyRebuild(): void {
+    if (this.bodyRenderCharEstimate() > BODY_REBUILD_DEFER_MAX_CHARS) {
+      if (this.bodyRebuildDeferred) return;
+      this.bodyRebuildDeferred = true;
+      setImmediate(() => {
+        this.bodyRebuildDeferred = false;
+        this.rebuildBody();
+        this.ui?.requestRender();
+      });
+      return;
+    }
+    this.rebuildBody();
   }
 
   /**
@@ -1639,8 +1768,8 @@ export class ToolCallComponent extends Container {
         const toolCount = this.finishedSubCalls.length + this.hiddenSubCallCount;
         if (toolCount > 0) parts.push(`${String(toolCount)} tool${toolCount > 1 ? 's' : ''}`);
         const tokens =
-          formatSubagentContextTokens(this.subagentContextTokens) ??
-          formatSubagentTokens(this.subagentUsage);
+          formatSubagentTokens(this.subagentUsage) ??
+          formatSubagentContextTokens(this.subagentContextTokens);
         if (tokens !== undefined) parts.push(tokens);
         break;
       }
@@ -1830,9 +1959,16 @@ export class ToolCallComponent extends Container {
   private buildSingleSubagentSummaryLine(): string {
     const toolCount = this.subToolActivities.size;
     const countLabel = `${String(toolCount)} tool${toolCount === 1 ? '' : 's'}`;
+    // The bound model / effort ride the summary line so the card advertises
+    // them from spawn (the `· N tools` counter alone made the row look bare
+    // and dropped the model the event stream explicitly provides).
+    const metaParts: string[] = [];
+    if (this.subagentModel !== undefined) metaParts.push(this.subagentModel);
+    if (this.subagentEffort !== undefined) metaParts.push(`· ${this.subagentEffort}`);
+    const meta = metaParts.length > 0 ? currentTheme.dim(`  · ${metaParts.join(' ')}`) : '';
     const current = this.getCurrentSubToolActivity();
     if (current === undefined) {
-      return currentTheme.dim(`  · ${countLabel}`);
+      return `${currentTheme.dim(`  · ${countLabel}`)}${meta}`;
     }
     const verb = current.phase === 'ongoing' ? 'Using' : 'Used';
     const keyArg = extractKeyArgument(current.name, current.args, this.workspaceDir);
@@ -1844,7 +1980,7 @@ export class ToolCallComponent extends Container {
         : current.phase === 'done'
           ? currentTheme.fg('success', ' ✓')
           : '';
-    return `${currentTheme.dim(`  · ${countLabel} · `)}${verb} ${nameCol}${argCol}${mark}`;
+    return `${currentTheme.dim(`  · ${countLabel} · `)}${verb} ${nameCol}${argCol}${mark}${meta}`;
   }
 
   private buildSingleSubagentActiveWindow(): Component {
@@ -1909,14 +2045,35 @@ export class ToolCallComponent extends Container {
       if (content.length === 0) return;
       const filePath = str(this.toolCall.args['file_path'] ?? this.toolCall.args['path']);
       const lang = langFromPath(filePath);
-      const allLines = highlightLines(content, lang);
+      // Collapsed cards highlight only the visible slice: cli-highlight over the
+      // whole file costs 50-190ms while the card renders COMMAND_PREVIEW_LINES
+      // lines (~1ms). Slicing before highlighting keeps cost proportional to what
+      // is shown; expanded cards keep the full-file highlight unless the content
+      // exceeds EXPANDED_WRITE_HIGHLIGHT_MAX_CHARS, in which case a head+tail
+      // window is used instead (cli-highlight is super-linear on huge blocks).
       // Cap as soon as args finalize, not just when result lands. Otherwise the
       // brief render tick between finalized args and result draws the full file,
       // and the snap back to the collapsed cap triggers pi-tui's full-redraw
       // path which wipes the terminal scrollback (pre-TUI history).
       const writeShouldCap = !this.expanded;
-      const shown = writeShouldCap ? allLines.slice(0, COMMAND_PREVIEW_LINES) : allLines;
-      const remaining = allLines.length - shown.length;
+      let shown: string[];
+      let total: number;
+      if (writeShouldCap) {
+        const preview = highlightLinesFirstN(content, lang, COMMAND_PREVIEW_LINES);
+        shown = preview.lines;
+        total = preview.total;
+      } else if (content.length > EXPANDED_WRITE_HIGHLIGHT_MAX_CHARS) {
+        // Expanded but oversized: highlight a bounded head+tail window instead
+        // of the whole file. This path renders its own numbered rows (accurate
+        // source line numbers + omission marker), so bail out before the shared
+        // numbered-loop/footer below.
+        this.buildWindowedWritePreview(content, lang);
+        return;
+      } else {
+        shown = highlightLines(content, lang);
+        total = shown.length;
+      }
+      const remaining = total - shown.length;
       for (const [i, line] of shown.entries()) {
         const lineNum = currentTheme.dim(String(i + 1).padStart(4) + '  ');
         this.addChild(new Text(lineNum + line, 2, 0));
@@ -1925,7 +2082,7 @@ export class ToolCallComponent extends Container {
         this.addChild(
           new Text(
             currentTheme.dim(
-              `... (${String(remaining)} more lines, ${String(allLines.length)} total, ctrl+o to expand)`,
+              `... (${String(remaining)} more lines, ${String(total)} total, ctrl+o to expand)`,
             ),
             2,
             0,
@@ -1964,6 +2121,85 @@ export class ToolCallComponent extends Container {
           showCommand: true,
           commandPreviewLines: this.expanded ? undefined : COMMAND_PREVIEW_LINES,
         }),
+      );
+    }
+  }
+
+  /**
+   * Bounded highlight window over the leading lines of `source`: stop after
+   * EXPANDED_WRITE_HIGHLIGHT_WINDOW_LINES lines or once the cumulative text
+   * exceeds EXPANDED_WRITE_HIGHLIGHT_WINDOW_CHARS (a single line longer than
+   * EXPANDED_WRITE_HIGHLIGHT_MAX_LINE_CHARS is truncated with a trailing '…'
+   * first, so a pathological one-line payload cannot blow the budget). Returns
+   * the highlighted rows and how many source lines they represent.
+   */
+  private buildHighlightWindowText(
+    source: string[],
+    lang: string | undefined,
+  ): { highlighted: string[]; count: number } {
+    // Empty source must yield no rows (an empty join would otherwise highlight
+    // one spurious blank line and break tail-window line numbering).
+    if (source.length === 0) return { highlighted: [], count: 0 };
+    const lines: string[] = [];
+    let chars = 0;
+    for (const raw of source) {
+      const line =
+        raw.length > EXPANDED_WRITE_HIGHLIGHT_MAX_LINE_CHARS
+          ? `${raw.slice(0, EXPANDED_WRITE_HIGHLIGHT_MAX_LINE_CHARS)}…`
+          : raw;
+      const next = chars === 0 ? line.length : chars + 1 + line.length;
+      if (lines.length > 0 && next > EXPANDED_WRITE_HIGHLIGHT_WINDOW_CHARS) break;
+      lines.push(line);
+      chars = next;
+    }
+    const preview = highlightLinesFirstN(
+      lines.join('\n'),
+      lang,
+      EXPANDED_WRITE_HIGHLIGHT_WINDOW_LINES,
+    );
+    return { highlighted: preview.lines, count: lines.length };
+  }
+
+  /**
+   * Render an oversized expanded Write card as a head+tail highlight window.
+   * Running the whole-file highlighter is a root cause of the 4s input-latency
+   * spike on large code, so the expanded path caps the highlighted input:
+   * leading and trailing windows are highlighted separately and joined by an
+   * omission marker. Line numbers stay source-accurate so the window reads like
+   * a slice of the real file.
+   */
+  private buildWindowedWritePreview(content: string, lang: string | undefined): void {
+    const allLines = content.split('\n');
+    const total = allLines.length;
+    const head = this.buildHighlightWindowText(
+      allLines.slice(0, EXPANDED_WRITE_HIGHLIGHT_WINDOW_LINES),
+      lang,
+    );
+    // Tail window: the last `windowLines` source lines, never overlapping the head.
+    const tailSourceStart = Math.max(
+      head.count,
+      total - EXPANDED_WRITE_HIGHLIGHT_WINDOW_LINES,
+    );
+    const tail = this.buildHighlightWindowText(allLines.slice(tailSourceStart), lang);
+    const omitted = Math.max(0, total - head.count - tail.count);
+    for (const [i, line] of head.highlighted.entries()) {
+      this.addChild(new Text(currentTheme.dim(String(i + 1).padStart(4) + '  ') + line, 2, 0));
+    }
+    if (omitted > 0) {
+      this.addChild(
+        new Text(
+          currentTheme.dim(
+            `... (${String(omitted)} lines omitted, ${String(total)} total, ctrl+o to collapse) ...`,
+          ),
+          2,
+          0,
+        ),
+      );
+    }
+    const tailStartLine = total - tail.count + 1;
+    for (const [i, line] of tail.highlighted.entries()) {
+      this.addChild(
+        new Text(currentTheme.dim(String(tailStartLine + i).padStart(4) + '  ') + line, 2, 0),
       );
     }
   }
@@ -2164,7 +2400,7 @@ export class ToolCallComponent extends Container {
  *   2. latest finished sub-tool (`Used {name} ({keyArg})`)
  *   3. last non-empty line from accumulated subagent text
  */
-function computeLatestActivity(
+export function computeLatestActivity(
   ongoing: ReadonlyMap<string, OngoingSubCall>,
   finished: readonly FinishedSubCall[],
   text: string,
@@ -2190,10 +2426,6 @@ function computeLatestActivity(
     if (tail !== undefined) return tail.trim();
   }
   return undefined;
-}
-
-function formatTokens(n: number): string {
-  return `${formatTokenCount(n)} tok`;
 }
 
 function formatActivityLine(

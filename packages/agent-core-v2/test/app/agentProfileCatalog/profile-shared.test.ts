@@ -42,7 +42,7 @@ describe('systemPromptVars', () => {
         now: 'NOW',
         additionalDirsInfo: '/extra',
       },
-      { skillActive: true },
+      { skillActive: true, todoActive: false },
     );
 
     expect(vars['role_additional']).toBe('');
@@ -62,7 +62,7 @@ describe('systemPromptVars', () => {
   });
 
   it('renders missing context fields as empty strings and defaults ${now}', () => {
-    const vars = systemPromptVars({}, { skillActive: true });
+    const vars = systemPromptVars({}, { skillActive: true, todoActive: false });
 
     expect(vars['cwd']).toBe('');
     expect(vars['cwd_listing']).toBe('');
@@ -73,40 +73,57 @@ describe('systemPromptVars', () => {
     expect(vars['skills']).toBe('');
     expect(vars['skills_section']).toBe('');
     expect(vars['windows_notes']).toBe('');
+    expect(vars['todo_list_section']).toBe('');
     expect(vars['role_additional']).toBe('');
     expect(Number.isNaN(Date.parse(vars['now'] ?? ''))).toBe(false);
   });
 
   it('empties skills and the skills section when the Skill tool is off', () => {
-    const vars = systemPromptVars({ skills: 'SKILLS' }, { skillActive: false });
+    const vars = systemPromptVars({ skills: 'SKILLS' }, { skillActive: false, todoActive: false });
 
     expect(vars['skills']).toBe('');
     expect(vars['skills_section']).toBe('');
   });
 
   it('lets a context skillActive override the profile default', () => {
-    const vars = systemPromptVars({ skills: 'SKILLS', skillActive: true }, { skillActive: false });
+    const vars = systemPromptVars({ skills: 'SKILLS', skillActive: true }, { skillActive: false, todoActive: false });
 
     expect(vars['skills']).toBe('SKILLS');
   });
 
+  it('composes the TodoList planning paragraph only when the TodoList tool is on', () => {
+    const on = systemPromptVars({}, { skillActive: false, todoActive: true });
+    expect(on['todo_list_section']).toContain('Use the `TodoList` tool to plan and track multi-step work');
+    expect(on['todo_list_section']).toContain('do not batch several completions at the end');
+
+    const off = systemPromptVars({}, { skillActive: false, todoActive: false });
+    expect(off['todo_list_section']).toBe('');
+
+    // A context todoActive overrides the profile default, mirroring skillActive.
+    const overridden = systemPromptVars(
+      { todoActive: true },
+      { skillActive: false, todoActive: false },
+    );
+    expect(overridden['todo_list_section']).toContain('Use the `TodoList` tool');
+  });
+
   it('composes Windows notes only on Windows', () => {
     expect(
-      systemPromptVars({ osKind: 'Windows' }, { skillActive: true })['windows_notes'],
+      systemPromptVars({ osKind: 'Windows' }, { skillActive: true, todoActive: false })['windows_notes'],
     ).toContain('IMPORTANT: You are on Windows');
-    expect(systemPromptVars({ osKind: 'macOS' }, { skillActive: true })['windows_notes']).toBe('');
+    expect(systemPromptVars({ osKind: 'macOS' }, { skillActive: true, todoActive: false })['windows_notes']).toBe('');
   });
 
   it('composes the plugin instructions section only when sections exist', () => {
-    const vars = systemPromptVars({ pluginSections: 'PLUGIN_A' }, { skillActive: true });
+    const vars = systemPromptVars({ pluginSections: 'PLUGIN_A' }, { skillActive: true, todoActive: false });
 
     expect(vars['plugin_sections']).toContain('# Plugin Instructions');
     expect(vars['plugin_sections']).toContain('PLUGIN_A');
-    expect(systemPromptVars({}, { skillActive: true })['plugin_sections']).toBe('');
+    expect(systemPromptVars({}, { skillActive: true, todoActive: false })['plugin_sections']).toBe('');
   });
 
   it('defaults host-identity variables to the CLI text', () => {
-    const vars = systemPromptVars({}, { skillActive: true });
+    const vars = systemPromptVars({}, { skillActive: true, todoActive: false });
 
     expect(vars['product_name']).toBe('Kimi Code CLI');
     expect(vars['reply_style_guide']).toContain("render as Markdown in the user's terminal");
@@ -115,7 +132,7 @@ describe('systemPromptVars', () => {
   it('lets the context override host-identity variables', () => {
     const vars = systemPromptVars(
       { productName: 'Kimi Desktop', replyStyleGuide: 'GUI_STYLE' },
-      { skillActive: true },
+      { skillActive: true, todoActive: false },
     );
 
     expect(vars['product_name']).toBe('Kimi Desktop');
@@ -128,7 +145,7 @@ describe('renderPromptTemplateResult', () => {
     const out = renderPromptTemplateResult(
       'cwd=${cwd} unknown=${nope} bare=$cwd dollar=$${cwd}',
       { cwd: '/work' },
-      { skillActive: true },
+      { skillActive: true, todoActive: false },
     ).text;
 
     expect(out).toBe('cwd=/work unknown=${nope} bare=$cwd dollar=$/work');
@@ -145,19 +162,19 @@ describe('renderPromptTemplateResult', () => {
     };
 
     expect(
-      renderPromptTemplateResult('no base here', {}, { skillActive: true }, basePrompt).text,
+      renderPromptTemplateResult('no base here', {}, { skillActive: true, todoActive: false }, basePrompt).text,
     ).toBe('no base here');
     expect(calls).toBe(0);
 
     expect(
-      renderPromptTemplateResult('wrap\n\n${base_prompt}', {}, { skillActive: true }, basePrompt)
+      renderPromptTemplateResult('wrap\n\n${base_prompt}', {}, { skillActive: true, todoActive: false }, basePrompt)
         .text,
     ).toBe('wrap\n\nBASE');
     expect(calls).toBe(1);
   });
 
   it('keeps ${base_prompt} verbatim when no base prompt is provided', () => {
-    expect(renderPromptTemplateResult('${base_prompt}', {}, { skillActive: true }).text).toBe(
+    expect(renderPromptTemplateResult('${base_prompt}', {}, { skillActive: true, todoActive: false }).text).toBe(
       '${base_prompt}',
     );
   });
@@ -171,7 +188,7 @@ describe('renderPromptTemplateResult', () => {
         timeZone: 'America/Los_Angeles',
         agentsMd: 'AGENTS',
       },
-      { skillActive: true },
+      { skillActive: true, todoActive: false },
     );
 
     expect(result.text).toBe('date=2026-07-29T00:30:00.000Z agents=AGENTS');
@@ -186,7 +203,7 @@ describe('renderPromptTemplateResult', () => {
     const result = renderPromptTemplateResult(
       'custom\n\n${base_prompt}',
       { cwd: '/work' },
-      { skillActive: true },
+      { skillActive: true, todoActive: false },
       () => ({
         text: 'BASE',
         environment: {
@@ -215,7 +232,7 @@ describe('renderSystemPromptResult', () => {
     const prompt = renderSystemPromptResult(
       'ROLE_TEXT',
       { agentsMd: 'AGENTS', skills: 'SKILLS', cwd: '/work' },
-      { skillActive: true },
+      { skillActive: true, todoActive: false },
     ).text;
 
     expect(prompt).toContain('ROLE_TEXT');
@@ -226,7 +243,7 @@ describe('renderSystemPromptResult', () => {
   });
 
   it('omits the skills section when the profile disables the Skill tool', () => {
-    const prompt = renderSystemPromptResult('', { skills: 'SKILLS' }, { skillActive: false }).text;
+    const prompt = renderSystemPromptResult('', { skills: 'SKILLS' }, { skillActive: false, todoActive: false }).text;
 
     expect(prompt).not.toContain('# Skills');
     expect(prompt).not.toContain('SKILLS');
@@ -234,18 +251,18 @@ describe('renderSystemPromptResult', () => {
 
   it('shows Windows notes only on Windows', () => {
     expect(
-      renderSystemPromptResult('', { osKind: 'Windows' }, { skillActive: true }).text,
+      renderSystemPromptResult('', { osKind: 'Windows' }, { skillActive: true, todoActive: false }).text,
     ).toContain('IMPORTANT: You are on Windows');
     expect(
-      renderSystemPromptResult('', { osKind: 'macOS' }, { skillActive: true }).text,
+      renderSystemPromptResult('', { osKind: 'macOS' }, { skillActive: true, todoActive: false }).text,
     ).not.toContain('IMPORTANT: You are on Windows');
   });
 
   it('shows the additional directories section only when directories exist', () => {
     expect(
-      renderSystemPromptResult('', { additionalDirsInfo: '/extra' }, { skillActive: true }).text,
+      renderSystemPromptResult('', { additionalDirsInfo: '/extra' }, { skillActive: true, todoActive: false }).text,
     ).toContain('## Additional Directories');
-    expect(renderSystemPromptResult('', {}, { skillActive: true }).text).not.toContain(
+    expect(renderSystemPromptResult('', {}, { skillActive: true, todoActive: false }).text).not.toContain(
       '## Additional Directories',
     );
   });
@@ -254,12 +271,12 @@ describe('renderSystemPromptResult', () => {
     const prompt = renderSystemPromptResult(
       '',
       { pluginSections: 'PLUGIN_A' },
-      { skillActive: true },
+      { skillActive: true, todoActive: false },
     ).text;
 
     expect(prompt).toContain('# Plugin Instructions');
     expect(prompt).toContain('PLUGIN_A');
-    expect(renderSystemPromptResult('', {}, { skillActive: true }).text).not.toContain(
+    expect(renderSystemPromptResult('', {}, { skillActive: true, todoActive: false }).text).not.toContain(
       '# Plugin Instructions',
     );
   });
@@ -278,21 +295,21 @@ describe('renderSystemPromptResult', () => {
         now: 'NOW',
         additionalDirsInfo: '/extra',
       },
-      { skillActive: true },
+      { skillActive: true, todoActive: false },
     ).text;
 
     expect(prompt).not.toMatch(/\$\{[A-Za-z_][A-Za-z0-9_]*\}/);
   });
 
   it('renders the host identity from the context, defaulting to the CLI text', () => {
-    const fallback = renderSystemPromptResult('', {}, { skillActive: true }).text;
+    const fallback = renderSystemPromptResult('', {}, { skillActive: true, todoActive: false }).text;
     expect(fallback).toContain('You are Kimi Code CLI,');
     expect(fallback).toContain("render as Markdown in the user's terminal");
 
     const overridden = renderSystemPromptResult(
       '',
       { productName: 'Kimi Desktop', replyStyleGuide: 'GUI_STYLE' },
-      { skillActive: true },
+      { skillActive: true, todoActive: false },
     ).text;
     expect(overridden).toContain('You are Kimi Desktop,');
     expect(overridden).toContain('GUI_STYLE');
@@ -307,7 +324,7 @@ describe('renderSystemPromptResult', () => {
         now: '2026-07-29T12:00:00',
         agentsMd: 'AGENTS',
       },
-      { skillActive: true },
+      { skillActive: true, todoActive: false },
     );
 
     expect(result.text).toContain('AGENTS');

@@ -1,4 +1,4 @@
-import { truncateToWidth, type Component } from '@moonshot-ai/pi-tui';
+import { bumpVersion, truncateToWidth, type Component } from '@moonshot-ai/pi-tui';
 
 import { STATUS_BULLET } from '#/tui/constant/symbols';
 import { currentTheme } from '#/tui/theme';
@@ -6,9 +6,14 @@ import { currentTheme } from '#/tui/theme';
 export type SwarmModeMarkerState = 'active' | 'inactive' | 'ended';
 
 export class SwarmModeMarkerComponent implements Component {
+  // State is fixed at construction; version=0 lets the container short-circuit
+  // unchanged frames. invalidate() bumps so a theme switch repaints.
+  version = 0;
   constructor(private readonly state: SwarmModeMarkerState) {}
 
-  invalidate(): void {}
+  invalidate(): void {
+    bumpVersion(this);
+  }
 
   render(width: number): string[] {
     const safeWidth = Math.max(0, width);

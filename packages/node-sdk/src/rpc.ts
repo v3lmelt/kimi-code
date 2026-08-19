@@ -61,6 +61,7 @@ import type {
   SessionSummary,
   SkillSummary,
   PluginCommandDef,
+  UltracodeTrigger,
   Unsubscribe,
   WorkspaceTrustInfo,
 } from '#/types';
@@ -118,6 +119,10 @@ export interface SetSessionPlanModeRpcInput extends SessionIdRpcInput {
 
 export type SetSessionSwarmModeRpcInput =
   | (SessionIdRpcInput & { readonly enabled: true; readonly trigger: SwarmModeTrigger })
+  | (SessionIdRpcInput & { readonly enabled: false });
+
+export type SetSessionUltracodeRpcInput =
+  | (SessionIdRpcInput & { readonly enabled: true; readonly trigger: UltracodeTrigger })
   | (SessionIdRpcInput & { readonly enabled: false });
 
 export interface ActivateSkillRpcInput extends SessionIdRpcInput {
@@ -525,6 +530,11 @@ export abstract class SDKRpcClientBase {
     return this.exitSwarmMode(input);
   }
 
+  async setUltracode(input: SetSessionUltracodeRpcInput): Promise<void> {
+    if (input.enabled) return this.enterUltracodeMode(input);
+    return this.exitUltracodeMode(input);
+  }
+
   async swarm(input: SessionPromptRpcInput): Promise<void> {
     await this.enterSwarmMode({ sessionId: input.sessionId, trigger: 'task' });
     return this.prompt(input);
@@ -544,6 +554,25 @@ export abstract class SDKRpcClientBase {
   private async exitSwarmMode(input: SessionIdRpcInput): Promise<void> {
     const rpc = await this.getRpc();
     return rpc.exitSwarm({
+      sessionId: input.sessionId,
+      agentId: this.interactiveAgentId,
+    });
+  }
+
+  private async enterUltracodeMode(
+    input: SessionIdRpcInput & { readonly trigger: UltracodeTrigger },
+  ): Promise<void> {
+    const rpc = await this.getRpc();
+    return rpc.enterUltracode({
+      sessionId: input.sessionId,
+      agentId: this.interactiveAgentId,
+      trigger: input.trigger,
+    });
+  }
+
+  private async exitUltracodeMode(input: SessionIdRpcInput): Promise<void> {
+    const rpc = await this.getRpc();
+    return rpc.exitUltracode({
       sessionId: input.sessionId,
       agentId: this.interactiveAgentId,
     });

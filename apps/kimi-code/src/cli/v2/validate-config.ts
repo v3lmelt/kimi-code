@@ -1,5 +1,5 @@
 /**
- * V2 config.toml validation for `kimi doctor`.
+ * V2 config.toml validation for `hasu doctor`.
  *
  * Loaded lazily (dynamic import) by the doctor command on the default
  * agent-core-v2 path, so the v2 module graph stays off the legacy doctor path.

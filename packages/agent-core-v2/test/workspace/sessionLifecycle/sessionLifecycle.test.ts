@@ -338,6 +338,7 @@ function appendLogStoreStub(): IAppendLogStore {
     _serviceBrand: undefined,
     append: () => {},
     read: async function* () {},
+    readFrom: async () => ({ records: [], nextByte: 0, truncated: false }),
     rewrite: () => Promise.resolve(),
     flush: () => Promise.resolve(),
     close: () => Promise.resolve(),

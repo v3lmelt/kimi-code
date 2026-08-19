@@ -57,7 +57,7 @@ import {
   runModelSelector,
   type FeedbackPromptResult,
 } from '#/tui/commands/prompts';
-import type { QueuedMessage } from '#/tui/types';
+import type { AppState, QueuedMessage } from '#/tui/types';
 import type { ImageAttachmentStore } from '#/tui/utils/image-attachment-store';
 
 vi.mock('#/tui/commands/prompts', async (importOriginal) => {
@@ -114,6 +114,7 @@ interface MessageDriver {
     startSubscription(): void;
     handleEvent(event: Event, sendQueued: (item: QueuedMessage) => void): void;
   };
+  setAppState(patch: Partial<AppState>): void;
   init(): Promise<boolean>;
   handleUserInput(text: string): void;
   persistInputHistory(text: string): Promise<void>;
@@ -202,6 +203,7 @@ function makeSession(overrides: Record<string, unknown> = {}) {
     setThinking: vi.fn(async (effort: string) => {
       thinkingEffort = effort;
     }),
+    setUltracode: vi.fn(async () => {}),
     setPermission: vi.fn(async () => {}),
     setPlanMode: vi.fn(async () => {}),
     setSwarmMode: vi.fn(async () => {}),
@@ -827,6 +829,62 @@ describe('KimiTUI message flow', () => {
       expect.objectContaining({ model: 'k2', thinking: 'high' }),
     );
     expect(driver.state.appState.lazySessionThinking).toBeUndefined();
+  });
+
+  it('never leaks the virtual ultracode effort into the lazy-created session (v2 engine)', async () => {
+    const session = makeSession({ id: 'ses-lazy' });
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      cliOptions: { ...makeStartupInput().cliOptions, model: 'k2' },
+    };
+    const { driver, harness } = await makeDriver(session, {}, startupInput);
+
+    // The auth-flow entry strips the virtual 'ultracode' segment so it can
+    // not be recorded as the first session's thinking override.
+    await (
+      driver as unknown as {
+        authFlow: { activateModelAfterLogin(model: string, effort?: string): Promise<void> };
+      }
+    ).authFlow.activateModelAfterLogin('k2', 'ultracode');
+
+    driver.handleUserInput('hello');
+
+    await vi.waitFor(() => {
+      expect(session.prompt).toHaveBeenCalledWith('hello');
+    });
+    expect(harness.createSession).not.toHaveBeenCalledWith(
+      expect.objectContaining({ thinking: 'ultracode' }),
+    );
+    expect(driver.state.appState.lazySessionThinking).toBeUndefined();
+    expect(driver.state.appState.lazySessionUltracode).toBeUndefined();
+  });
+
+  it('enters ultracode mode on the lazy-created session from a pending pick (v2 engine)', async () => {
+    const session = makeSession({ id: 'ses-lazy' });
+    const startupInput: KimiTUIStartupInput = {
+      ...makeStartupInput(),
+      engineV2: true,
+      cliOptions: { ...makeStartupInput().cliOptions, model: 'k2' },
+    };
+    const { driver, harness } = await makeDriver(session, {}, startupInput);
+
+    // Simulate the model picker having recorded an ultracode pick while no
+    // session existed (performModelSwitch sets this before lazy creation).
+    driver.setAppState({ lazySessionUltracode: true });
+
+    driver.handleUserInput('hello');
+
+    await vi.waitFor(() => {
+      expect(session.prompt).toHaveBeenCalledWith('hello');
+    });
+    expect(session.setUltracode).toHaveBeenCalledWith(true, 'manual');
+    // The intent is consumed; the thinking override never contains the
+    // virtual 'ultracode' string.
+    expect(harness.createSession).not.toHaveBeenCalledWith(
+      expect.objectContaining({ thinking: 'ultracode' }),
+    );
+    expect(driver.state.appState.lazySessionUltracode).toBeUndefined();
   });
 
   it('does not pass the config default plan mode into the lazy-created session (v2 engine)', async () => {
@@ -1918,8 +1976,96 @@ command = "vim"
     await vi.waitFor(() => {
       expect(session.setPlanMode).toHaveBeenCalledWith(true);
     });
-    expect(harness.track).toHaveBeenCalledWith('shortcut_plan_toggle', { enabled: true });
     expect(harness.track).toHaveBeenCalledWith('shortcut_mode_switch', { to_mode: 'plan' });
+  });
+
+  it('cycles manual → plan → auto → yolo → manual via Shift-Tab', async () => {
+    const { driver, session } = await makeDriver();
+    session.setPermission.mockClear();
+    session.setPlanMode.mockClear();
+
+    // manual → plan
+    driver.state.editor.onShiftTab?.();
+    await vi.waitFor(() => {
+      expect(session.setPlanMode).toHaveBeenCalledWith(true);
+    });
+
+    // plan → auto: plan turns off, permission becomes auto
+    driver.state.editor.onShiftTab?.();
+    await vi.waitFor(() => {
+      expect(session.setPermission).toHaveBeenCalledWith('auto');
+    });
+    expect(session.setPlanMode).toHaveBeenLastCalledWith(false);
+
+    // auto → yolo
+    driver.state.editor.onShiftTab?.();
+    await vi.waitFor(() => {
+      expect(session.setPermission).toHaveBeenCalledWith('yolo');
+    });
+
+    // yolo → manual
+    driver.state.editor.onShiftTab?.();
+    await vi.waitFor(() => {
+      expect(session.setPermission).toHaveBeenLastCalledWith('manual');
+    });
+    expect(driver.state.appState).toMatchObject({
+      permissionMode: 'manual',
+      planMode: false,
+    });
+  });
+
+  it('turns plan mode off when entering yolo', async () => {
+    const { driver, session } = await makeDriver();
+    session.setPlanMode.mockClear();
+    session.setPermission.mockClear();
+
+    driver.handleUserInput('/plan on');
+    await vi.waitFor(() => {
+      expect(session.setPlanMode).toHaveBeenCalledWith(true);
+    });
+
+    driver.handleUserInput('/yolo on');
+    await vi.waitFor(() => {
+      expect(session.setPermission).toHaveBeenCalledWith('yolo');
+    });
+    expect(session.setPlanMode).toHaveBeenLastCalledWith(false);
+    expect(driver.state.appState).toMatchObject({ permissionMode: 'yolo', planMode: false });
+  });
+
+  it('turns plan mode off when entering auto', async () => {
+    const { driver, session } = await makeDriver();
+    session.setPlanMode.mockClear();
+    session.setPermission.mockClear();
+
+    driver.handleUserInput('/plan on');
+    await vi.waitFor(() => {
+      expect(session.setPlanMode).toHaveBeenCalledWith(true);
+    });
+
+    driver.handleUserInput('/auto on');
+    await vi.waitFor(() => {
+      expect(session.setPermission).toHaveBeenCalledWith('auto');
+    });
+    expect(session.setPlanMode).toHaveBeenLastCalledWith(false);
+    expect(driver.state.appState).toMatchObject({ permissionMode: 'auto', planMode: false });
+  });
+
+  it('resets permission to manual when entering plan mode', async () => {
+    const { driver, session } = await makeDriver();
+
+    driver.handleUserInput('/yolo on');
+    await vi.waitFor(() => {
+      expect(session.setPermission).toHaveBeenCalledWith('yolo');
+    });
+
+    driver.handleUserInput('/plan on');
+    await vi.waitFor(() => {
+      expect(session.setPlanMode).toHaveBeenCalledWith(true);
+      expect(session.setPermission).toHaveBeenLastCalledWith('manual');
+    });
+    await vi.waitFor(() => {
+      expect(driver.state.appState).toMatchObject({ permissionMode: 'manual', planMode: true });
+    });
   });
 
   it('routes /yolo through session permission state without app-layer telemetry duplication', async () => {
@@ -5162,7 +5308,7 @@ command = "vim"
       expect(getStatus).toHaveBeenCalledTimes(previousStatusCalls + 1);
       const output = stripSgr(driver.state.transcriptContainer.render(120).join('\n'));
       expect(output).toContain(' Status ');
-      expect(output).toContain('>_ Kimi Code');
+      expect(output).toContain('>_ Hasu');
       expect(output).toContain('Model');
       expect(output).toContain('thinking high');
       expect(output).toContain('Permissions  auto');

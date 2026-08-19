@@ -144,6 +144,25 @@ describe('parseAgentFileText', () => {
     expect(def.prompt).toBe('body');
   });
 
+  it('parses the memory scope field', () => {
+    expect(parse('---\nname: solo\ndescription: d\nmemory: user\n---\n\nbody\n').memory).toBe(
+      'user',
+    );
+    expect(
+      parse('---\nname: solo\ndescription: d\nmemory: project\n---\n\nbody\n').memory,
+    ).toBe('project');
+    expect(parse('---\nname: solo\ndescription: d\n---\n\nbody\n').memory).toBeUndefined();
+  });
+
+  it('rejects an invalid memory scope field', () => {
+    expect(() => parse('---\nname: solo\ndescription: d\nmemory: local\n---\n\nbody\n')).toThrow(
+      /"memory"/,
+    );
+    expect(() => parse('---\nname: solo\ndescription: d\nmemory: 42\n---\n\nbody\n')).toThrow(
+      /"memory"/,
+    );
+  });
+
   it('rejects a non-boolean override field', () => {
     expect(() => parse('---\nname: solo\ndescription: d\noverride: yes\n---\n\nbody\n')).toThrow(
       /"override"/,
@@ -232,6 +251,13 @@ describe('agentProfileFromFile', () => {
     expect(profile.tools).toBeUndefined();
     expect(profile.whenToUse).toBe('reviews');
     expect(profile.override).toBe(false);
+    expect(profile.memory).toBeUndefined();
+  });
+
+  it('passes the memory scope through to the profile', () => {
+    const profile = agentProfileFromFile({ ...base, memory: 'project' }, basePrompt);
+
+    expect(profile.memory).toBe('project');
   });
 
   it('substitutes context variables in the body', () => {

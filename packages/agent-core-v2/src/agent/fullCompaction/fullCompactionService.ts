@@ -29,6 +29,10 @@ import { buildCompactionSummaryText, isRealUserInput } from '#/agent/contextMemo
 import { IAgentContextInjectorService } from '#/agent/contextInjector/contextInjector';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import type { ContextMessage } from '#/agent/contextMemory/types';
+import { IAgentReadStateService } from '#/agent/readState/readState';
+import '#/agent/readState/readStateService';
+import { IMemoryService } from '#/agent/memory/memory';
+import '#/agent/memory/memoryService';
 import { IAgentTokenCountingService } from '#/agent/tokenCounting/tokenCounting';
 import { IAgentLLMRequesterService, type AgentLLMRequestFinish } from '#/agent/llmRequester/llmRequester';
 import type { LLMRequestTrace } from '#/kosong/contract/requestTrace';
@@ -40,6 +44,7 @@ import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { stripDynamicToolContext } from '#/agent/toolSelect/dynamicTools';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionTodoService } from '#/session/todo/sessionTodo';
 import { renderTodoList, type TodoItem } from '#/session/todo/todoItem';
 import {
@@ -85,6 +90,10 @@ const OVERFLOW_CONTEXT_SAFETY_RATIO = 0.85;
 const OVERFLOW_STATUS_RECOVERY_RATIO = 0.5;
 const MAX_COMPACTION_OVERFLOW_SHRINK_ATTEMPTS = 3;
 const COMPACTION_OVERFLOW_SHRINK_RATIOS = [0.7, 0.5, 0.35] as const;
+export const MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES = 3;
+const REATTACH_MAX_FILES = 5;
+const REATTACH_TOKEN_BUDGET = 50_000;
+const REATTACH_INJECTION_VARIANT = 'compaction_read_state';
 const EMPTY_TOOL_PARAMETERS: Record<string, unknown> = {
   type: 'object',
   properties: {},
@@ -134,6 +143,14 @@ export const fullCompactionActiveTurnIdKey = defineState<number | undefined>(
   'fullCompaction.activeTurnId',
   () => undefined as number | undefined,
 );
+export const fullCompactionConsecutiveAutoFailuresKey = defineState<number>(
+  'fullCompaction.consecutiveAutoCompactionFailures',
+  () => 0,
+);
+export const fullCompactionAutoCompactionTrippedKey = defineState<boolean>(
+  'fullCompaction.autoCompactionTripped',
+  () => false,
+);
 
 export class AgentFullCompactionService extends Service implements IAgentFullCompactionService {
   declare readonly _serviceBrand: undefined;
@@ -162,6 +179,9 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     @ILogService private readonly log: ILogService,
     @IAgentLoopService private readonly loopService: IAgentLoopService,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IAgentReadStateService private readonly readState?: IAgentReadStateService,
+    @IHostFileSystem private readonly fs?: IHostFileSystem,
+    @IMemoryService private readonly memory?: IMemoryService,
   ) {
     super();
     this.states.register(fullCompactionCompactionCountInTurnKey);
@@ -169,6 +189,8 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     this.states.register(fullCompactionLastCompactedTokenCountKey);
     this.states.register(fullCompactionConsecutiveOverflowCompactionsKey);
     this.states.register(fullCompactionActiveTurnIdKey);
+    this.states.register(fullCompactionConsecutiveAutoFailuresKey);
+    this.states.register(fullCompactionAutoCompactionTrippedKey);
     this.strategy = new RuntimeCompactionStrategy(
       () => this.resolveModelContextWithEffectiveMax(),
       (message) => this.tokenCounting.estimateMessage(message),
@@ -242,6 +264,22 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
 
   private set activeTurnId(value: number | undefined) {
     this.states.set(fullCompactionActiveTurnIdKey, value);
+  }
+
+  private get consecutiveAutoCompactFailures(): number {
+    return this.states.get(fullCompactionConsecutiveAutoFailuresKey);
+  }
+
+  private set consecutiveAutoCompactFailures(value: number) {
+    this.states.set(fullCompactionConsecutiveAutoFailuresKey, value);
+  }
+
+  private get autoCompactionTripped(): boolean {
+    return this.states.get(fullCompactionAutoCompactionTrippedKey);
+  }
+
+  private set autoCompactionTripped(value: boolean) {
+    this.states.set(fullCompactionAutoCompactionTrippedKey, value);
   }
 
   get compacting(): FullCompactionTask | null {
@@ -486,6 +524,7 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
 
   private checkAutoCompaction(throwOnLimit = true): boolean {
     if (this._compacting) return true;
+    if (this.autoCompactionTripped) return false;
     if (
       this.lastCompactedTokenCount !== null &&
       this.tokenCountWithPending() <= this.lastCompactedTokenCount
@@ -557,12 +596,15 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
       } catch (error) {
         this.log.error('failed to refresh system prompt after compaction', { error });
       }
+      await this.reattachRecentlyReadFiles();
       this.lastCompactedTokenCount = result.tokensAfter;
       await this.contextInjector.injectAfterCompaction();
       this.lastCompactedTokenCount = this.tokenCountWithPending();
       if (!this.markCompleted(active)) {
         throw compactionCancelledReason(active);
       }
+      this.consecutiveAutoCompactFailures = 0;
+      this.autoCompactionTripped = false;
       const { contextSummary: _contextSummary, ...eventResult } = result;
       void _contextSummary;
       this.eventBus.publish({ type: 'compaction.completed', result: eventResult });
@@ -571,6 +613,9 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
       if (active.abortController.signal.aborted || isAbortError(error)) {
         this.cancelActive(active);
         throw error;
+      }
+      if (data.source === 'auto') {
+        this.recordAutoCompactionFailure();
       }
       const blockedByTurn = this._compacting === active && active.blockedByTurn;
       if (this._compacting === active) {
@@ -605,6 +650,21 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
 
       await this.hooks.onWillCompact.run(active);
 
+      // Memory-first auto-compaction: reuse the background-extracted session
+      // memory as the summary instead of burning an LLM round. Falls back to
+      // the LLM round below when no usable memory exists.
+      if (data.source === 'auto') {
+        const memoryResult = await this.tryMemoryCompaction(
+          active,
+          data,
+          originalHistory,
+          tokensBefore,
+          startedAt,
+          thinkingEffort,
+        );
+        if (memoryResult !== undefined) return memoryResult;
+      }
+
       const resolvedModel = this.profile.resolveModelContext();
       thinkingEffort = resolvedModel.thinkingLevel;
       const maxContextTokens = resolvedModel.modelCapabilities.max_context_tokens;
@@ -636,6 +696,12 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
             {
               messages,
               maxOutputSize: compactionMaxOutputSize,
+              // Replicate the routed request's system prompt and tool set so
+              // the summary call is an exact prefix extension of the hot
+              // request and reuses its KV cache. Tools are sent even though
+              // the summary step never invokes them.
+              systemPrompt: this.profile.getSystemPrompt(),
+              tools: this.defaultTools(),
               source: {
                 type: 'operation',
                 turnId: active.originTurnId,
@@ -764,12 +830,122 @@ export class AgentFullCompactionService extends Service implements IAgentFullCom
     }
   }
 
+  private async tryMemoryCompaction(
+    active: ActiveCompaction,
+    data: Readonly<CompactionBeginData>,
+    originalHistory: readonly ContextMessage[],
+    tokensBefore: number,
+    startedAt: number,
+    thinkingEffort: string,
+  ): Promise<CompactionResult | undefined> {
+    if (this.memory === undefined) return undefined;
+    let memorySummary: string;
+    try {
+      memorySummary = (await this.memory.loadCompactionSummary()) ?? '';
+    } catch {
+      // A memory read failure must never fail the compaction: fall back to the
+      // LLM round rather than counting as a compaction failure.
+      return undefined;
+    }
+    if (memorySummary.trim().length === 0) return undefined;
+
+    const signal = active.abortController.signal;
+    signal.throwIfAborted();
+
+    if (!historySafeToCompact(this.context.get(), originalHistory)) {
+      const activeTask = this._compacting;
+      if (activeTask !== null) {
+        this.cancelActive(activeTask);
+      }
+      throw compactionCancelledReason(active);
+    }
+
+    const summary = this.postProcessSummary(memorySummary);
+    const result = this.context.applyCompaction({
+      summary,
+      contextSummary: buildCompactionSummaryText(summary),
+      compactedCount: originalHistory.length,
+      tokensBefore,
+      requestOverheadTokens: this.requestTokens([]),
+    });
+
+    const properties: CompactionFinishedEvent = {
+      turn_id: active.originTurnId,
+      source: data.source,
+      tokens_before: result.tokensBefore,
+      tokens_after: result.tokensAfter,
+      duration_ms: Date.now() - startedAt,
+      compacted_count: result.compactedCount,
+      retry_count: 0,
+      round: 1,
+      thinking_effort: thinkingEffort,
+    };
+    this.telemetry.track2('compaction_finished', properties);
+    return result;
+  }
+
   private postProcessSummary(summary: string): string {
+    const cleaned = stripAnalysisDraft(summary);
     const todos = this.currentTodos();
     if (todos.length === 0) {
-      return summary;
+      return cleaned;
     }
-    return `${summary.trim()}\n\n${renderTodoList(todos, '## TODO List')}`;
+    return `${cleaned}\n\n${renderTodoList(todos, '## TODO List')}`;
+  }
+
+  private recordAutoCompactionFailure(): void {
+    const failures = this.consecutiveAutoCompactFailures + 1;
+    this.consecutiveAutoCompactFailures = failures;
+    if (failures < MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES) return;
+    if (this.autoCompactionTripped) return;
+    this.autoCompactionTripped = true;
+    this.eventBus.publish({
+      type: 'warning',
+      code: 'auto_compaction_tripped',
+      message:
+        `Auto compaction failed ${String(failures)} times in a row. ` +
+        'Auto compaction is paused for this session until a compaction succeeds; ' +
+        'compact manually (/compact) or clear the context to resume.',
+    });
+  }
+
+  private async reattachRecentlyReadFiles(): Promise<void> {
+    if (this.readState === undefined || this.fs === undefined) return;
+    const paths = this.readState.recentFiles(REATTACH_MAX_FILES);
+    if (paths.length === 0) return;
+    const keptText = contextText(this.context.get());
+    const parts: string[] = [];
+    const attached: string[] = [];
+    let remainingTokens = REATTACH_TOKEN_BUDGET;
+    for (const path of paths) {
+      if (remainingTokens <= 0) break;
+      let text: string;
+      try {
+        text = await this.fs.readText(path);
+      } catch {
+        continue;
+      }
+      const trimmed = text.trim();
+      if (trimmed.length === 0 || keptText.includes(trimmed)) continue;
+      const tokens = this.tokenCounting.estimateText(text);
+      if (tokens > remainingTokens) continue;
+      remainingTokens -= tokens;
+      parts.push(text);
+      attached.push(path);
+    }
+    if (attached.length === 0) return;
+    const reminder =
+      '<system-reminder>\n' +
+      'The following files were being read before the context was compacted. ' +
+      'Their full contents are re-attached below so you can continue working on them without re-reading: ' +
+      attached.join(', ') +
+      '.\n</system-reminder>';
+    this.context.append({
+      role: 'user',
+      content: [{ type: 'text', text: `${reminder}\n\n${parts.join('\n\n')}` }],
+      toolCalls: [],
+      origin: { kind: 'injection', variant: REATTACH_INJECTION_VARIANT },
+    });
   }
 
   private currentTodos(): readonly TodoItem[] {
@@ -799,6 +975,27 @@ function findAPIStatusError(error: unknown): APIStatusError | undefined {
     current = current instanceof Error ? current.cause : undefined;
   }
   return undefined;
+}
+
+/** Drops the `<analysis>…</analysis>` draft area and unwraps a trailing
+ *  `<summary>…</summary>` formal-area wrapper, keeping the note body. Falls
+ *  back to the raw summary when stripping leaves nothing. */
+function stripAnalysisDraft(summary: string): string {
+  const withoutDraft = summary.replace(/<analysis>[\s\S]*?<\/analysis>/gi, '').trim();
+  const cleaned = withoutDraft.replace(/^<summary>([\s\S]*?)<\/summary>$/i, (_, inner: string) =>
+    inner.trim(),
+  );
+  return cleaned.length > 0 ? cleaned : summary.trim();
+}
+
+function contextText(messages: readonly ContextMessage[]): string {
+  let text = '';
+  for (const message of messages) {
+    for (const part of message.content) {
+      if (part.type === 'text') text += part.text;
+    }
+  }
+  return text;
 }
 
 function collectSummary(finish: AgentLLMRequestFinish): CompactionAttemptResult {

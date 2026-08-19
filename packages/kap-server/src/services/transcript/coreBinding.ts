@@ -115,6 +115,8 @@ export function bindSessionTranscript(
   const projectorFor = (agentId: string): AgentTranscriptProjector => {
     let projector = projectors.get(agentId);
     if (projector === undefined) {
+      // toolCallId → the (turn, step) that last held its frame (see toolFrame).
+      const toolFrameIndex = new Map<string, { turnId: string; stepId: string }>();
       // The lookups let the projector adopt state the history backfill seeded
       // into the store before the projector existed (mid-stream/mid-bind
       // attach): stream frames continue id + offset, tool frames take their
@@ -122,14 +124,33 @@ export function bindSessionTranscript(
       projector = new AgentTranscriptProjector(agentId, {
         stepFrames: (turnId, stepId) =>
           store.getAgent(agentId)?.getTurn(turnId)?.steps.find((s) => s.stepId === stepId)?.frames,
+        // Per-agent lazy tool-call index: the first lookup for a toolCallId
+        // scans the store, later lookups resolve through the cached (turn,
+        // step) pair — `getTurn` is O(1) via the transcript turn index, so a
+        // hot lookup touches one step's frames instead of every turn's. The
+        // cache is validated on every hit (the store is copy-on-write, so a
+        // frame upsert produces a new frame object) and falls back to a full
+        // scan when the step/turn moved or was removed.
         toolFrame: (toolCallId) => {
           const transcript = store.getAgent(agentId);
           if (transcript === undefined) return undefined;
+          const hit = toolFrameIndex.get(toolCallId);
+          if (hit !== undefined) {
+            const turn = transcript.getTurn(hit.turnId);
+            const frame = turn?.steps
+              .find((s) => s.stepId === hit.stepId)
+              ?.frames.find((f) => f.kind === 'tool' && f.toolCallId === toolCallId);
+            if (frame !== undefined && frame.kind === 'tool') {
+              return { turnId: hit.turnId, stepId: hit.stepId, frame };
+            }
+            toolFrameIndex.delete(toolCallId);
+          }
           for (const item of transcript.getItems()) {
             if (item.kind !== 'turn') continue;
             for (const step of item.steps) {
               for (const frame of step.frames) {
                 if (frame.kind === 'tool' && frame.toolCallId === toolCallId) {
+                  toolFrameIndex.set(toolCallId, { turnId: item.turnId, stepId: step.stepId });
                   return { turnId: item.turnId, stepId: step.stepId, frame };
                 }
               }

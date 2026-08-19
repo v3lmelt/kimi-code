@@ -14,6 +14,7 @@
  */
 
 import {
+  bumpVersion,
   Text,
   truncateToWidth,
   visibleWidth,
@@ -55,7 +56,10 @@ function renderLifecycleLine(label: string, width: number): string[] {
  * change in the transcript.
  */
 export class GoalSetMessageComponent implements Component {
-  invalidate(): void {}
+  version = 0;
+  invalidate(): void {
+    bumpVersion(this);
+  }
 
   render(width: number): string[] {
     return renderLifecycleLine('Goal set', width);
@@ -63,7 +67,10 @@ export class GoalSetMessageComponent implements Component {
 }
 
 export class UpcomingGoalAddedMessageComponent implements Component {
-  invalidate(): void {}
+  version = 0;
+  invalidate(): void {
+    bumpVersion(this);
+  }
 
   render(width: number): string[] {
     return renderLifecycleLine(
@@ -74,9 +81,12 @@ export class UpcomingGoalAddedMessageComponent implements Component {
 }
 
 export class GoalCompletionMessageComponent implements Component {
+  version = 0;
   constructor(private readonly message: string) {}
 
-  invalidate(): void {}
+  invalidate(): void {
+    bumpVersion(this);
+  }
 
   render(width: number): string[] {
     const [headline = '', ...details] = this.message.trim().split(/\r?\n/);
@@ -108,9 +118,12 @@ export class GoalCompletionMessageComponent implements Component {
 }
 
 export class GoalStatusMessageComponent implements Component {
+  version = 0;
   constructor(private readonly goal: GoalSnapshot) {}
 
-  invalidate(): void {}
+  invalidate(): void {
+    bumpVersion(this);
+  }
 
   render(width: number): string[] {
     const panelContentWidth = Math.max(1, width - 6);

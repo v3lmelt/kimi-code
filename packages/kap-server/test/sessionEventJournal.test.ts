@@ -6,7 +6,16 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+// The journal's `mkdir` call count is asserted below (one syscall per
+// journal, not one per flush round). `node:fs/promises` exports are
+// read-only, so spyOn cannot redefine them — mock the module and forward
+// the real implementation; every other test is unaffected.
+vi.mock('node:fs/promises', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:fs/promises')>();
+  return { ...actual, mkdir: vi.fn(actual.mkdir) };
+});
 
 import {
   type EventEnvelope,
@@ -117,5 +126,52 @@ describe('SessionEventJournal', () => {
     }
     expect(lines).toBe(13);
     await j.close();
+  });
+
+  it('mkdirs the journal directory only once across flush rounds', async () => {
+    const fsPromises = await import('node:fs/promises');
+    const mkdirMock = vi.mocked(fsPromises.mkdir);
+    mkdirMock.mockClear();
+    try {
+      const j = await SessionEventJournal.open(filePath);
+      j.append(j.nextSeq(), envelope(1));
+      await j.flush();
+      expect(mkdirMock).toHaveBeenCalledTimes(1);
+
+      // Second round: the directory is known-good — no mkdir syscall.
+      j.append(j.nextSeq(), envelope(2));
+      await j.flush();
+      expect(mkdirMock).toHaveBeenCalledTimes(1);
+      await j.close();
+    } finally {
+      mkdirMock.mockClear();
+    }
+  });
+
+  it('re-tries mkdir after a failed write round (events stay live-only)', async () => {
+    const fsPromises = await import('node:fs/promises');
+    const mkdirMock = vi.mocked(fsPromises.mkdir);
+    mkdirMock.mockClear();
+    mkdirMock.mockRejectedValueOnce(new Error('disk error'));
+    try {
+      const j = await SessionEventJournal.open(filePath);
+      j.append(j.nextSeq(), envelope(1));
+      await j.flush();
+      expect(mkdirMock).toHaveBeenCalledTimes(1);
+
+      // A failed round resets the ready flag — the next round re-creates
+      // the directory and the pending line lands.
+      j.append(j.nextSeq(), envelope(2));
+      await j.flush();
+      expect(mkdirMock).toHaveBeenCalledTimes(2);
+      await j.close();
+
+      const all = await SessionEventJournal.open(filePath);
+      expect((await all.readSince(0, 100)).map((e) => e.seq)).toEqual([2]);
+      await all.close();
+    } finally {
+      mkdirMock.mockClear();
+      mkdirMock.mockReset();
+    }
   });
 });

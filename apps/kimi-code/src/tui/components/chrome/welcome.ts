@@ -2,7 +2,8 @@
  * Welcome panel shown at the top of the TUI.
  * Renders a round-bordered box in the Claude Code LogoV2 style: the product
  * name + version embedded in the top border rule, a centered bold greeting,
- * a Clawd-style pixel mascot, and dim model / directory lines.
+ * a lotus pixel mascot above a random Hasunosora member icon, and dim
+ * model / directory lines.
  */
 
 import type { Component } from '@moonshot-ai/pi-tui';
@@ -12,18 +13,21 @@ import chalk from 'chalk';
 import { effectiveModelAlias } from '@moonshot-ai/kimi-code-sdk';
 
 import { providerDisplayName } from '#/tui/components/dialogs/model-selector';
+import { HASUNOSORA_MEMBERS, hasunosoraMemberColor, randomHasunosoraMemberIndex } from '#/tui/constant/hasunosora-members';
 import { isRainbowDancing, renderDanceWelcomeHeader } from '#/tui/easter-eggs/dance';
 import type { AppState } from '#/tui/types';
 import { currentTheme } from '#/tui/theme';
 
-/** Clawd-style pixel mascot (2 rows), painted in the brand primary. */
-const MASCOT = [' ▐▛███▜▌', '▝▜██▛▘'] as const;
+/** Lotus pixel mascot (2 rows), painted in the brand primary. */
+const MASCOT = [' ▗▄▖▗▄▖', '▝▜▟██▙▛▘'] as const;
 
 export class WelcomeComponent implements Component {
   private state: AppState;
+  private memberIndex: number;
 
-  constructor(state: AppState) {
+  constructor(state: AppState, memberIndex?: number) {
     this.state = state;
+    this.memberIndex = memberIndex ?? randomHasunosoraMemberIndex();
   }
 
   invalidate(): void {}
@@ -36,7 +40,7 @@ export class WelcomeComponent implements Component {
     const effectiveActiveModel = activeModel === undefined ? undefined : effectiveModelAlias(activeModel);
 
     if (safeWidth < 24) {
-      const title = chalk.bold.hex(currentTheme.palette.primary)('Welcome to Kimi Code!');
+      const title = chalk.bold.hex(currentTheme.palette.primary)('Welcome to Hasu!');
       const prompt = isLoggedOut
         ? chalk.hex(currentTheme.palette.warning)('Run /login or /provider to get started.')
         : chalk.hex(currentTheme.palette.textDim)('Send /help for help information.');
@@ -68,12 +72,18 @@ export class WelcomeComponent implements Component {
       '…',
     );
 
-    // Claude Code style header: centered greeting above the pixel mascot.
+    // Claude Code style header: centered greeting above the pixel mascot —
+    // the Hasunosora lotus over this launch's random member icon.
+    const member = HASUNOSORA_MEMBERS[this.memberIndex]!;
+    const memberStyle = chalk.hex(hasunosoraMemberColor(member, currentTheme.palette.text));
     let contentLines = [
       center(currentTheme.bold('Welcome back!')),
       '',
       center(primary(MASCOT[0])),
       center(primary(MASCOT[1])),
+      '',
+      ...member.icon.map((row) => center(memberStyle(row))),
+      center(memberStyle(member.name)),
     ];
     if (isRainbowDancing()) {
       contentLines = renderDanceWelcomeHeader(MASCOT, textWidth, rightRow1);
@@ -92,11 +102,11 @@ export class WelcomeComponent implements Component {
 
     contentLines.push('', center(modelLine), center(dim(this.state.workDir)));
 
-    // Top rule carries the border title: ' Kimi Code ' in the brand primary
+    // Top rule carries the border title: ' Hasu ' in the brand primary
     // followed by the dim version, mirroring Claude Code's LogoV2 box.
-    let borderTitle = primary(' Kimi Code ') + dim(` v${this.state.version} `);
+    let borderTitle = primary(' Hasu ') + dim(` v${this.state.version} `);
     if (visibleWidth(borderTitle) > safeWidth - 5) {
-      borderTitle = primary(' Kimi Code ');
+      borderTitle = primary(' Hasu ');
     }
     const titleDashCount = Math.max(0, safeWidth - 3 - visibleWidth(borderTitle));
 

@@ -124,6 +124,10 @@ export class CustomRegistryImportDialogComponent extends Container implements Fo
     } else {
       this.tokenInput.handleInput(data);
     }
+    // Version-cache: both input lines render into this panel's hand-drawn
+    // output, so a bare Input mutation would let a parent container serve
+    // its cached lines.
+    this.bump();
   }
 
   override invalidate(): void {

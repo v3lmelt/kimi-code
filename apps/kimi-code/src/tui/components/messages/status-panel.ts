@@ -25,6 +25,7 @@ import {
 
 import {
   buildExtraUsageSection,
+  buildGoUsageReportLines,
   buildManagedUsageReportLines,
   type ManagedUsageReport,
 } from './usage-panel';
@@ -52,6 +53,8 @@ export interface StatusReportOptions {
   readonly statusError?: string;
   readonly managedUsage?: ManagedUsageReport;
   readonly managedUsageError?: string;
+  readonly goUsage?: ManagedUsageReport;
+  readonly goUsageError?: string;
 }
 
 type Colorize = (text: string) => string;
@@ -159,6 +162,15 @@ export function buildStatusReportLines(options: StatusReportOptions): string[] {
   if (extraSection.length > 0) {
     lines.push('');
     lines.push(...extraSection);
+  }
+
+  const goSection = buildGoUsageReportLines({
+    goUsage: options.goUsage,
+    goUsageError: options.goUsageError,
+  });
+  if (goSection.length > 0) {
+    lines.push('');
+    lines.push(...goSection);
   }
 
   return lines;

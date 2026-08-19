@@ -2,7 +2,7 @@ import { Container, Spacer } from '@moonshot-ai/pi-tui';
 
 import type { MoonLoader } from '#/tui/components/chrome/moon-loader';
 
-export type ActivityPaneMode = 'hidden' | 'waiting' | 'thinking' | 'composing' | 'tool';
+export type ActivityPaneMode = 'hidden' | 'waiting' | 'thinking' | 'composing' | 'tool' | 'compacting';
 
 export interface ActivityPaneOptions {
   readonly mode: ActivityPaneMode;
@@ -18,7 +18,11 @@ export class ActivityPaneComponent extends Container {
     this.spinnerRef = options.spinner;
 
     if (
-      (options.mode === 'waiting' || options.mode === 'tool' || options.mode === 'composing' || options.mode === 'thinking') &&
+      (options.mode === 'waiting' ||
+        options.mode === 'tool' ||
+        options.mode === 'composing' ||
+        options.mode === 'thinking' ||
+        options.mode === 'compacting') &&
       options.spinner !== undefined
     ) {
       this.addChild(new Spacer(1));

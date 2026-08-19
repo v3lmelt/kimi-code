@@ -28,6 +28,7 @@ import type { ResolvedAgentProfile, SystemPromptContext } from '../types';
 import {
   ADDITIONAL_DIRS_SECTION_PROSE,
   SKILLS_SECTION_PROSE,
+  TODO_LIST_SECTION_PROSE,
   WINDOWS_NOTES,
 } from '../prompt-sections';
 
@@ -44,7 +45,7 @@ function renderTemplateVars(template: string, vars: Record<string, string>): str
 
 export function agentFilePromptVars(
   context: SystemPromptContext,
-  options: { readonly skillActive: boolean },
+  options: { readonly skillActive: boolean; readonly todoActive: boolean },
 ): Record<string, string> {
   const shellName = context.osEnv.shellName ?? '';
   const shellPath = context.osEnv.shellPath ?? '';
@@ -75,13 +76,14 @@ export function agentFilePromptVars(
     skills,
     skills_section:
       skills.length > 0 ? `\n\n# Skills\n\n${SKILLS_SECTION_PROSE}\n\n${skills}\n\n` : '',
+    todo_list_section: options.todoActive ? `\n\n${TODO_LIST_SECTION_PROSE}\n\n` : '',
   };
 }
 
 export function renderAgentFileTemplate(
   template: string,
   context: SystemPromptContext,
-  options: { readonly skillActive: boolean },
+  options: { readonly skillActive: boolean; readonly todoActive: boolean },
   basePrompt?: (context: SystemPromptContext) => string,
 ): string {
   const vars = agentFilePromptVars(context, options);
@@ -95,6 +97,13 @@ export function skillActiveForAgentFile(definition: AgentFileDefinition): boolea
   return (
     (definition.tools === undefined || definition.tools.includes('Skill')) &&
     !(definition.disallowedTools ?? []).includes('Skill')
+  );
+}
+
+export function todoActiveForAgentFile(definition: AgentFileDefinition): boolean {
+  return (
+    (definition.tools === undefined || definition.tools.includes('TodoList')) &&
+    !(definition.disallowedTools ?? []).includes('TodoList')
   );
 }
 
@@ -117,11 +126,12 @@ export function agentProfileFromFile(
   basePrompt: (context: SystemPromptContext) => string,
 ): ResolvedAgentProfile {
   const skillActive = skillActiveForAgentFile(definition);
+  const todoActive = todoActiveForAgentFile(definition);
   return {
     name: definition.name,
     description: definition.description,
     systemPrompt: (context) =>
-      renderAgentFileTemplate(definition.prompt, context, { skillActive }, basePrompt),
+      renderAgentFileTemplate(definition.prompt, context, { skillActive, todoActive }, basePrompt),
     tools: agentFileTools(definition, defaultTools),
     disallowedTools:
       definition.disallowedTools === undefined ? undefined : [...definition.disallowedTools],

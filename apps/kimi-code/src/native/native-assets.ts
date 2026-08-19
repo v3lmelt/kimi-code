@@ -168,10 +168,22 @@ function validateAssetFile(
   };
 }
 
+/**
+ * Validation results keyed by (manifest object, expectedTarget). A given
+ * manifest object is immutable in practice (the SEA blob or a caller-supplied
+ * object), so repeating the structural validation on every lookup is pure
+ * waste — the startup path re-validates the same manifest 7-9 times.
+ */
+const validationCache = new WeakMap<object, Map<string, NativeAssetManifest>>();
+
 export function validateNativeAssetManifest(
   value: unknown,
   expectedTarget?: string,
 ): NativeAssetManifest {
+  if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
+    const cached = validationCache.get(value)?.get(expectedTarget ?? '');
+    if (cached !== undefined) return cached;
+  }
   const manifest = manifestObject(value, 'root');
   if (manifest['version'] !== NATIVE_ASSET_MANIFEST_VERSION) {
     throw new Error(`Unsupported native asset manifest version: ${String(manifest['version'])}`);
@@ -229,12 +241,19 @@ export function validateNativeAssetManifest(
     };
   });
 
-  return {
+  const result: NativeAssetManifest = {
     version: NATIVE_ASSET_MANIFEST_VERSION,
     target,
     packages,
     runtimeFiles,
   };
+  let byTarget = validationCache.get(manifest);
+  if (byTarget === undefined) {
+    byTarget = new Map();
+    validationCache.set(manifest, byTarget);
+  }
+  byTarget.set(expectedTarget ?? '', result);
+  return result;
 }
 
 function resolveAssetPath(cacheRoot: string, relativePath: string): string {
@@ -265,6 +284,19 @@ export function getSeaAssetSource(): NativeAssetSource | null {
   };
 }
 
+interface EmbeddedManifestCacheEntry {
+  readonly raw: string;
+  readonly manifest: NativeAssetManifest;
+}
+
+/**
+ * Parsed embedded manifests keyed by target. `getSeaAssetSource()` returns a
+ * fresh wrapper object on every call, so the key cannot be the source object;
+ * instead the raw manifest text is re-read (a few KB) and compared — when it
+ * matches, JSON.parse + validation are skipped. Failure paths never cache.
+ */
+const embeddedManifestCache = new Map<string, EmbeddedManifestCacheEntry>();
+
 export function getEmbeddedNativeAssetManifest(
   source = getSeaAssetSource(),
   target = currentTarget(),
@@ -272,10 +304,14 @@ export function getEmbeddedNativeAssetManifest(
   if (source === null) return null;
   const key = nativeAssetManifestKey(target);
   if (!source.getAssetKeys().includes(key)) return null;
-  const raw = source.getRawAsset(key);
-  const parsed: unknown = JSON.parse(toBuffer(raw).toString('utf-8'));
+  const raw = toBuffer(source.getRawAsset(key)).toString('utf-8');
+  const cached = embeddedManifestCache.get(target);
+  if (cached !== undefined && cached.raw === raw) return cached.manifest;
+  const parsed: unknown = JSON.parse(raw);
   validateNativeAssetManifest(parsed, target);
-  return parsed as NativeAssetManifest;
+  const manifest = parsed as NativeAssetManifest;
+  embeddedManifestCache.set(target, { raw, manifest });
+  return manifest;
 }
 
 export function getNativeCacheBase(options: NativeAssetOptions = {}): string {
@@ -299,20 +335,86 @@ export function getNativeCacheBase(options: NativeAssetOptions = {}): string {
   return joinPosix(optionalEnvValue(env, 'XDG_CACHE_HOME') ?? joinPosix(home, '.cache'), 'kimi-code');
 }
 
+/** sha256 of JSON.stringify(manifest) — the content address of a cache tree. */
+const manifestHashCache = new WeakMap<object, string>();
+
+function manifestHashOf(manifest: object): string {
+  let hash = manifestHashCache.get(manifest);
+  if (hash === undefined) {
+    hash = sha256(JSON.stringify(manifest));
+    manifestHashCache.set(manifest, hash);
+  }
+  return hash;
+}
+
+/**
+ * Cache roots keyed by (manifest object, cacheBase + version). The manifest
+ * is immutable in practice, so the validate + stringify + sha256 pipeline
+ * runs at most once per manifest/options combination instead of once per
+ * lookup (the startup path repeats it 7-9 times).
+ */
+const cacheRootCache = new WeakMap<object, Map<string, string>>();
+
 export function getNativeAssetCacheRoot(
   manifest: NativeAssetManifest,
   options: NativeAssetOptions = {},
 ): string {
-  const validated = validateNativeAssetManifest(manifest);
+  const cacheBase = getNativeCacheBase(options);
   const version = sanitizeSegment(options.version ?? KIMI_BUILD_INFO.version ?? 'dev');
-  const manifestHash = sha256(JSON.stringify(manifest));
-  return join(
-    getNativeCacheBase(options),
+  const cacheKey = `${cacheBase}\u0000${version}`;
+  let byOptions = cacheRootCache.get(manifest);
+  if (byOptions === undefined) {
+    byOptions = new Map();
+    cacheRootCache.set(manifest, byOptions);
+  } else {
+    const cached = byOptions.get(cacheKey);
+    if (cached !== undefined) return cached;
+  }
+  const validated = validateNativeAssetManifest(manifest);
+  const root = join(
+    cacheBase,
     'native',
     version,
     sanitizeSegment(validated.target),
-    manifestHash,
+    manifestHashOf(manifest),
   );
+  byOptions.set(cacheKey, root);
+  return root;
+}
+
+interface VerifiedFileRecord {
+  readonly size: number;
+  readonly mtimeMs: number;
+}
+
+/**
+ * In-process record of files whose content was verified (or freshly written)
+ * during this process. Re-checking is a stat(size/mtime) instead of a full
+ * read + sha256; a changed file falls through to the real verification.
+ */
+const verifiedFiles = new Map<string, VerifiedFileRecord>();
+
+function fileRecordMatches(path: string, size: number, mtimeMs: number): boolean {
+  try {
+    const st = statSync(path);
+    return st.size === size && st.mtimeMs === mtimeMs;
+  } catch {
+    return false;
+  }
+}
+
+function isFileVerified(path: string): boolean {
+  const record = verifiedFiles.get(path);
+  return record !== undefined && fileRecordMatches(path, record.size, record.mtimeMs);
+}
+
+function recordFileVerified(path: string): void {
+  try {
+    const st = statSync(path);
+    verifiedFiles.set(path, { size: st.size, mtimeMs: st.mtimeMs });
+  } catch {
+    verifiedFiles.delete(path);
+  }
 }
 
 function readFileSha256(path: string): string | null {
@@ -324,7 +426,12 @@ function readFileSha256(path: string): string | null {
 }
 
 function ensureFile(path: string, bytes: Buffer, expectedSha256: string, mode?: number): void {
-  if (readFileSha256(path) === expectedSha256) return;
+  if (isFileVerified(path)) return;
+
+  if (readFileSha256(path) === expectedSha256) {
+    recordFileVerified(path);
+    return;
+  }
 
   mkdirSync(dirname(path), { recursive: true });
   const tempPath = `${path}.${process.pid}.${Date.now()}.tmp`;
@@ -332,10 +439,12 @@ function ensureFile(path: string, bytes: Buffer, expectedSha256: string, mode?: 
 
   try {
     renameSync(tempPath, path);
+    recordFileVerified(path);
     return;
   } catch {
     if (readFileSha256(path) === expectedSha256) {
       rmSync(tempPath, { force: true });
+      recordFileVerified(path);
       return;
     }
   }
@@ -343,9 +452,13 @@ function ensureFile(path: string, bytes: Buffer, expectedSha256: string, mode?: 
   try {
     rmSync(path, { force: true });
     renameSync(tempPath, path);
+    recordFileVerified(path);
   } catch (error) {
     rmSync(tempPath, { force: true });
-    if (readFileSha256(path) === expectedSha256) return;
+    if (readFileSha256(path) === expectedSha256) {
+      recordFileVerified(path);
+      return;
+    }
     throw error;
   }
 }
@@ -360,6 +473,81 @@ function ensureEntryFile(cacheRoot: string): void {
   );
 }
 
+const VERIFIED_MARKER_VERSION = 1;
+const VERIFIED_MARKER_NAME = '.kimi-native-verified.json';
+
+interface VerifiedMarker {
+  readonly version: number;
+  readonly manifestHash: string;
+  /** relativePath → [size, mtimeMs] recorded right after a full verification. */
+  readonly files: Record<string, [number, number]>;
+}
+
+function readVerifiedMarker(cacheRoot: string): VerifiedMarker | null {
+  try {
+    const parsed = JSON.parse(
+      readFileSync(join(cacheRoot, VERIFIED_MARKER_NAME), 'utf-8'),
+    ) as VerifiedMarker;
+    if (
+      parsed === null ||
+      typeof parsed !== 'object' ||
+      parsed.version !== VERIFIED_MARKER_VERSION
+    ) {
+      return null;
+    }
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
+function writeVerifiedMarker(
+  cacheRoot: string,
+  manifestHash: string,
+  entries: ReadonlyArray<{ relativePath: string; path: string }>,
+): void {
+  const files: Record<string, [number, number]> = {};
+  for (const entry of entries) {
+    try {
+      const st = statSync(entry.path);
+      files[entry.relativePath] = [st.size, st.mtimeMs];
+    } catch {
+      return; // a file vanished mid-extraction; skip the marker, next run re-verifies
+    }
+  }
+  const markerPath = join(cacheRoot, VERIFIED_MARKER_NAME);
+  const payload = `${JSON.stringify({ version: VERIFIED_MARKER_VERSION, manifestHash, files })}\n`;
+  const tempPath = `${markerPath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    writeFileSync(tempPath, payload, { mode: 0o644 });
+    renameSync(tempPath, markerPath);
+  } catch {
+    rmSync(tempPath, { force: true });
+    // Best-effort: a missing marker only costs a full re-verification later.
+  }
+}
+
+/**
+ * Cross-process fast path: when the marker matches the current manifest hash
+ * (the marker lives inside the manifest-hash-addressed cache root, so this is
+ * belt-and-suspenders) and every extracted file still has the recorded size
+ * and mtime, the tree is trusted without re-reading or re-hashing anything.
+ * A missing/changed file falls through to the full verification below, which
+ * preserves the "corrupted assets are rebuilt" guarantee.
+ */
+function treeFilesVerified(
+  marker: VerifiedMarker | null,
+  manifestHash: string,
+  entries: ReadonlyArray<{ relativePath: string; path: string }>,
+): boolean {
+  if (marker === null || marker.manifestHash !== manifestHash) return false;
+  for (const entry of entries) {
+    const record = marker.files[entry.relativePath];
+    if (record === undefined || !fileRecordMatches(entry.path, record[0], record[1])) return false;
+  }
+  return true;
+}
+
 export function ensureNativeAssetTree(options: NativeAssetOptions = {}): string | null {
   const source = options.source ?? getSeaAssetSource();
   if (source === null) return null;
@@ -370,12 +558,26 @@ export function ensureNativeAssetTree(options: NativeAssetOptions = {}): string 
   const manifest = validateNativeAssetManifest(rawManifest);
 
   const cacheRoot = getNativeAssetCacheRoot(rawManifest, options);
-  const sourceKeys = new Set(source.getAssetKeys());
   const files = [
     ...manifest.packages.flatMap((pkg) => pkg.files),
     ...manifest.runtimeFiles,
   ];
-  for (const file of files) {
+  const fileEntries = files.map((file) => ({
+    relativePath: file.relativePath,
+    path: resolveAssetPath(cacheRoot, file.relativePath),
+  }));
+  const entryPath = join(cacheRoot, 'node_modules', '.kimi-native-entry.cjs');
+  const treeEntries = [
+    ...fileEntries,
+    { relativePath: 'node_modules/.kimi-native-entry.cjs', path: entryPath },
+  ];
+
+  const marker = readVerifiedMarker(cacheRoot);
+  if (treeFilesVerified(marker, manifestHashOf(rawManifest), treeEntries)) return cacheRoot;
+
+  const sourceKeys = new Set(source.getAssetKeys());
+  for (let index = 0; index < files.length; index += 1) {
+    const file = files[index]!;
     if (!sourceKeys.has(file.assetKey)) {
       throw new Error(`Native asset is missing: ${file.assetKey}`);
     }
@@ -386,9 +588,10 @@ export function ensureNativeAssetTree(options: NativeAssetOptions = {}): string 
         `Native asset checksum mismatch for ${file.assetKey}: ${actualSha256} !== ${file.sha256}`,
       );
     }
-    ensureFile(resolveAssetPath(cacheRoot, file.relativePath), bytes, file.sha256, file.mode);
+    ensureFile(fileEntries[index]!.path, bytes, file.sha256, file.mode);
   }
   ensureEntryFile(cacheRoot);
+  writeVerifiedMarker(cacheRoot, manifestHashOf(rawManifest), treeEntries);
   return cacheRoot;
 }
 

@@ -61,6 +61,19 @@ describe('formatBackgroundTaskTranscript', () => {
     expect(data.headline).toContain('question task started');
   });
 
+  it('renders a workflow started entry instead of the bash fallback', () => {
+    const data = formatBackgroundTaskTranscript({
+      taskId: 'workflow-deadbeef',
+      kind: 'workflow',
+      description: 'Running workflow: smoke test',
+      status: 'running',
+      startedAt: Date.now() - 1000,
+      endedAt: null,
+    } as unknown as BackgroundTaskInfo);
+    expect(data.headline).toContain('workflow task started');
+    expect(data.headline).not.toContain('bash');
+  });
+
   it('renders a completed entry with exit code in detail', () => {
     const data = formatBackgroundTaskTranscript(
       task({ status: 'completed', exitCode: 0, endedAt: Date.now() }),

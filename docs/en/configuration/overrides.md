@@ -1,6 +1,6 @@
 # Config overrides
 
-Kimi Code CLI has three places where runtime parameters can be influenced: the config file, command-line options, and environment variables. They are not a simple "whoever has higher priority wins" relationship — the three serve different scenarios and have non-overlapping scopes:
+Hasu CLI has three places where runtime parameters can be influenced: the config file, command-line options, and environment variables. They are not a simple "whoever has higher priority wins" relationship — the three serve different scenarios and have non-overlapping scopes:
 
 - **Config file** stores long-term preferences (model, keys, loop control, etc.); takes effect on every startup
 - **Command-line options** make one-off changes for the current startup; discarded after exit
@@ -79,7 +79,7 @@ Mutual exclusion rules (startup fails if violated):
 **Isolated test environment** — use a separate data directory to avoid polluting the main config and sessions:
 
 ```sh
-KIMI_CODE_HOME="$PWD/.kimi-sandbox" kimi
+KIMI_CODE_HOME="$PWD/.kimi-sandbox" hasu
 ```
 
 **One-off test key** — since provider credentials are read only from the config file, write a test key into the `env` sub-table:
@@ -92,13 +92,13 @@ KIMI_API_KEY = "sk-test"
 **Skip approval for batch tasks**:
 
 ```sh
-kimi --yolo -p "Batch rename the following files..."
+hasu --yolo -p "Batch rename the following files..."
 ```
 
 **Enter Plan mode temporarily** (to make it permanent, set `default_plan_mode = true` in the config file):
 
 ```sh
-kimi --plan
+hasu --plan
 ```
 
 ## Next steps

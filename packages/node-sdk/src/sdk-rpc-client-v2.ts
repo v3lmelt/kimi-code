@@ -177,6 +177,7 @@ import {
   IAgentSwarmService,
   IAgentTaskService,
   IAgentTokenCountingService,
+  IAgentUltracodeService,
   IBootstrapService,
   IConfigService,
   IEventService,
@@ -256,6 +257,7 @@ import {
   type SetSessionPlanModeRpcInput,
   type SetSessionSwarmModeRpcInput,
   type SetSessionThinkingRpcInput,
+  type SetSessionUltracodeRpcInput,
   type UpdateSessionMetadataRpcInput,
 } from '#/rpc';
 import type {
@@ -1509,6 +1511,7 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       permission: agent.accessor.get(IAgentPermissionModeService).mode,
       planMode: plan !== null,
       swarmMode: agent.accessor.get(IAgentSwarmService).isActive,
+      ultracode: agent.accessor.get(IAgentUltracodeService).isActive,
       contextTokens,
       maxContextTokens,
       contextUsage,
@@ -1816,6 +1819,22 @@ export class SDKRpcClientV2 extends SDKRpcClientBase {
       return;
     }
     swarm.exit();
+  }
+
+  /**
+   * Through the agent scope (`IAgentUltracodeService.enter` / `.exit`) — no
+   * klient facade exists for the ultracode domain. The service injects the
+   * enter reminder and switches the profile to the highest supported thinking
+   * effort; exit pops or appends the exit reminder.
+   */
+  override async setUltracode(input: SetSessionUltracodeRpcInput): Promise<void> {
+    const agent = await this.agentScope(input.sessionId);
+    const ultracode = agent.accessor.get(IAgentUltracodeService);
+    if (input.enabled) {
+      ultracode.enter(input.trigger);
+      return;
+    }
+    ultracode.exit();
   }
 
   /** v1's `swarm()` composition: enter with the one-shot `task` trigger, then prompt. */

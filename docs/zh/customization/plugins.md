@@ -1,6 +1,6 @@
 # Plugins
 
-Plugins 把可复用的 Kimi Code CLI 能力打包成可安装单元——可以添加 [Agent Skills](./skills.md)、自定义 [Agent](./agents.md)、在会话启动时自动加载指定 Skill、提供系统提示词指令，也可以声明 MCP servers 来提供真实工具能力。适合把工作流共享给团队、连接外部服务，或从[官方插件](#官方插件)安装扩展。
+Plugins 把可复用的 Hasu CLI 能力打包成可安装单元——可以添加 [Agent Skills](./skills.md)、自定义 [Agent](./agents.md)、在会话启动时自动加载指定 Skill、提供系统提示词指令，也可以声明 MCP servers 来提供真实工具能力。适合把工作流共享给团队、连接外部服务，或从[官方插件](#官方插件)安装扩展。
 
 ## 安装与管理
 
@@ -99,13 +99,13 @@ Kimi WebBridge 分两步安装：完成上述步骤后，还需要[安装浏览�
 
 ### Kimi Datasource <Badge type="tip" text="v3.3.0" />
 
-Kimi Datasource 是 Kimi Code 官方数据插件，让你用自然语言直接查询金融行情、宏观经济、企业工商、学术文献和中国法律法规，无需手动调用接口或申请数据账号。
+Kimi Datasource 是 Hasu 官方数据插件，让你用自然语言直接查询金融行情、宏观经济、企业工商、学术文献和中国法律法规，无需手动调用接口或申请数据账号。
 
 使用前需先通过 `/login` 完成 Kimi Code 账号 OAuth 登录，数据查询会消耗你的 Kimi Code 套餐额度。
 
 #### 使用方式
 
-1. 直接用自然语言描述你的需求，Kimi Code 会自动调用数据能力
+1. 直接用自然语言描述你的需求，Hasu 会自动调用数据能力
 2. 通过 `/skill:kimi-datasource` 明确触发数据查询 Skill
 
 #### 能做什么
@@ -188,7 +188,7 @@ Kimi Computer Use 让 AI 直接操作你的桌面应用，可以完成点击、�
 安装后首次使用时，Kimi Computer Use 会弹出授权窗口，按照提示操作即可：
 
 1. 点击**辅助功能**和**屏幕录制**右侧的**去授权**，在系统设置中开启这两项权限。前者用于执行点击、输入与滚动，后者用于读取屏幕内容、识别需要操作的位置
-2. 在**接入本地 Agent**中打开 **Kimi Code** 开关，重启 Kimi Code 后生效
+2. 在**接入本地 Agent**中打开 **Hasu** 开关，重启 Hasu 后生效
 
 <div style="max-width: 380px; margin: 0 auto;">
 
@@ -232,7 +232,7 @@ Plugin 是一个带 manifest 的目录或 zip 文件。Manifest 可以放在以�
 {
   "name": "kimi-finance",
   "version": "1.0.0",
-  "description": "Finance data and analysis workflows for Kimi Code CLI",
+  "description": "Finance data and analysis workflows for Hasu CLI",
   "skills": "./skills/",
   "systemPromptPath": "./SYSTEM.md",
   "sessionStart": {
@@ -275,7 +275,7 @@ Plugin 是一个带 manifest 的目录或 zip 文件。Manifest 可以放在以�
 }
 ```
 
-系统提示词贡献在两个 Agent 引擎上都生效。交互式 TUI、`kimi -p` 和 `kimi web` 默认使用 v2 引擎；设置 `KIMI_CODE_LEGACY_FLAG=1` 后，本地 CLI 界面会改用旧版引擎。
+系统提示词贡献在两个 Agent 引擎上都生效。交互式 TUI、`hasu -p` 和 `hasu web` 默认使用 v2 引擎；设置 `KIMI_CODE_LEGACY_FLAG=1` 后，本地 CLI 界面会改用旧版引擎。
 
 `systemPrompt` 字段与 `systemPromptPath` 文件各限制为 32 KB（UTF-8 字节）：超限内容会被忽略，并显示在 plugin 的 diagnostics 中。一次提示词构建最多注入所有已启用 plugin 合计 64 KB 的指令；超出预算的贡献会被跳过并给出警告——单个 plugin 的内联文本与文件合计超过该预算时同样整体跳过。
 
@@ -322,7 +322,7 @@ description: 拉取指定股票的财报并总结
 /kimi-finance:report TSLA
 ```
 
-Kimi 会把正文里的 `$ARGUMENTS` 替换成 `TSLA`，再执行这段提示词。三处细节分述如下。
+Hasu 会把正文里的 `$ARGUMENTS` 替换成 `TSLA`，再执行这段提示词。三处细节分述如下。
 
 ### 声明命令（`commands` 字段）
 
@@ -359,7 +359,7 @@ my-plugin/
       SKILL.md
 ```
 
-`sessionStart.skill` 在会话启动时把一个 plugin Skill 加载到主 Agent，适合放置初始化说明、工作流规则，或把其他工具中的术语映射到 Kimi Code CLI。它只注入文本，不执行代码。
+`sessionStart.skill` 在会话启动时把一个 plugin Skill 加载到主 Agent，适合放置初始化说明、工作流规则，或把其他工具中的术语映射到 Hasu CLI。它只注入文本，不执行代码。
 
 无论 Skill 通过哪种方式加载（`sessionStart.skill`、`/skill:<name>` 或模型自动调用），`skillInstructions` 都会随该 plugin 的 Skill 一起出现。
 

@@ -10,6 +10,7 @@ export const ProviderTypeSchema = z.enum([
   'google-genai',
   'openai_responses',
   'vertexai',
+  'opencode-go',
 ]);
 
 export type ProviderType = z.infer<typeof ProviderTypeSchema>;
@@ -49,7 +50,11 @@ const ModelAliasBaseSchema = z.object({
   capabilities: z.array(z.string()).optional(),
   displayName: z.string().optional(),
   reasoningKey: z.string().optional(),
-  protocol: z.literal('anthropic').optional(),
+  // Per-model protocol override: gateway providers (opencode-go, …) serve
+  // models over a different wire than `provider.type` (e.g. MiniMax/Qwen over
+  // Anthropic Messages, Grok/GPT over OpenAI Responses). When set, takes
+  // precedence over the provider wire for transport selection.
+  protocol: z.enum(['anthropic', 'openai', 'openai_responses', 'google-genai']).optional(),
   // Explicitly declare adaptive-thinking support, overriding the kosong
   // model-name version inference. Needed for custom-named Anthropic endpoints
   // whose model name does not encode a parseable Claude version.

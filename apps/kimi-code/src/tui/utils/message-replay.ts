@@ -19,6 +19,7 @@ import type {
 } from '#/tui/types';
 
 import { modelDisplayName } from '../components/dialogs/model-selector';
+import { isWorkflowBackgroundTask } from './background-task-status';
 import { mediaUrlPartToText } from './media-url';
 import { nextTranscriptId } from './transcript-id';
 
@@ -86,18 +87,24 @@ export function isTerminalBackgroundTask(info: BackgroundTaskInfo): boolean {
 export function countActiveBackgroundTasks(tasks: ReadonlyMap<string, BackgroundTaskInfo>): {
   bashTasks: number;
   agentTasks: number;
+  workflowTasks: number;
 } {
   let bashTasks = 0;
   let agentTasks = 0;
+  let workflowTasks = 0;
   for (const info of tasks.values()) {
     if (isTerminalBackgroundTask(info)) continue;
-    if (info.kind === 'agent') {
+    // `workflow` runs are v2-only and fall outside the v1 kind union; count
+    // them separately so they stop showing up as `[N task running]`.
+    if (isWorkflowBackgroundTask(info)) {
+      workflowTasks += 1;
+    } else if (info.kind === 'agent') {
       agentTasks += 1;
     } else {
       bashTasks += 1;
     }
   }
-  return { bashTasks, agentTasks };
+  return { bashTasks, agentTasks, workflowTasks };
 }
 
 export function replayBackgroundProjection(

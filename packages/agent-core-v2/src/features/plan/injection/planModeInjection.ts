@@ -4,8 +4,11 @@
  * Owns the `plan_mode` context-injection provider: while plan mode is active it
  * emits the full / sparse / re-entry reminders (deduped against recent history),
  * and on the first inject after deactivation it emits the exit reminder. It reads
- * the live plan state through `IAgentPlanService.status()` and the recent history
- * through `IAgentContextMemoryService`, so no derived-state closures are needed.
+ * the live plan state through the synchronous `IAgentPlanService.currentPlanFilePath()`
+ * and only falls back to the file-reading `IAgentPlanService.status()` on the
+ * active transition (where the re-entry/full reminder split needs the content);
+ * the recent history comes through `IAgentContextMemoryService`, so no
+ * derived-state closures are needed.
  * The plain-data state (`wasActive`) is registered into `agentState`
  * (`IAgentStateService`) and read/written through it.
  */
@@ -44,15 +47,23 @@ export class PlanModeInjection extends Service {
 
     this._register(
       dynamicInjector.register(PLAN_MODE_INJECTION_VARIANT, async ({ lastInjectedAt: injectedAt }) => {
-        const data = await this.plan.status();
-        if (data === null) {
+        // The steady-state branches only need the plan file path, so read it
+        // from the replayed wire state synchronously — no disk I/O per step.
+        const planFilePath = this.plan.currentPlanFilePath();
+        if (planFilePath === null) {
           if (!this.states.get(planWasActiveKey)) return undefined;
           this.states.set(planWasActiveKey, false);
           return PLAN_MODE_EXIT_REMINDER;
         }
-        const planFilePath = data.path;
         if (!this.states.get(planWasActiveKey)) {
           this.states.set(planWasActiveKey, true);
+          // Only the active transition needs the plan content, to pick the
+          // re-entry reminder over the full reminder. Read it exactly once.
+          const data = await this.plan.status();
+          if (data === null) {
+            this.states.set(planWasActiveKey, false);
+            return PLAN_MODE_EXIT_REMINDER;
+          }
           if (data.content.trim().length > 0) {
             return reentryReminder(planFilePath);
           }

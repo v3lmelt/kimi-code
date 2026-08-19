@@ -56,10 +56,14 @@ export class EffortSelectorComponent extends Container implements Focusable {
     }
     if (matchesKey(data, Key.left)) {
       this.activeIndex = Math.max(0, this.activeIndex - 1);
+      // Version-cache: render output depends on activeIndex, so a bare
+      // mutation would let a parent container serve its cached lines.
+      this.bump();
       return;
     }
     if (matchesKey(data, Key.right)) {
       this.activeIndex = Math.min(this.opts.efforts.length - 1, this.activeIndex + 1);
+      this.bump();
       return;
     }
     if (matchesKey(data, Key.alt('s')) && this.opts.onSessionOnlySelect !== undefined) {
@@ -91,7 +95,13 @@ export class EffortSelectorComponent extends Container implements Focusable {
 
     const segments = this.opts.efforts.map((effort, index) => {
       const label = effortLabel(effort);
-      return index === this.activeIndex
+      const isActive = index === this.activeIndex;
+      // The virtual ultracode segment keeps the yellow effortUltra hue when it
+      // is the active pick, so it reads as the special mode switch it is.
+      if (effort === 'ultracode' && isActive) {
+        return currentTheme.boldFg('effortUltra', `[ ${label} ]`);
+      }
+      return isActive
         ? currentTheme.boldFg('primary', `[ ${label} ]`)
         : currentTheme.fg('text', `  ${label}  `);
     });

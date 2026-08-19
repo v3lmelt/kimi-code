@@ -19,8 +19,8 @@ import type { Tool } from '#/tool';
 import type { TokenUsage } from '#/usage';
 import { ApiError as GoogleApiError, GoogleGenAI as GenAIClient } from '@google/genai';
 import { mergeConsecutiveUserMessages } from './merge-user-messages';
-
 import { requireProviderApiKey, resolveAuthBackedClient } from './request-auth';
+import { parseToolCallArguments } from './tool-arguments';
 
 /**
  * Normalize a Google GenAI (Gemini) `finishReason` value to the unified
@@ -285,17 +285,7 @@ function messageToGoogleGenAI(message: Message): GoogleContent {
   for (const toolCall of message.toolCalls) {
     let args: Record<string, unknown> = {};
     if (toolCall.arguments) {
-      try {
-        const parsed: unknown = JSON.parse(toolCall.arguments);
-        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-          args = parsed as Record<string, unknown>;
-        } else {
-          throw new ChatProviderError('Tool call arguments must be a JSON object.');
-        }
-      } catch (error) {
-        if (error instanceof ChatProviderError) throw error;
-        throw new ChatProviderError('Tool call arguments must be valid JSON.');
-      }
+      args = parseToolCallArguments(toolCall.arguments);
     }
 
     const functionCallPart: GooglePart = {
@@ -921,6 +911,7 @@ export class GoogleGenAIChatProvider implements ChatProvider {
         if (this._vertexai) return this._buildClient(this._apiKey);
         return this._buildClient(requireProviderApiKey('GoogleGenAIChatProvider', a, this._apiKey));
       },
+      this,
     );
   }
 

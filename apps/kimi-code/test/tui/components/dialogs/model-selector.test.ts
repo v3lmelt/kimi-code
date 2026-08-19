@@ -424,13 +424,16 @@ describe('ModelSelectorComponent', () => {
       onCancel: vi.fn(),
     });
 
-    // high -> max (Right), then clamp on a second Right.
+    // segments: ['off','low','high','max','ultracode']
+    // high -> max -> ultracode (Right), then clamp on a third Right.
+    picker.handleInput(RIGHT);
     picker.handleInput(RIGHT);
     picker.handleInput(RIGHT);
     picker.handleInput('\r');
-    expect(onSelect).toHaveBeenLastCalledWith({ alias: 'kimi', thinking: 'max' });
+    expect(onSelect).toHaveBeenLastCalledWith({ alias: 'kimi', thinking: 'ultracode' });
 
-    // max -> high -> low -> off (Left x3), then clamp on another Left.
+    // ultracode -> max -> high -> low -> off (Left x4), then clamp on another Left.
+    picker.handleInput(LEFT);
     picker.handleInput(LEFT);
     picker.handleInput(LEFT);
     picker.handleInput(LEFT);
@@ -457,11 +460,12 @@ describe('ModelSelectorComponent', () => {
     // The active effort is still highlighted.
     expect(strip(raw)).toContain('[ High ]');
 
-    // Cycling clamps at the last effort and never reaches Off.
+    // segments: ['low','high','max','ultracode']; cycling clamps at ultracode.
     picker.handleInput(RIGHT); // high -> max
-    picker.handleInput(RIGHT); // clamp at max
+    picker.handleInput(RIGHT); // max -> ultracode
+    picker.handleInput(RIGHT); // clamp at ultracode
     picker.handleInput('\r');
-    expect(onSelect).toHaveBeenLastCalledWith({ alias: 'kimi', thinking: 'max' });
+    expect(onSelect).toHaveBeenLastCalledWith({ alias: 'kimi', thinking: 'ultracode' });
   });
 
   it('defaults an effort model without a current level to its defaultEffort', () => {

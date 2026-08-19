@@ -48,6 +48,8 @@ import type { ThinkingEffort } from '#/kosong/contract/provider';
 import type { ModelCapability } from '#/kosong/contract/capability';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
 import { IModelService } from '#/kosong/model/model';
+import { ISessionToolPolicy } from '#/session/sessionToolPolicy/sessionToolPolicy';
+import { ISessionToolPolicyGate } from '#/session/sessionToolPolicyGate/sessionToolPolicyGate';
 import {
   type ModelRequestEvent,
   type ModelRequestInput,
@@ -174,7 +176,7 @@ function createService(
   };
   const usage = { record: () => undefined, status: () => ({}) };
   const context = { get: () => history };
-  const tools = { list: () => [] };
+  const tools = { list: () => [], revision: 0 };
   const config: Partial<IConfigService> = {
     get: (() => undefined) as IConfigService['get'],
   };
@@ -217,6 +219,14 @@ function createService(
   ix.stub(IConfigService, config);
   ix.stub(ILogService, log);
   ix.stub(ITelemetryService, telemetry);
+  ix.stub(ISessionToolPolicy, {
+    disabledTools: () => [],
+    onDidChange: () => toDisposable(() => {}),
+  });
+  ix.stub(ISessionToolPolicyGate, {
+    disabledTools: [],
+    onDidChange: () => toDisposable(() => {}),
+  });
   ix.stub(IModelCatalog, {
     _serviceBrand: undefined,
     get: () => requester.model,

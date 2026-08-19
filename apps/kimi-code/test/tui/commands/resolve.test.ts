@@ -61,6 +61,8 @@ describe('resolveSlashCommandInput', () => {
       name: 'experiments',
       args: '',
     });
+    expect(resolve('/usage')).toMatchObject({ kind: 'builtin', name: 'usage', args: '' });
+    expect(resolve('/context')).toMatchObject({ kind: 'builtin', name: 'context', args: '' });
   });
 
   it('blocks idle-only built-ins while streaming', () => {

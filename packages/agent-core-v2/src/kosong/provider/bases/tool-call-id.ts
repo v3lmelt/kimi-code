@@ -23,6 +23,36 @@ export function sanitizeOpenAIResponsesCallId(id: string, maxLength?: number): s
   return sanitizeToolCallId(callId ?? id, maxLength);
 }
 
+/** Per-message half of `normalizeToolCallIdsForProvider`: applies a
+ *  history-wide id map to one message. Returns the message unchanged when no
+ *  id needs rewriting. */
+export function normalizeToolCallIdOnMessage(
+  message: Message,
+  mappedIds: ReadonlyMap<string, string>,
+): Message {
+  let messageChanged = false;
+  let toolCalls = message.toolCalls;
+
+  if (message.toolCalls.length > 0) {
+    toolCalls = message.toolCalls.map((toolCall) => {
+      const mappedId = mappedIds.get(toolCall.id);
+      if (mappedId === undefined || mappedId === toolCall.id) return toolCall;
+      messageChanged = true;
+      return { ...toolCall, id: mappedId } satisfies ToolCall;
+    });
+  }
+
+  const toolCallId =
+    message.toolCallId === undefined ? undefined : mappedIds.get(message.toolCallId);
+  const mappedToolCallId = toolCallId ?? message.toolCallId;
+  if (mappedToolCallId !== message.toolCallId) {
+    messageChanged = true;
+  }
+
+  if (!messageChanged) return message;
+  return { ...message, toolCalls, toolCallId: mappedToolCallId };
+}
+
 export function normalizeToolCallIdsForProvider(
   messages: Message[],
   policy: ToolCallIdPolicy,
@@ -33,34 +63,16 @@ export function normalizeToolCallIdsForProvider(
   const mappedIds = buildToolCallIdMap(rawIds, policy);
   let changed = false;
   const normalizedMessages = messages.map((message) => {
-    let messageChanged = false;
-    let toolCalls = message.toolCalls;
-
-    if (message.toolCalls.length > 0) {
-      toolCalls = message.toolCalls.map((toolCall) => {
-        const mappedId = mappedIds.get(toolCall.id);
-        if (mappedId === undefined || mappedId === toolCall.id) return toolCall;
-        messageChanged = true;
-        return { ...toolCall, id: mappedId } satisfies ToolCall;
-      });
-    }
-
-    const toolCallId =
-      message.toolCallId === undefined ? undefined : mappedIds.get(message.toolCallId);
-    const mappedToolCallId = toolCallId ?? message.toolCallId;
-    if (mappedToolCallId !== message.toolCallId) {
-      messageChanged = true;
-    }
-
-    if (!messageChanged) return message;
-    changed = true;
-    return { ...message, toolCalls, toolCallId: mappedToolCallId };
+    const normalized = normalizeToolCallIdOnMessage(message, mappedIds);
+    if (normalized !== message) changed = true;
+    return normalized;
   });
 
   return changed ? normalizedMessages : messages;
 }
 
-function collectToolCallIds(messages: Message[]): string[] {
+/** Collects every raw tool-call id in the history, first-seen order. */
+export function collectToolCallIds(messages: readonly Message[]): string[] {
   const ids: string[] = [];
   const seen = new Set<string>();
   const append = (id: string): void => {
@@ -81,7 +93,13 @@ function collectToolCallIds(messages: Message[]): string[] {
   return ids;
 }
 
-function buildToolCallIdMap(rawIds: string[], policy: ToolCallIdPolicy): Map<string, string> {
+/** Builds the history-wide raw→normalized id map (identity first, then
+ *  sanitized + uniqueness-suffixed). Deterministic and prefix-stable: ids of
+ *  earlier messages keep their mapping when the history grows by appending. */
+export function buildToolCallIdMap(
+  rawIds: readonly string[],
+  policy: ToolCallIdPolicy,
+): Map<string, string> {
   const mappedIds = new Map<string, string>();
   const usedIds = new Set<string>();
 

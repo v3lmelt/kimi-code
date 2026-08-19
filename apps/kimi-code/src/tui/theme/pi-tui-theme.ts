@@ -10,10 +10,10 @@
 
 import type { MarkdownTheme, EditorTheme } from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
-import { highlight, supportsLanguage } from 'cli-highlight';
+import { supportsLanguage } from 'cli-highlight';
 
+import { baseLanguage, highlightCached } from '#/tui/components/media/code-highlight';
 import { currentTheme } from './theme';
-import { codeHighlightTheme } from './highlight-theme';
 
 // pi-tui's renderer emits literal "### " / "#### " / ... markers for h3-h6
 // headings (h1/h2 are rendered without the `#` prefix). The prefix arrives
@@ -22,6 +22,22 @@ import { codeHighlightTheme } from './highlight-theme';
 // "### Title" and reads like unparsed markdown.
 // eslint-disable-next-line no-control-regex -- intentionally matches the ESC byte that opens ANSI SGR sequences.
 const HEADING_HASH_PREFIX = /^((?:\u001B\[[0-9;]*m)*)#{1,6}[ \t]+/;
+
+/**
+ * Blockquote background: a subtle dim bar behind quote content, picked from the
+ * active palette's text brightness so it stays readable in both themes.
+ */
+const QUOTE_BG_DARK = '#1E1E1E';
+const QUOTE_BG_LIGHT = '#ECECEC';
+
+function quoteBackgroundColor(): string {
+  const hex = currentTheme.color('text');
+  const r = parseInt(hex.slice(1, 3), 16) / 255;
+  const g = parseInt(hex.slice(3, 5), 16) / 255;
+  const b = parseInt(hex.slice(5, 7), 16) / 255;
+  const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return luma > 0.5 ? QUOTE_BG_DARK : QUOTE_BG_LIGHT;
+}
 
 export function createMarkdownTheme(options?: { transient?: boolean }): MarkdownTheme {
   const transient = options?.transient === true;
@@ -34,8 +50,10 @@ export function createMarkdownTheme(options?: { transient?: boolean }): Markdown
     code: (text) => chalk.hex(currentTheme.color('primary'))(text),
     codeBlock: (text) => text,
     codeBlockBorder: (text) => chalk.hex(currentTheme.color('textMuted'))(text),
+    codeLanguageLabel: (text) => chalk.hex(currentTheme.color('textMuted'))(text),
     quote: (text) => chalk.hex(currentTheme.color('textDim'))(text),
-    quoteBorder: (text) => chalk.hex(currentTheme.color('textDim'))(text),
+    quoteBorder: (text) => chalk.hex(currentTheme.color('textMuted'))(text),
+    quoteBg: (text) => chalk.bgHex(quoteBackgroundColor())(text),
     hr: (text) => chalk.hex(currentTheme.color('border'))(text),
     // Match the assistant-message bullet so list markers read like a reply
     // prefix. Ordered lists arrive as "1. " / "2. " and are left
@@ -48,12 +66,12 @@ export function createMarkdownTheme(options?: { transient?: boolean }): Markdown
     highlightCode: (code: string, lang?: string) => {
       if (transient) return code.split('\n');
 
-      const normalizedLang = lang?.trim().toLowerCase();
-      const language =
-        normalizedLang !== undefined && supportsLanguage(normalizedLang) ? normalizedLang : 'text';
+      const normalizedLang = baseLanguage(lang);
+      const language = normalizedLang !== undefined && supportsLanguage(normalizedLang) ? normalizedLang : 'text';
       try {
-        const highlighted = highlight(code, { language, ignoreIllegals: true, theme: codeHighlightTheme });
-        return highlighted.split('\n');
+        // Route through the shared LRU cache (code-highlight) so markdown code
+        // blocks reuse results across re-renders instead of re-tokenizing.
+        return highlightCached(code, language).split('\n');
       } catch {
         return code.split('\n');
       }

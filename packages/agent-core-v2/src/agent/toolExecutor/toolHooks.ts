@@ -6,13 +6,24 @@
  *
  * - `onBeforeExecuteTool` (veto event, `BeforeToolExecuteEvent`): listeners
  *   answer with `veto(result)` (replace the execution with the given tool
- *   result — an `isError: true` result reads as a denial, anything else as a
- *   short-circuit; first one wins), `allow()` (final pass, ends all
- *   adjudication), `pass(metadata)` (pass with an `executionMetadata` trace,
- *   ends nothing), or `waitUntil(factory)` (defer an adjudication that needs
- *   external input — the fire side invokes the cold factory only when no
- *   listener vetoed or allowed outright, so an ask round-trip can never start
- *   while another listener would have denied). No ids, no ordering contract.
+ *   result — an `isError: true` result is a policy deny that wins on the spot
+ *   and ends adjudication, anything else is a reorderable short-circuit that
+ *   is captured but does not stop the loop, so the permission chain always
+ *   adjudicates and its deny can never be skipped by an earlier plugin success
+ *   veto; the first deny, and the first success, each win), `guardDeny(result)`
+ *   (monotonic guard denial — must be `isError: true`; reserved for the
+ *   non-reorderable permission gate, runs after the waterfall and before
+ *   deferred adjudications, and is authoritative over any plugin
+ *   short-circuit), `allow()` (records a pass flag; later listeners and
+ *   deferred `waitUntil` adjudications still run, so a hook `allow()` cannot
+ *   bypass settings `deny`/`ask` rules), `pass(metadata)` (pass with an
+ *   `executionMetadata` trace, ends nothing), or `waitUntil(factory)` (defer
+ *   an adjudication that needs external input — the fire side invokes the cold
+ *   factory only when no deny vetoed and no plugin short-circuited, so an ask
+ *   round-trip can never start while another listener would have denied the
+ *   call). The waterfall is reorderable; the `guardDeny` segment is monotonic
+ *   and non-reorderable — a plugin's synthetic success can never mask a policy
+ *   deny. No ids.
  * - `onWillExecuteTool` (waitUntil participation event,
  *   `WillExecuteToolEvent`): listeners attach hot promises via
  *   `waitUntil(promise)`; the executor awaits all of them before dispatching
@@ -59,6 +70,7 @@ export interface BeforeExecuteDecision {
 
 export interface BeforeToolExecuteEvent extends ResolvedToolExecutionHookContext {
   veto(result: ExecutableToolResult): void;
+  guardDeny(result: ExecutableToolResult): void;
   allow(): void;
   pass(metadata?: unknown): void;
   waitUntil(factory: () => Promise<BeforeExecuteDecision | undefined>): void;

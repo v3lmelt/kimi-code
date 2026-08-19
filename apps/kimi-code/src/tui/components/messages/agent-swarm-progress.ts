@@ -1,5 +1,6 @@
 import { truncateToWidth, visibleWidth, type Component } from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
+import type { TokenUsage } from '@moonshot-ai/kimi-code-sdk';
 
 import {
   AgentSwarmProgressEstimator,
@@ -9,6 +10,7 @@ import { FAILURE_MARK, SUCCESS_MARK } from '#/tui/constant/symbols';
 import { currentTheme } from '#/tui/theme';
 import type { ColorPalette } from '#/tui/theme/colors';
 import { gradientText } from '#/tui/theme/gradient-text';
+import { usageTotal } from '#/utils/usage/usage-format';
 
 const TEXT_CELL_PREFERRED_WIDTH = 30;
 const CELL_GAP = '  ';
@@ -113,6 +115,8 @@ interface AgentSwarmMember {
   ticks: number;
   itemText: string;
   latestModelText: string;
+  startedAtMs?: number;
+  tokens: number;
   completedText?: string;
   failureText?: string;
   cancelledLabelText?: string;
@@ -122,6 +126,22 @@ interface AgentSwarmMember {
   suspendedReason?: string;
   completedAtMs?: number;
   failedAtMs?: number;
+}
+
+/**
+ * Read-only per-member view for external consumers (e.g. the footer agent
+ * rows): what the member is working on, its phase, elapsed start, and token
+ * usage. `startedAtMs` is absent until the member begins running.
+ */
+export interface AgentSwarmMemberSnapshot {
+  readonly id: string;
+  /** Real subagent id once the member is registered (undefined before the
+   *  spawn event lands); lets consumers join per-agent activity data. */
+  readonly agentId?: string;
+  readonly phase: AgentSwarmProgressEstimatorPhase;
+  readonly itemText: string;
+  readonly startedAtMs: number | undefined;
+  readonly tokens: number;
 }
 
 interface AgentSwarmSnapshot {
@@ -200,6 +220,14 @@ export class AgentSwarmProgressComponent implements Component {
   private promptTemplateText = '';
   private activitySpinnerText: (() => string) | undefined;
   private timer: ReturnType<typeof setInterval> | undefined;
+  /** Whether the card is inside the visible terminal viewport. While false,
+   *  the animation timer is stopped and render() emits a frozen frame so an
+   *  off-screen card stops driving full-screen repaints (pi-tui redraws from
+   *  row 0 whenever the first changed line sits above the viewport). */
+  private viewportVisible = true;
+  /** Wall-clock moment captured when the card left the viewport; render()
+   *  uses it instead of Date.now() so the frozen frame is deterministic. */
+  private frozenAtMs = 0;
 
   constructor(options: AgentSwarmProgressOptions) {
     this.description = options.description;
@@ -217,6 +245,24 @@ export class AgentSwarmProgressComponent implements Component {
     if (this.timer === undefined) return;
     clearInterval(this.timer);
     this.timer = undefined;
+  }
+
+  /**
+   * Mark the card as inside / outside the visible viewport. Off-screen cards
+   * stop the 120ms render loop and freeze their frame; making the card visible
+   * again restarts the animation (subject to the usual conditions checked by
+   * `startAnimationIfNeeded`).
+   */
+  setViewportVisible(visible: boolean): void {
+    if (this.viewportVisible === visible) return;
+    this.viewportVisible = visible;
+    if (visible) {
+      this.frozenAtMs = 0;
+      this.startAnimationIfNeeded();
+    } else {
+      this.frozenAtMs = Date.now();
+      this.dispose();
+    }
   }
 
   invalidate(): void {}
@@ -257,6 +303,44 @@ export class AgentSwarmProgressComponent implements Component {
 
   isRequestStreaming(): boolean {
     return !this.inputComplete;
+  }
+
+  /**
+   * Record a member's token usage from a child `agent.status.updated` event.
+   * Cumulative usage (input + output) wins so the footer count reflects
+   * tokens actually consumed and stays monotonic; context tokens are only a
+   * fallback until usage is reported (they measure the live window, which
+   * shrinks on compaction). The displayed value never decreases.
+   */
+  recordMemberUsage(
+    agentId: string,
+    usage: TokenUsage | undefined,
+    contextTokens?: number,
+  ): void {
+    const member = this.findMemberByAgentId(agentId);
+    if (member === undefined) return;
+    const totalTokens = usageTotal(usage);
+    const tokens =
+      totalTokens > 0 ? totalTokens : contextTokens !== undefined && contextTokens > 0
+        ? contextTokens
+        : 0;
+    if (tokens > 0) member.tokens = Math.max(member.tokens, tokens);
+  }
+
+  /**
+   * Read-only snapshot of every member for external consumers (the footer
+   * agent rows). Ordering matches the grid columns; terminal phases are
+   * reported as-is so callers decide whether to skip them.
+   */
+  getMemberSnapshots(): AgentSwarmMemberSnapshot[] {
+    return this.members.map((member) => ({
+      id: member.id,
+      agentId: member.agentId,
+      phase: member.phase,
+      itemText: member.itemText,
+      startedAtMs: member.startedAtMs,
+      tokens: member.tokens,
+    }));
   }
 
   updateArgs(
@@ -456,7 +540,7 @@ export class AgentSwarmProgressComponent implements Component {
       return this.indentLines(lines, outerWidth);
     }
 
-    const nowMs = Date.now();
+    const nowMs = this.viewportVisible ? Date.now() : this.frozenAtMs || Date.now();
     const snapshots = this.members.map((member): AgentSwarmSnapshot => ({
       phase: member.phase,
       ticks: member.ticks,
@@ -534,7 +618,12 @@ export class AgentSwarmProgressComponent implements Component {
   }
 
   private renderActivityPrefix(status: TotalStatus): string {
-    if (this.toolCallActive) return this.activitySpinnerText?.() ?? '';
+    if (this.toolCallActive) {
+      // A hidden card must not sample the live spinner (its frame advances
+      // with wall clock); freeze the status-line prefix instead.
+      if (!this.viewportVisible) return ACTIVITY_SPINNER_PLACEHOLDER;
+      return this.activitySpinnerText?.() ?? '';
+    }
     return activityPrefixForTotalStatus(status, this.colors);
   }
 
@@ -735,6 +824,7 @@ export class AgentSwarmProgressComponent implements Component {
 
   private startAnimationIfNeeded(): void {
     if (this.requestRender === undefined || this.timer !== undefined) return;
+    if (!this.viewportVisible) return;
     if (!this.hasAnimatedMembers()) return;
     const requestRender = this.requestRender;
     this.timer = setInterval(() => {
@@ -766,6 +856,7 @@ export class AgentSwarmProgressComponent implements Component {
   }
 
   private promoteToRunning(member: AgentSwarmMember, nowMs?: number, setTicks = false): void {
+    member.startedAtMs ??= nowMs ?? Date.now();
     if (member.phase === 'pending' || member.phase === 'queued' || member.phase === 'suspended') {
       member.phase = 'running';
       if (nowMs !== undefined) this.progressEstimator.markStarted(member.id, nowMs);
@@ -827,6 +918,7 @@ function createMembers(count: number, phase: AgentSwarmPhase): AgentSwarmMember[
     ticks: 0,
     itemText: '',
     latestModelText: '',
+    tokens: 0,
   }));
 }
 

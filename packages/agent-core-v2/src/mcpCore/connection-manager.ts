@@ -453,6 +453,7 @@ export class McpConnectionManager implements McpConnectionView {
         name: mcpTool.name,
         description: mcpTool.description,
         parameters: assertMcpInputSchema(mcpTool.name, mcpTool.inputSchema),
+        annotations: mcpTool.annotations,
       })),
     };
   }

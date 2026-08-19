@@ -374,6 +374,42 @@ describe('FullCompaction', () => {
     ).toBe(false);
   });
 
+  it('replays the wire prefix verbatim and appends only the instruction', async () => {
+    const ctx = testAgent({ compactionStrategy: alwaysCompactOnce });
+    ctx.configure({
+      provider: CATALOGUED_PROVIDER,
+      modelCapabilities: CATALOGUED_MODEL_CAPABILITIES,
+    });
+    ctx.appendExchange(1, 'old user one', 'old assistant one', 20);
+    ctx.dispatch({
+      type: 'context.append_loop_event',
+      event: { type: 'step.begin', uuid: 'empty-placeholder', turnId: '', step: 2 },
+    });
+    ctx.appendExchange(3, 'old user two', 'old assistant two', 40);
+    // The summarizer must replay the exact wire projection (`context.messages` —
+    // dropOrphanResults only, no synthesis) so the request prefix matches the
+    // most recent wire request and hits the provider's KV cache.
+    const wirePrefix = ctx.agent.context.messages;
+    const compacted = new Promise<void>((resolve) => {
+      ctx.emitter.once('context.apply_compaction', () => {
+        resolve();
+      });
+    });
+
+    ctx.mockNextResponse({ type: 'text', text: 'Compacted summary.' });
+    await ctx.rpc.beginCompaction({ instruction: 'Keep the important test facts.' });
+    await compacted;
+
+    const [compactionCall] = ctx.llmCalls;
+    const history = compactionCall?.history ?? [];
+    // Prefix is byte-identical to the wire projection; only the instruction is new.
+    expect(history.slice(0, -1)).toEqual(wirePrefix);
+    expect(history.at(-1)?.role).toBe('user');
+    expect(history.at(-1)?.content).toEqual([
+      { type: 'text', text: expect.stringContaining('Keep the important test facts.') },
+    ]);
+  });
+
   // Micro compaction is disabled; this scenario is skipped because the feature
   // can no longer be enabled.
   it.skip('micro-compacts old tool results before sending the summary request', async () => {

@@ -9,7 +9,7 @@ export * from './model/task';
 export * from './model/meta';
 export * from './model/prompt';
 export * from './ops/operation';
-export { EMPTY_AGENT_STATE, applyOperation, appendAtOffset } from './ops/apply';
+export { EMPTY_AGENT_STATE, applyOperation, appendAtOffset, findTurn } from './ops/apply';
 export type { AgentState, ApplyResult } from './ops/apply';
 export * from './store/agentTranscript';
 export * from './store/transcriptStore';

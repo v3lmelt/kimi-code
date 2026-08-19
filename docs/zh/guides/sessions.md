@@ -1,6 +1,6 @@
 # 会话与上下文
 
-Kimi Code CLI 把每次对话持久化为一个「会话」，保留消息历史和元数据，可以随时关闭终端后再回来继续。本页介绍如何恢复会话、管理上下文，以及导出和派生会话。
+Hasu CLI 把每次对话持久化为一个「会话」，保留消息历史和元数据，可以随时关闭终端后再回来继续。本页介绍如何恢复会话、管理上下文，以及导出和派生会话。
 
 ## 会话存储
 
@@ -30,24 +30,24 @@ Kimi Code CLI 把每次对话持久化为一个「会话」，保留消息历史
 
 ## 启动与恢复会话
 
-每次直接运行 `kimi` 都会创建新会话。以下方式可以恢复历史会话：
+每次直接运行 `hasu` 都会创建新会话。以下方式可以恢复历史会话：
 
 **继续当前目录最近的会话：**
 
 ```sh
-kimi --continue
+hasu --continue
 ```
 
 **恢复指定会话（通过 ID）：**
 
 ```sh
-kimi --session abc123
+hasu --session abc123
 ```
 
 **交互式浏览历史会话并选择：**
 
 ```sh
-kimi --session
+hasu --session
 ```
 
 ::: warning 注意
@@ -65,7 +65,7 @@ kimi --session
 
 ## 上下文压缩
 
-对话变长时，Kimi Code CLI 会在上下文接近窗口上限时自动压缩历史消息，释放 token 空间。也可以随时手动触发：
+对话变长时，Hasu CLI 会在上下文接近窗口上限时自动压缩历史消息，释放 token 空间。也可以随时手动触发：
 
 ```
 /compact
@@ -89,28 +89,24 @@ fork 后你仍停留在原会话，对话不受影响、可以直接继续；派
 
 ## 导出会话
 
-用 `kimi export` 把会话打包为 ZIP，适合分享、归档或提交问题反馈：
+用 `hasu export` 把会话打包为 ZIP，适合分享、归档或提交问题反馈：
 
 ```sh
-kimi export <sessionId>
+hasu export <sessionId>
 ```
 
 不传 `sessionId` 时导出当前目录最近的会话（有交互式确认，加 `-y` 跳过）。用 `-o` 指定输出路径：
 
 ```sh
-kimi export <sessionId> -o ~/Desktop/my-session.zip
+hasu export <sessionId> -o ~/Desktop/my-session.zip
 ```
 
 导出包含会话目录下的所有文件，包括诊断日志。全局诊断日志（`~/.kimi-code/logs/kimi-code.log`）默认也会打包；如不需要，加 `--no-include-global-log` 排除。
 
 也可以在 TUI 内导出，无需离开交互界面：
 
-- **`/export-debug-zip`**：产生与 `kimi export` 相同的调试 ZIP。
-- **`/export-md`**（别名 `/export`）：导出为人类可读的 Markdown 对话记录，适合分享或存档。可选接收路径参数；不带参数时写入工作目录下的 `kimi-export-<short-id>-<timestamp>.md`。
-
-在 web UI 中，`/export` 会把当前会话下载为诊断 ZIP。压缩包包含持久化的会话数据、诊断日志，以及记录浏览器关键事件且大小有上限、只含元数据的 `logs/kimi-web.jsonl`；提示词正文、WebSocket 内容和 console 参数不会写入这份浏览器日志。这里的 web 命令与上面的 TUI `/export` 别名行为不同。
-
-浏览器需要先把 ZIP 缓存在内存中再保存，因此 web 导出上限为 64 MiB。更大的会话请使用 `kimi export <sessionId>` 或 TUI 的 `/export-debug-zip`。
+- **`/export-debug-zip`**：产生与 `hasu export` 相同的调试 ZIP。
+- **`/export-md`**（别名 `/export`）：导出为人类可读的 Markdown 对话记录，适合分享或存档。可选接收路径参数；不带参数时写入工作目录下的 `hasu-export-<short-id>-<timestamp>.md`。
 
 ::: tip 提示
 导出文件可能包含代码、命令输出和路径等敏感信息，分享前请先确认内容。
@@ -119,4 +115,4 @@ kimi export <sessionId> -o ~/Desktop/my-session.zip
 ## 下一步
 
 - [数据路径](../configuration/data-locations.md) — 会话文件的完整目录结构说明
-- [kimi 命令](../reference/kimi-command.md) — `--continue`、`--session`、`export` 等命令的完整参数参考
+- [hasu 命令](../reference/kimi-command.md) — `--continue`、`--session`、`export` 等命令的完整参数参考

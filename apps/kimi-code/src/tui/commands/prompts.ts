@@ -201,6 +201,8 @@ export async function promptModelSelectionForOpenPlatform(
       maxContextSize: m.contextLength,
       capabilities: capabilitiesForModel(m),
       displayName: m.displayName,
+      supportEfforts: m.supportEfforts === undefined ? undefined : [...m.supportEfforts],
+      defaultEffort: m.defaultEffort,
     };
   }
   const selection = await runModelSelector(host, modelDict);

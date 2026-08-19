@@ -104,7 +104,7 @@ describe('handleVis', () => {
       waitForShutdown: vi.fn(async () => {}),
     });
     await handleVis(deps, { open: true, port: 4321 });
-    expect(errored.join('')).toContain('Failed to start kimi vis');
+    expect(errored.join('')).toContain('Failed to start hasu vis');
     expect(errored.join('')).toContain('EADDRINUSE');
     expect(deps.exit).toHaveBeenCalledWith(1);
     // Nothing past the failed start should run.

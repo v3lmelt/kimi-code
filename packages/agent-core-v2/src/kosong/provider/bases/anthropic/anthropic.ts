@@ -84,7 +84,15 @@ import {
 } from './anthropic-profile';
 import { mergeConsecutiveUserMessages } from '../merge-user-messages';
 import { mergeRequestHeaders, resolveAuthBackedClient } from '../request-auth';
-import { normalizeToolCallIdsForProvider, sanitizeToolCallId } from '../tool-call-id';
+import { parseToolCallArguments } from '../tool-arguments';
+import {
+  buildToolCallIdMap,
+  collectToolCallIds,
+  normalizeToolCallIdOnMessage,
+  normalizeToolCallIdsForProvider,
+  sanitizeToolCallId,
+} from '../tool-call-id';
+import { splitSystemPromptAtBoundary } from '#/kosong/provider/systemPromptBoundary';
 
 function normalizeAnthropicStopReason(raw: string | null | undefined): {
   finishReason: FinishReason | null;
@@ -308,6 +316,23 @@ function injectCacheControlOnLastBlock(messages: MessageParam[]): void {
   }
 }
 
+// Split the rendered system prompt at the static/dynamic boundary: the static
+// prefix (identity, rules, guidance) carries the cache breakpoint and is shared
+// across profiles / subagent spawns, while the runtime block (date, cwd,
+// AGENTS.md, skills, plugins) stays uncached and re-renders per spawn.
+function buildSystemBlocks(systemPrompt: string): TextBlockParam[] | undefined {
+  if (systemPrompt.length === 0) return undefined;
+  const { staticText, dynamicText } = splitSystemPromptAtBoundary(systemPrompt);
+  const blocks: TextBlockParam[] = [];
+  if (staticText.length > 0) {
+    blocks.push({ type: 'text', text: staticText, cache_control: CACHE_CONTROL });
+  }
+  if (dynamicText.length > 0) {
+    blocks.push({ type: 'text', text: dynamicText });
+  }
+  return blocks.length > 0 ? blocks : undefined;
+}
+
 function isToolResultOnly(message: MessageParam): boolean {
   if (message.role !== 'user') return false;
   const content = message.content;
@@ -485,17 +510,7 @@ function convertMessage(message: Message, model: string): MessageParam {
     for (const tc of message.toolCalls) {
       let toolInput: Record<string, unknown> = {};
       if (tc.arguments) {
-        try {
-          const parsed: unknown = JSON.parse(tc.arguments);
-          if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-            toolInput = parsed as Record<string, unknown>;
-          } else {
-            throw new ChatProviderError('Tool call arguments must be a JSON object.');
-          }
-        } catch (error) {
-          if (error instanceof ChatProviderError) throw error;
-          throw new ChatProviderError('Tool call arguments must be valid JSON.');
-        }
+        toolInput = parseToolCallArguments(tc.arguments);
       }
       blocks.push({
         type: 'tool_use',
@@ -826,6 +841,17 @@ export class AnthropicChatProvider implements ChatProvider {
   private readonly _explicitMaxTokens: boolean;
   private readonly _hooks: AnthropicHooks | undefined;
 
+  /** Incremental history-conversion cache: the converted (pre-merge,
+   *  pre-injection) `MessageParam[]` plus the source `Message[]` identities it
+   *  was produced from. When a `generate()` history extends the cached prefix
+   *  (same message references, appended tail), only the tail is re-converted;
+   *  any prefix change — compaction, undo, or a projection that rebuilds the
+   *  message objects — fails the identity check and falls back to the full
+   *  conversion path. */
+  private _historyConversionCache:
+    | { readonly sources: readonly Message[]; readonly converted: readonly MessageParam[] }
+    | undefined;
+
   constructor(options: AnthropicOptions) {
     this._model = options.model;
     this._stream = options.stream ?? true;
@@ -860,41 +886,83 @@ export class AnthropicChatProvider implements ChatProvider {
     return this._generationKwargs.max_tokens;
   }
 
+  /** Converts the raw history into provider `MessageParam[]` (filtered,
+   *  id-normalized, converted, kept). Reuses the cached conversion of the
+   *  unchanged prefix when the history grew by appending; any prefix change
+   *  falls back to the full path. The merge and cache-control injection stay
+   *  in `generate` — both are position-sensitive over the whole message list. */
+  private convertHistory(history: Message[]): MessageParam[] {
+    const filtered = history.filter((msg) => !isToolDeclarationOnlyMessage(msg));
+    const cache = this._historyConversionCache;
+    const prefix = cache?.sources;
+    const reusePrefix =
+      prefix !== undefined &&
+      filtered.length >= prefix.length &&
+      prefix.every((source, index) => source === filtered[index]);
+
+    if (reusePrefix && cache !== undefined) {
+      // A previous generate may have injected cache_control into the last
+      // block of the last cached message (injection is position-driven: only
+      // the final message's last block may carry it). Strip it before the
+      // merge below — the fresh injection re-applies it to whatever block is
+      // actually last this time, keeping the wire payload identical to a full
+      // re-conversion.
+      const lastCached = cache.converted.at(-1);
+      if (lastCached !== undefined && Array.isArray(lastCached.content)) {
+        const lastBlock = lastCached.content.at(-1) as
+          | { cache_control?: unknown }
+          | undefined;
+        if (lastBlock?.cache_control !== undefined) delete lastBlock.cache_control;
+      }
+
+      const tail = filtered.slice(prefix.length);
+      let convertedTail: MessageParam[] = [];
+      if (tail.length > 0) {
+        // The id map must cover the whole history (id uniqueness is global),
+        // but it is prefix-stable, so only the tail needs re-mapping.
+        const mappedIds = buildToolCallIdMap(
+          collectToolCallIds(filtered),
+          ANTHROPIC_TOOL_CALL_ID_POLICY,
+        );
+        convertedTail = tail
+          .map((msg) => normalizeToolCallIdOnMessage(msg, mappedIds))
+          .map((msg) => convertMessage(msg, this._model))
+          .filter(shouldKeepConvertedMessage);
+      }
+      const converted = [...cache.converted, ...convertedTail];
+      this._historyConversionCache = { sources: filtered, converted };
+      return converted;
+    }
+
+    const converted = normalizeToolCallIdsForProvider(
+      filtered,
+      ANTHROPIC_TOOL_CALL_ID_POLICY,
+    )
+      .map((msg) => convertMessage(msg, this._model))
+      .filter(shouldKeepConvertedMessage);
+    this._historyConversionCache = { sources: filtered, converted };
+    return converted;
+  }
+
   async generate(
     systemPrompt: string,
     tools: Tool[],
     history: Message[],
     options?: GenerateOptions,
   ): Promise<StreamedMessage> {
-    const system: TextBlockParam[] | undefined = systemPrompt
-      ? [
-          {
-            type: 'text',
-            text: systemPrompt,
-            cache_control: CACHE_CONTROL,
-          } as TextBlockParam,
-        ]
-      : undefined;
+    const system: TextBlockParam[] | undefined = buildSystemBlocks(systemPrompt);
 
-    const messages = mergeConsecutiveUserMessages(
-      normalizeToolCallIdsForProvider(
-        history.filter((msg) => !isToolDeclarationOnlyMessage(msg)),
-        ANTHROPIC_TOOL_CALL_ID_POLICY,
-      )
-        .map((msg) => convertMessage(msg, this._model))
-        .filter(shouldKeepConvertedMessage),
-      {
-        isUser: (message) => message.role === 'user',
-        isToolResultOnly,
-        merge: (last, next) => ({
-          ...last,
-          content: [
-            ...(last.content as ContentBlockParam[]),
-            ...(next.content as ContentBlockParam[]),
-          ],
-        }),
-      },
-    );
+    const messages = mergeConsecutiveUserMessages(this.convertHistory(history), {
+      isUser: (message) => message.role === 'user',
+      isToolResultOnly,
+      merge: (last, next) => ({
+        ...last,
+        content: [
+          ...(last.content as ContentBlockParam[]),
+          ...(next.content as ContentBlockParam[]),
+        ],
+      }),
+    });
 
     injectCacheControlOnLastBlock(messages);
 
@@ -1112,6 +1180,7 @@ export class AnthropicChatProvider implements ChatProvider {
       { cachedClient: this._client, clientFactory: this._clientFactory },
       auth,
       (a) => this._buildClient(this._requireApiKey(a)),
+      this,
     );
   }
 

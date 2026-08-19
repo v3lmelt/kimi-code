@@ -151,6 +151,25 @@ export type {
 } from './open-platform';
 
 export {
+  applyOpenCodeGoConfig,
+  OPENCODE_GO_API_KEY_ENV,
+  OPENCODE_GO_DEFAULT_BASE_URL,
+  OPENCODE_GO_MODELS,
+  OPENCODE_GO_PROVIDER_ID,
+  openCodeGoCapabilities,
+  removeOpenCodeGoConfig,
+  toManagedModelInfo,
+} from './opencode-go';
+export type {
+  ApplyOpenCodeGoConfigResult,
+  OpenCodeGoModelDef,
+  OpenCodeGoProtocol,
+} from './opencode-go';
+
+export { fetchGoUsage } from './go-usage';
+export type { GoUsageFetchResult, GoUsageWindow, ParsedGoUsage } from './go-usage';
+
+export {
   applyCustomRegistryEntries,
   applyCustomRegistryProvider,
   capabilitiesFromCustomEntry,

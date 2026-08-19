@@ -44,11 +44,46 @@ export interface AppendLogOptions {
   readonly onError?: (error: unknown) => void;
 }
 
+/**
+ * Result of an offset-based incremental read (`readFrom`).
+ *
+ * `nextByte` is the byte offset just past the last complete line returned
+ * (the `'\n'` of its terminating newline, or EOF for a final line without
+ * one) — pass it back as the next `fromByte` to read only the delta.
+ *
+ * `truncated` reports that the log is now SHORTER than `fromByte` — an
+ * atomic `rewrite` replaced it with less content. The caller's fold state is
+ * then stale and must be rebuilt from `fromByte = 0`; `records` is empty and
+ * `nextByte` is meaningless in that case.
+ */
+export interface AppendLogReadFromResult<R> {
+  readonly records: readonly R[];
+  readonly nextByte: number;
+  readonly truncated: boolean;
+}
+
 export interface IAppendLogStore {
   readonly _serviceBrand: undefined;
 
   append<R>(scope: string, key: string, record: R, options?: AppendLogOptions): void;
   read<R>(scope: string, key: string): AsyncIterable<R>;
+  /**
+   * Read the records whose lines start at or after byte `fromByte`.
+   *
+   * `fromByte` must be a line boundary (a `nextByte` returned by a previous
+   * call, or 0); a first line that fails to parse is treated as a torn line
+   * cut by the offset and dropped. Same framing, decoding, and crash
+   * tolerance as `read`: one JSON value per `'\n'`-terminated line, a torn
+   * final line is dropped, corruption elsewhere throws
+   * `AppendLogCorruptedError` (line numbers are relative to this delta, not
+   * the whole log). Unlike `read`, only `[fromByte, size)` bytes are pulled
+   * from storage — the incremental read path.
+   */
+  readFrom<R>(
+    scope: string,
+    key: string,
+    fromByte: number,
+  ): Promise<AppendLogReadFromResult<R>>;
   rewrite<R>(scope: string, key: string, records: readonly R[]): Promise<void>;
   flush(): Promise<void>;
   close(): Promise<void>;

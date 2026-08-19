@@ -1,20 +1,30 @@
-import { describe, expect, it, vi } from 'vitest';
+import { spawn } from 'node:child_process';
+
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { TUIState } from '#/tui/kimi-tui';
 import {
+  buildPowerShellToastScript,
   buildTerminalNotificationSequences,
+  emitSystemNotification,
   emitTerminalNotification,
   formatNotification,
   isInsideTmux,
   notifyTerminalOnce,
   supportsOsc9Notification,
   supportsTerminalProgress,
+  WINDOWS_TOAST_APP_ID,
 } from '#/tui/utils/terminal-notification';
+
+vi.mock('node:child_process', () => ({
+  spawn: vi.fn(() => ({ on: vi.fn() })),
+}));
 
 function makeNotificationState(args: {
   readonly enabled?: boolean;
   readonly condition?: 'unfocused' | 'always';
   readonly focused?: boolean;
+  readonly system?: boolean;
   readonly supportsOsc9?: boolean;
   readonly insideTmux?: boolean;
 } = {}): TUIState {
@@ -23,6 +33,7 @@ function makeNotificationState(args: {
       notifications: {
         enabled: args.enabled ?? true,
         condition: args.condition ?? 'unfocused',
+        system: args.system ?? false,
       },
     },
     terminalState: {
@@ -43,12 +54,12 @@ describe('terminal notification helpers', () => {
 
     emitTerminalNotification(
       terminal,
-      { title: 'Kimi Code', body: 'Approval\nrequired' },
+      { title: 'Hasu', body: 'Approval\nrequired' },
       { supportsOsc9: true, insideTmux: false },
     );
 
     expect(terminal.write).toHaveBeenCalledTimes(1);
-    expect(terminal.write).toHaveBeenCalledWith(']9;Kimi Code: Approval required');
+    expect(terminal.write).toHaveBeenCalledWith(']9;Hasu: Approval required');
   });
 
   it('falls back to a bare BEL when the terminal does not support OSC 9', () => {
@@ -56,7 +67,7 @@ describe('terminal notification helpers', () => {
 
     emitTerminalNotification(
       terminal,
-      { title: 'Kimi Code', body: 'Approval required' },
+      { title: 'Hasu', body: 'Approval required' },
       { supportsOsc9: false, insideTmux: false },
     );
 
@@ -69,12 +80,12 @@ describe('terminal notification helpers', () => {
 
     emitTerminalNotification(
       terminal,
-      { title: 'Kimi Code', body: 'Approval required' },
+      { title: 'Hasu', body: 'Approval required' },
       { supportsOsc9: true, insideTmux: true },
     );
 
     expect(terminal.write).toHaveBeenCalledTimes(1);
-    expect(terminal.write).toHaveBeenCalledWith('Ptmux;]9;Kimi Code: Approval required\\');
+    expect(terminal.write).toHaveBeenCalledWith('Ptmux;]9;Hasu: Approval required\\');
   });
 
   it('skips the tmux wrap when falling back to BEL', () => {
@@ -82,7 +93,7 @@ describe('terminal notification helpers', () => {
 
     emitTerminalNotification(
       terminal,
-      { title: 'Kimi Code', body: 'Approval required' },
+      { title: 'Hasu', body: 'Approval required' },
       { supportsOsc9: false, insideTmux: true },
     );
 
@@ -250,5 +261,92 @@ describe('isInsideTmux', () => {
   it('returns false when TMUX is empty or unset', () => {
     expect(isInsideTmux({ TMUX: '' })).toBe(false);
     expect(isInsideTmux({})).toBe(false);
+  });
+});
+
+describe('Windows system (toast) notifications', () => {
+  beforeEach(() => {
+    vi.mocked(spawn).mockClear();
+  });
+
+  it('builds a self-contained PowerShell script with escaped title/body', () => {
+    const script = buildPowerShellToastScript('Hasu needs you', `It's <done> & "ok"?`);
+
+    expect(script).toContain(`<text>Hasu needs you</text>`);
+    expect(script).toContain(`<text>It's &lt;done&gt; &amp; &quot;ok&quot;?</text>`);
+    expect(script).toContain(WINDOWS_TOAST_APP_ID);
+    expect(script).toContain('CreateToastNotifier');
+  });
+
+  it('spawns a hidden powershell.exe to raise the toast on Windows', () => {
+    emitSystemNotification({ title: 'Hasu', body: 'Approval required' }, 'win32');
+
+    expect(spawn).toHaveBeenCalledTimes(1);
+    const [command, args] = vi.mocked(spawn).mock.calls[0]!;
+    expect(command).toBe('powershell.exe');
+    expect((args as string[])).toContain('-NoProfile');
+    expect((args as string[])).toContain('-Command');
+    // -WindowStyle Hidden would crash spawned powershell.exe; the console is
+    // hidden via CREATE_NO_WINDOW instead.
+    expect((args as string[])).not.toContain('-WindowStyle');
+  });
+
+  it('does nothing on non-Windows platforms', () => {
+    emitSystemNotification({ title: 'Hasu' }, 'linux');
+    emitSystemNotification({ title: 'Hasu' }, 'darwin');
+
+    expect(spawn).not.toHaveBeenCalled();
+  });
+});
+
+describe('notifyTerminalOnce system-toast integration', () => {
+  beforeEach(() => {
+    vi.mocked(spawn).mockClear();
+  });
+
+  function forceWin32(): () => void {
+    const platform = vi.spyOn(process, 'platform', 'get').mockReturnValue('win32');
+    return () => platform.mockRestore();
+  }
+
+  it('also raises a Windows toast when notifications.system is enabled', () => {
+    const restore = forceWin32();
+    try {
+      const state = makeNotificationState({ system: true });
+
+      notifyTerminalOnce(state, 'approval:req-1', { title: 'Approval required' });
+
+      expect(state.terminal.write).toHaveBeenCalledTimes(1);
+      expect(spawn).toHaveBeenCalledTimes(1);
+    } finally {
+      restore();
+    }
+  });
+
+  it('keeps terminal notifications only when notifications.system is off', () => {
+    const restore = forceWin32();
+    try {
+      const state = makeNotificationState();
+
+      notifyTerminalOnce(state, 'approval:req-1', { title: 'Approval required' });
+
+      expect(state.terminal.write).toHaveBeenCalledTimes(1);
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
+  });
+
+  it('respects the focus condition for the system toast too', () => {
+    const restore = forceWin32();
+    try {
+      const state = makeNotificationState({ system: true, focused: true });
+
+      notifyTerminalOnce(state, 'approval:req-1', { title: 'Approval required' });
+
+      expect(spawn).not.toHaveBeenCalled();
+    } finally {
+      restore();
+    }
   });
 });

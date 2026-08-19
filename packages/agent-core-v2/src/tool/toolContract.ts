@@ -12,7 +12,11 @@
  * run non-conflicting calls concurrently (together with their conflict
  * semantics), and the `isMcpToolName` name predicate. The `stopTurn` /
  * `stopBatchAfterThis` fields are internal loop-control hints stripped
- * before persistence. No scoped service.
+ * before persistence. Model-visible tool schemas are projected centrally
+ * through the toolSelect domain's `toModelToolSchema` allowlist
+ * (name/description/parameters only); execution metadata — `accesses`,
+ * `approvalRule`, `execute`, `deferred` — must never reach the provider. No
+ * scoped service.
  */
 
 import type { ContentPart, ToolCall } from '#/kosong/contract/message';

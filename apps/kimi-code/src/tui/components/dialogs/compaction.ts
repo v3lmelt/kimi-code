@@ -2,15 +2,12 @@
  * Renders a compaction block in the transcript.
  *
  * Lifecycle:
- *   - constructed on `compaction.started` → blinking '✻' +
- *     "Compacting conversation…" and optional custom instruction
+ *   - constructed on `compaction.started` → static '✻ Compacting conversation…'
+ *     (live animation lives on the activity-pane spinner)
  *   - `markDone()` on `compaction.completed` → dim
  *     "✻ Conversation compacted (X → Y tokens) (ctrl+o for history)"
  *   - `markCanceled()` on `compaction.cancelled` → solid warning bullet +
  *     "Compaction cancelled"
- *
- * Bullet animation mirrors `ToolCallComponent` (500ms blink) so the user
- * reads the same "work in progress" signal across the UI.
  */
 
 import { Container, Text, Spacer } from '@moonshot-ai/pi-tui';
@@ -19,16 +16,12 @@ import type { TUI } from '@moonshot-ai/pi-tui';
 import { STATUS_BULLET, TEARDROP } from '#/tui/constant/symbols';
 import { currentTheme } from '#/tui/theme';
 
-const BLINK_INTERVAL = 700;
-
 export class CompactionComponent extends Container {
   private readonly ui: TUI | undefined;
   private readonly headerText: Text;
   private instructionText: Text | undefined;
   private readonly instruction: string | undefined;
   private readonly tip: string | undefined;
-  private blinkOn = true;
-  private blinkTimer: ReturnType<typeof setInterval> | null = null;
   private done = false;
   private canceled = false;
   private tokensBefore: number | undefined;
@@ -49,8 +42,6 @@ export class CompactionComponent extends Container {
     this.headerText = new Text(this.buildHeader(), 0, 0);
     this.addChild(this.headerText);
     this.addInstructionChild();
-
-    this.startBlink();
   }
 
   private addInstructionChild(): void {
@@ -89,7 +80,6 @@ export class CompactionComponent extends Container {
     this.tokensBefore = tokensBefore;
     this.tokensAfter = tokensAfter;
     this.summary = summary;
-    this.stopBlink();
     this.headerText.setText(this.buildHeader());
     if (this.expanded) {
       this.addSummaryChild();
@@ -100,7 +90,6 @@ export class CompactionComponent extends Container {
   markCanceled(): void {
     if (this.done || this.canceled) return;
     this.canceled = true;
-    this.stopBlink();
     this.headerText.setText(this.buildHeader());
     this.ui?.requestRender();
   }
@@ -131,16 +120,11 @@ export class CompactionComponent extends Container {
 
   private removeSummaryChild(): void {
     if (this.summaryText === undefined) return;
-    const index = this.children.indexOf(this.summaryText);
-    if (index !== -1) {
-      this.children.splice(index, 1);
-    }
+    this.removeChild(this.summaryText);
     this.summaryText = undefined;
   }
 
-  dispose(): void {
-    this.stopBlink();
-  }
+  dispose(): void {}
 
   private buildHeader(): string {
     if (this.done) {
@@ -162,24 +146,9 @@ export class CompactionComponent extends Container {
       const label = currentTheme.boldFg('warning', 'Compaction cancelled');
       return `${bullet}${label}`;
     }
-    const bullet = this.blinkOn ? currentTheme.boldFg('primary', `${TEARDROP} `) : '  ';
-    const label = currentTheme.boldFg('primary', 'Compacting conversation…');
+    const bullet = currentTheme.fg('primary', `${TEARDROP} `);
+    const label = currentTheme.fg('textDim', 'Compacting conversation…');
     const tip = this.tip ? currentTheme.fg('textDim', ` · Tip: ${this.tip}`) : '';
     return `${bullet}${label}${tip}`;
-  }
-
-  private startBlink(): void {
-    this.blinkTimer = setInterval(() => {
-      this.blinkOn = !this.blinkOn;
-      this.headerText.setText(this.buildHeader());
-      this.ui?.requestRender();
-    }, BLINK_INTERVAL);
-  }
-
-  private stopBlink(): void {
-    if (this.blinkTimer !== null) {
-      clearInterval(this.blinkTimer);
-      this.blinkTimer = null;
-    }
   }
 }

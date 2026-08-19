@@ -31,7 +31,7 @@ export interface HelpPanelCommand {
 
 /** Static list — keep in sync with the global editor bindings. */
 export const DEFAULT_KEYBOARD_SHORTCUTS: readonly KeyboardShortcut[] = [
-  { keys: 'Shift-Tab', description: 'Toggle plan mode' },
+  { keys: 'Shift-Tab', description: 'Cycle modes (plan → auto → yolo)' },
   { keys: 'Ctrl-G', description: 'Edit in external editor ($VISUAL / $EDITOR)' },
   { keys: 'Ctrl-O', description: 'Toggle tool output / compaction summary expansion' },
   { keys: 'Ctrl-T', description: 'Expand / collapse the todo list (when truncated)' },
@@ -110,7 +110,7 @@ export class HelpPanelComponent extends Container implements Focusable {
       currentTheme.boldFg('textStrong', ' help ') + muted('· Esc / Enter / q to cancel · ↑↓ scroll'),
       '',
       // Greeting
-      `  ${dim('Sure, Kimi is ready to help! Just send a message to get started.')}`,
+      `  ${dim('Sure, Hasu is ready to help! Just send a message to get started.')}`,
       '',
       // Section: keyboard shortcuts
       `  ${currentTheme.bold('Keyboard shortcuts')}`,

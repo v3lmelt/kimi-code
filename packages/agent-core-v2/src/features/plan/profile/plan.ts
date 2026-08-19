@@ -11,6 +11,7 @@ import { registerAgentProfile } from '#/app/agentProfileCatalog/contribution';
 import {
   renderSystemPromptResult,
   skillActiveFor,
+  todoActiveFor,
   TASK_AGENT_ROLE_PREFIX,
 } from '#/app/agentProfileCatalog/profile-shared';
 
@@ -44,5 +45,8 @@ registerAgentProfile({
     'Use this agent when the parent agent needs a step-by-step implementation plan, key file identification, and architectural trade-off analysis before code changes are made.',
   tools: PLAN_TOOLS,
   renderSystemPrompt: (context) =>
-    renderSystemPromptResult(PLAN_ROLE, context, { skillActive: skillActiveFor(PLAN_TOOLS) }),
+    renderSystemPromptResult(PLAN_ROLE, context, {
+      skillActive: skillActiveFor(PLAN_TOOLS),
+      todoActive: todoActiveFor(PLAN_TOOLS),
+    }),
 });

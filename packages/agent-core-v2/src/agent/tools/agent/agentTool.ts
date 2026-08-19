@@ -54,6 +54,8 @@ import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentLoopService } from '#/agent/loop/loop';
+import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import type { ContextMessage } from '#/agent/contextMemory/types';
 import { IAgentUserToolService } from '#/agent/userTool/userTool';
 import {
   ToolAccesses,
@@ -115,6 +117,13 @@ import AGENT_DESCRIPTION_BASE from './agent.md?raw';
 
 const SUBAGENT_TOOL_PARAMETERS = toInputJsonSchema(SubagentToolInputSchema);
 const SUBAGENT_TOOL_PARAMETERS_NO_MODEL = stripSubagentModelParameter(SUBAGENT_TOOL_PARAMETERS);
+
+/** Total char budget for the parent-context digest block prepended to a child prompt. */
+const PARENT_CONTEXT_DIGEST_CHAR_BUDGET = 4_000;
+/** How many recent parent user messages the digest samples. */
+const PARENT_CONTEXT_DIGEST_MESSAGES = 5;
+/** Per-message char cap within the digest. */
+const PARENT_CONTEXT_DIGEST_MESSAGE_CHARS = 800;
 
 export class SubagentTool implements ISubagentTool {
   declare readonly _serviceBrand: undefined;
@@ -346,7 +355,9 @@ export class SubagentTool implements ISubagentTool {
       agentId = created.id;
       profileName = profile.name;
       displayModel = binding.displayModel;
-      promptText = await applyProfilePromptPrefix(profile, args.prompt, {
+      const digest = buildParentContextDigest(requester, this.workspace.workDir);
+      const prompted = digest.length > 0 ? `${digest}\n\n${args.prompt}` : args.prompt;
+      promptText = await applyProfilePromptPrefix(profile, prompted, {
         cwd: this.workspace.workDir,
         runner: this.processRunner,
         log: this.log,
@@ -652,4 +663,53 @@ function errorMessage(error: unknown): string | undefined {
   if (typeof error === 'string') return error;
   if (error instanceof Error) return error.message;
   return undefined;
+}
+
+/**
+ * Build a `<parent-context>` digest from the parent agent's recent user
+ * requests so a freshly spawned child can align with the ongoing task instead
+ * of starting blind. cwd is included for orientation (the child's own system
+ * prompt already renders the AGENTS.md hierarchy, so only the working
+ * directory is echoed here). Returns '' when the parent has no recent user
+ * requests worth surfacing, leaving the prompt untouched.
+ */
+function buildParentContextDigest(parent: IAgentScopeHandle, cwd: string): string {
+  let messages: readonly ContextMessage[] = [];
+  try {
+    messages = parent.accessor.get(IAgentContextMemoryService)?.get() ?? [];
+  } catch {
+    messages = [];
+  }
+  const requests: string[] = [];
+  for (
+    let i = messages.length - 1;
+    i >= 0 && requests.length < PARENT_CONTEXT_DIGEST_MESSAGES;
+    i--
+  ) {
+    const message = messages[i]!;
+    if (message.role !== 'user') continue;
+    const trimmed = messageText(message.content).trim();
+    if (trimmed.length === 0) continue;
+    requests.unshift(clip(trimmed, PARENT_CONTEXT_DIGEST_MESSAGE_CHARS));
+  }
+  if (requests.length === 0) return '';
+  const parts = [
+    `Working directory: ${cwd}`,
+    'Recent requests the parent agent is working on (context for alignment):',
+    ...requests.map((text, index) => `${index + 1}) ${text}`),
+  ];
+  const body = clip(parts.join('\n'), PARENT_CONTEXT_DIGEST_CHAR_BUDGET);
+  return `<parent-context>\n${body}\n</parent-context>`;
+}
+
+function messageText(content: ContextMessage['content']): string {
+  if (typeof content === 'string') return content;
+  return content
+    .filter((part): part is Extract<(typeof content)[number], { type: 'text' }> => part.type === 'text')
+    .map((part) => part.text)
+    .join('\n');
+}
+
+function clip(text: string, max: number): string {
+  return text.length <= max ? text : `${text.slice(0, max)}...`;
 }

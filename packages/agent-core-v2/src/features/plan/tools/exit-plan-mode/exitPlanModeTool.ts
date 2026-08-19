@@ -70,7 +70,9 @@ export class ExitPlanModeTool implements IExitPlanModeTool {
     }
     if (data === null || data.content.trim().length === 0) return undefined;
     try {
-      await this.planMode.recordRevision();
+      // Reuse the content just read for the display — the file is not read
+      // again for the revision snapshot.
+      await this.planMode.recordRevision(data.content);
     } catch {
     }
     const display: ToolInputDisplay = {
@@ -94,7 +96,7 @@ export class ExitPlanModeTool implements IExitPlanModeTool {
       };
     }
 
-    const resolvedPlan = await this.resolvePlan();
+    const resolvedPlan = await this.resolvePlan(status);
     if (!resolvedPlan.ok) return resolvedPlan.error;
 
     this.telemetry.track2('plan_submitted', {
@@ -135,18 +137,11 @@ export class ExitPlanModeTool implements IExitPlanModeTool {
     }
   }
 
-  private async resolvePlan(): Promise<ResolvePlanResult> {
-    let source: ExitPlanModePlanSource | null;
-    try {
-      const data = await this.planMode.status();
-      source = data === null ? null : { plan: data.content, path: data.path };
-    } catch (error) {
-      const message = error instanceof Error ? error.message : 'Failed to read plan file.';
-      return {
-        ok: false,
-        error: { isError: true, output: `Failed to read plan file: ${message}` },
-      };
-    }
+  private async resolvePlan(data: PlanData): Promise<ResolvePlanResult> {
+    // The caller has already read the plan file once; only the path and the
+    // content of that single read are needed here, so no further disk I/O.
+    const source: ExitPlanModePlanSource | null =
+      data === null ? null : { plan: data.content, path: data.path };
 
     if (source !== null && source.plan.trim().length > 0) {
       return {
@@ -156,8 +151,7 @@ export class ExitPlanModeTool implements IExitPlanModeTool {
       };
     }
 
-    const status = await this.planMode.status();
-    const path = source?.path ?? status?.path ?? null;
+    const path = source?.path ?? null;
     return {
       ok: false,
       error: {

@@ -238,10 +238,12 @@ export type KimiErrorCode =
   | 'agent.not_found'
   | 'agent.already_exists'
   | 'agent.already_running'
+  | 'agent.not_running'
   | 'agent.not_a_subagent'
   | 'agent.not_owned'
   | 'agent.type_not_allowed'
   | 'agent.max_tokens_exceeded'
+  | 'agent.depth_limit_exceeded'
   | 'turn.agent_busy'
   | 'goal.already_exists'
   | 'goal.not_found'
@@ -385,10 +387,18 @@ export interface QuestionTaskInfo extends TaskInfoBase {
   readonly toolCallId?: string;
 }
 
+export interface WorkflowTaskInfo extends TaskInfoBase {
+  readonly kind: 'workflow';
+  readonly runId: string;
+  readonly workflowName: string;
+  readonly scriptSha256: string;
+}
+
 export type TaskInfo =
   | ProcessTaskInfo
   | AgentTaskInfo
-  | QuestionTaskInfo;
+  | QuestionTaskInfo
+  | WorkflowTaskInfo;
 
 export interface CompactionResult {
   readonly summary: string;
@@ -516,6 +526,7 @@ export interface AgentStatusUpdatedEvent {
   readonly contextUsage?: number;
   readonly planMode?: boolean;
   readonly swarmMode?: boolean;
+  readonly ultracode?: boolean;
   readonly permission?: PermissionMode;
   readonly usage?: UsageStatus;
   readonly phase?: AgentPhase;
@@ -1221,10 +1232,12 @@ export const kimiErrorCodeSchema = z.enum([
   'agent.not_found',
   'agent.already_exists',
   'agent.already_running',
+  'agent.not_running',
   'agent.not_a_subagent',
   'agent.not_owned',
   'agent.type_not_allowed',
   'agent.max_tokens_exceeded',
+  'agent.depth_limit_exceeded',
   'turn.agent_busy',
   'goal.already_exists',
   'goal.not_found',
@@ -1371,10 +1384,18 @@ export const questionTaskInfoSchema = taskInfoBaseSchema.extend({
   toolCallId: z.string().optional(),
 }) satisfies z.ZodType<QuestionTaskInfo>;
 
+export const workflowTaskInfoSchema = taskInfoBaseSchema.extend({
+  kind: z.literal('workflow'),
+  runId: z.string(),
+  workflowName: z.string(),
+  scriptSha256: z.string(),
+}) satisfies z.ZodType<WorkflowTaskInfo>;
+
 export const taskInfoSchema = z.discriminatedUnion('kind', [
   processTaskInfoSchema,
   agentTaskInfoSchema,
   questionTaskInfoSchema,
+  workflowTaskInfoSchema,
 ]) satisfies z.ZodType<TaskInfo>;
 
 export const compactionResultSchema = z.object({
@@ -1476,6 +1497,7 @@ export const agentStatusUpdatedEventSchema = z.object({
   contextUsage: z.number().optional(),
   planMode: z.boolean().optional(),
   swarmMode: z.boolean().optional(),
+  ultracode: z.boolean().optional(),
   permission: permissionModeSchema.optional(),
   usage: usageStatusSchema.optional(),
   phase: agentPhaseSchema.optional(),

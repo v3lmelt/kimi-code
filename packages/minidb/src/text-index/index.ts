@@ -610,15 +610,20 @@ export class TextIndex {
    * (lowest-docID) prefix and flagged `capped`. A capped read never populates
    * the LRU cache, so a later uncapped query still decodes the full list.
    * May still contain tombstoned docIDs — callers filter via `removed`.
+   *
+   * Exactly one of `map` / `arr` is non-null: `map` for the memory base,
+   * `arr` for disk postings — on a cache hit the cached array itself (no
+   * re-decode, no intermediate Map). Callers iterate the provided channel
+   * only, never both.
    */
   private readBaseBounded(
     term: string,
     maxEntries: number | undefined,
-  ): { map: ReadonlyMap<number, number>; capped: boolean } {
+  ): { map: ReadonlyMap<number, number> | null; arr: [number, number][] | null; capped: boolean } {
     if (this.memBase) {
       const m = this.memBase.get(term);
       if (m === undefined || maxEntries === undefined || m.size <= maxEntries) {
-        return { map: m ?? EMPTY_MAP, capped: false };
+        return { map: m ?? EMPTY_MAP, arr: null, capped: false };
       }
       const out = new Map<number, number>();
       let i = 0;
@@ -626,7 +631,7 @@ export class TextIndex {
         if (i++ >= maxEntries) break;
         out.set(id, f);
       }
-      return { map: out, capped: true };
+      return { map: out, arr: null, capped: true };
     }
 
     const entry = this.postings.get(term);
@@ -634,9 +639,7 @@ export class TextIndex {
       // Over budget before decoding even starts: cap the decode itself and
       // skip the cache (a partial list must never be cached as complete).
       const arr = this.pf ? this.pf.read(entry, maxEntries) : [];
-      const m = new Map<number, number>();
-      for (const [id, f] of arr) m.set(id, f);
-      return { map: m, capped: true };
+      return { map: null, arr, capped: true };
     }
 
     let arr = this.cacheGet(term);
@@ -644,9 +647,7 @@ export class TextIndex {
       arr = entry && this.pf ? this.pf.read(entry) : [];
       this.cachePut(term, arr);
     }
-    const m = new Map<number, number>();
-    for (const [id, f] of arr) m.set(id, f);
-    return { map: m, capped: false };
+    return { map: null, arr, capped: false };
   }
 
   /** Async twin of readBaseBounded (stage 6): identical cache semantics and
@@ -663,31 +664,27 @@ export class TextIndex {
   private async readBaseBoundedAsync(
     term: string,
     maxEntries: number | undefined,
-  ): Promise<{ map: ReadonlyMap<number, number>; capped: boolean }> {
+  ): Promise<{ map: ReadonlyMap<number, number> | null; arr: [number, number][] | null; capped: boolean }> {
     if (this.memBase) return this.readBaseBounded(term, maxEntries);
 
     for (let attempt = 0; ; attempt++) {
       const epoch = this.baseEpoch;
       const entry = this.postings.get(term);
-      let result: { map: ReadonlyMap<number, number>; capped: boolean };
+      let result: { map: ReadonlyMap<number, number> | null; arr: [number, number][] | null; capped: boolean };
       let cacheable: [number, number][] | null = null;
       try {
         if (entry !== undefined && maxEntries !== undefined && entry.df > maxEntries) {
           // Over budget before decoding even starts: cap the decode itself
           // and skip the cache (a partial list is never cached as complete).
           const arr = this.pf ? await this.pf.readAsync(entry, maxEntries) : [];
-          const m = new Map<number, number>();
-          for (const [id, f] of arr) m.set(id, f);
-          result = { map: m, capped: true };
+          result = { map: null, arr, capped: true };
         } else {
           let arr = this.cacheGet(term);
           if (!arr) {
             arr = entry && this.pf ? await this.pf.readAsync(entry) : [];
             cacheable = arr;
           }
-          const m = new Map<number, number>();
-          for (const [id, f] of arr) m.set(id, f);
-          result = { map: m, capped: false };
+          result = { map: null, arr, capped: false };
         }
       } catch (e) {
         // A base commit landing mid-read also CLOSES the previous handle
@@ -719,8 +716,19 @@ export class TextIndex {
     let capped = false;
     const base = this.readBaseBounded(term, maxEntries);
     if (base.capped) capped = true;
-    for (const [id, f] of base.map) if (!this.removed.has(id)) out.set(id, f);
-    let visited = base.map.size;
+    let visited = 0;
+    // One pass over the decoded postings (disk arrays are iterated directly,
+    // skipping the intermediate Map the old readBaseBounded built), building
+    // only the tombstone-filtered output map.
+    if (base.arr !== null) {
+      for (const [id, f] of base.arr) {
+        visited++;
+        if (!this.removed.has(id)) out.set(id, f);
+      }
+    } else {
+      for (const [id, f] of base.map!) if (!this.removed.has(id)) out.set(id, f);
+      visited = base.map!.size;
+    }
     const d = this.delta.get(term);
     if (d) {
       for (const [id, f] of d) {
@@ -745,8 +753,16 @@ export class TextIndex {
     let capped = false;
     const base = await this.readBaseBoundedAsync(term, maxEntries);
     if (base.capped) capped = true;
-    for (const [id, f] of base.map) if (!this.removed.has(id)) out.set(id, f);
-    let visited = base.map.size;
+    let visited = 0;
+    if (base.arr !== null) {
+      for (const [id, f] of base.arr) {
+        visited++;
+        if (!this.removed.has(id)) out.set(id, f);
+      }
+    } else {
+      for (const [id, f] of base.map!) if (!this.removed.has(id)) out.set(id, f);
+      visited = base.map!.size;
+    }
     const d = this.delta.get(term);
     if (d) {
       for (const [id, f] of d) {
@@ -797,13 +813,19 @@ export class TextIndex {
       }
     }
 
+    // Per-term constants (postings map + idf) hoisted out of the per-candidate
+    // loop: both repeat identically for every candidate document.
+    const termStats = qtokens.map((t) => {
+      const m = termMaps.get(t)!;
+      return { m, idf: this.idf(m.size) };
+    });
     const top = new TopK(limit);
     for (const id of candidates) {
       const len = this.docLen.get(id) ?? 1;
       let score = 0;
-      for (const t of qtokens) {
-        const f = termMaps.get(t)!.get(id) ?? 0;
-        if (f) score += (f / len) * this.idf(termMaps.get(t)!.size);
+      for (const { m, idf } of termStats) {
+        const f = m.get(id) ?? 0;
+        if (f) score += (f / len) * idf;
       }
       if (score > 0) {
         const key = this.keys[id];

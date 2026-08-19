@@ -2255,6 +2255,56 @@ describe('GlobalSearchService', () => {
         }));
       expect(project(live)).toEqual(project(index));
     });
+
+    it('returns deep-identical pages for repeated identical live searches (memo caches)', async () => {
+      const s1 = summary('s1', 'memo 标题', T1);
+      const store = new TranscriptStore('s1');
+      store.ensureAgent('main', { agentId: 'main', type: 'main' });
+      addLiveTurn(store, 'main', {
+        ordinal: 0,
+        startedAt: T1,
+        prompt: '苹果怎么挑',
+        steps: [
+          { stepId: 't0.1', startedAt: T1, endedAt: T2, texts: ['苹果要挑红富士', '别买歪瓜裂枣'] },
+        ],
+      });
+      addLiveTurn(store, 'main', { ordinal: 1, startedAt: T3, prompt: '苹果苹果都要' });
+      const service = track(makeService(home!, gettableIndex([s1])));
+      service.setLiveTranscriptSource(fakeLiveSource(new Map([['s1', store]])));
+
+      // The live-docs / tokenize / Date.parse memos must not change results:
+      // a second and third search of the same content are byte-identical.
+      const query = { query: '苹果', container: { sessionId: 's1' } };
+      const first = await service.search(query);
+      expect(first.source).toBe('live');
+      expect(await service.search(query)).toEqual(first);
+      expect(await service.search(query)).toEqual(first);
+
+      // Literal mode shares the same doc memo — same deep-equality guarantee.
+      const lit = { query: '苹果', mode: 'literal' as const, container: { sessionId: 's1' } };
+      expect(await service.search(lit)).toEqual(await service.search(lit));
+    });
+
+    it('invalidates the live-docs memo when the store gains a new message', async () => {
+      const s1 = summary('s1', '标题', T1);
+      const store = new TranscriptStore('s1');
+      store.ensureAgent('main', { agentId: 'main', type: 'main' });
+      addLiveTurn(store, 'main', { ordinal: 0, startedAt: T1, prompt: '苹果怎么挑' });
+      const service = track(makeService(home!, gettableIndex([s1])));
+      service.setLiveTranscriptSource(fakeLiveSource(new Map([['s1', store]])));
+
+      // Prime the memo with a miss for '香蕉'.
+      const query = { query: '香蕉', container: { sessionId: 's1' } };
+      expect((await service.search(query)).items.length).toBe(0);
+
+      // Appending a turn must invalidate the cached docs: the new message is
+      // searchable on the very next request.
+      addLiveTurn(store, 'main', { ordinal: 1, startedAt: T2, prompt: '香蕉怎么挑' });
+      const after = await service.search(query);
+      expect(after.items.length).toBe(1);
+      expect(after.items[0]!.snippet).toContain('香蕉');
+      expect(after.indexState.documents).toBe(3); // 2 user docs + 1 title doc
+    });
   });
 
   describe('lifecycle drain correctness (plan 13)', () => {

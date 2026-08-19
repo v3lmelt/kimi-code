@@ -63,6 +63,7 @@ import {
   resolveAuthBackedClient,
 } from '../request-auth';
 import { normalizeToolCallIdsForProvider, sanitizeOpenAIResponsesCallId } from '../tool-call-id';
+import { stripSystemPromptBoundary } from '#/kosong/provider/systemPromptBoundary';
 
 function normalizeResponsesFinishReason(
   status: string | null | undefined,
@@ -1162,7 +1163,7 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
         ...kwargs,
       };
       if (systemPrompt) {
-        createParams['instructions'] = systemPrompt;
+        createParams['instructions'] = stripSystemPromptBoundary(systemPrompt);
       }
       if (options?.responseFormat !== undefined) {
         createParams['text'] = {

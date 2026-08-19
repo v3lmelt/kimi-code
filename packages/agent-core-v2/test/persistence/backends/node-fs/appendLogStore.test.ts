@@ -30,6 +30,7 @@ function chunkedStorage(chunks: Uint8Array[]): IFileSystemStorageService {
   return {
     _serviceBrand: undefined,
     read: async () => undefined,
+    size: async () => chunks.reduce((total, c) => total + c.byteLength, 0),
     readStream: async function* () {
       for (const c of chunks) yield c;
     },
@@ -680,5 +681,158 @@ describe('AppendLogStore', () => {
       { n: 1, s: '中文' },
       { n: 2, s: '日本語' },
     ]);
+  });
+
+  // ---- readFrom (offset-based incremental read) ----
+
+  it('readFrom from 0 is equivalent to a full read', async () => {
+    for (let n = 0; n < 5; n++) record.append<Rec>(SCOPE, KEY, { n });
+    const full = await collect<Rec>(SCOPE, KEY);
+
+    const first = await record.readFrom<Rec>(SCOPE, KEY, 0);
+    const second = await record.readFrom<Rec>(SCOPE, KEY, first.nextByte);
+
+    expect(first.truncated).toBe(false);
+    expect(second.truncated).toBe(false);
+    expect([...first.records, ...second.records]).toEqual(full);
+    expect(second.records).toEqual([]);
+    // nextByte is the offset just past the last complete line (the EOF here).
+    expect(first.nextByte).toBe(
+      enc.encode(`{"n":0}\n{"n":1}\n{"n":2}\n{"n":3}\n{"n":4}\n`).byteLength,
+    );
+  });
+
+  it('readFrom split at an arbitrary line boundary matches the full read', async () => {
+    for (let n = 0; n < 4; n++) record.append<Rec>(SCOPE, KEY, { n });
+    const full = await collect<Rec>(SCOPE, KEY);
+    const bytes = (await storage.read(SCOPE, KEY))!;
+    const text = new TextDecoder().decode(bytes);
+    // Offset just past the second line ('{"n":0}\n{"n":1}\n').
+    const line2End = text.indexOf('\n', text.indexOf('\n') + 1) + 1;
+
+    const head = await record.readFrom<Rec>(SCOPE, KEY, line2End);
+    const tail = await record.readFrom<Rec>(SCOPE, KEY, head.nextByte);
+    // head reads exactly the lines after the boundary; the prefix already
+    // folded by a caller plus the delta is the same as the full read.
+    expect([...full.slice(0, 2), ...head.records]).toEqual(full);
+    expect(head.records).toEqual([{ n: 2 }, { n: 3 }]);
+    expect(tail.records).toEqual([]);
+  });
+
+  it('drops a torn first line when fromByte lands mid-line', async () => {
+    for (let n = 0; n < 3; n++) record.append<Rec>(SCOPE, KEY, { n });
+    await record.flush();
+    const bytes = (await storage.read(SCOPE, KEY))!;
+    const line1Length = new TextDecoder().decode(bytes).indexOf('\n') + 1;
+
+    const result = await record.readFrom<Rec>(SCOPE, KEY, line1Length - 3);
+    expect(result.truncated).toBe(false);
+    // Offset 5 cuts '{"n":0}\n' at its '0' — the torn first line '0}' is dropped.
+    expect(result.records).toEqual([{ n: 1 }, { n: 2 }]);
+    expect(result.nextByte).toBe(bytes.byteLength);
+  });
+
+  it('drops a torn first line whose multi-byte UTF-8 sequence was cut', async () => {
+    const line1 = `${JSON.stringify({ n: 1, s: '中文' })}\n`;
+    const line2 = `${JSON.stringify({ n: 2 })}\n`;
+    await storage.append(SCOPE, KEY, enc.encode(line1 + line2));
+    const bytes = (await storage.read(SCOPE, KEY))!;
+    const mid = bytes.indexOf(enc.encode('中')[0]!) + 1;
+
+    const result = await record.readFrom<Rec & { s?: string }>(SCOPE, KEY, mid);
+    expect(result.records).toEqual([{ n: 2 }]);
+    expect(result.nextByte).toBe(bytes.byteLength);
+  });
+
+  it('drops a torn final line in the offset read too (crash mid-flush)', async () => {
+    const raw = `${JSON.stringify({ n: 1 })}\n${JSON.stringify({ n: 2 })}\n${JSON.stringify({ n: 3 }).slice(0, 4)}`;
+    await storage.append(SCOPE, KEY, enc.encode(raw));
+
+    const result = await record.readFrom<Rec>(SCOPE, KEY, 0);
+    expect(result.records).toEqual([{ n: 1 }, { n: 2 }]);
+    expect(result.nextByte).toBe(
+      enc.encode(`${JSON.stringify({ n: 1 })}\n${JSON.stringify({ n: 2 })}\n`).byteLength,
+    );
+  });
+
+  it('returns only the records appended after the previous offset', async () => {
+    record.append<Rec>(SCOPE, KEY, { n: 1 });
+    const first = await record.readFrom<Rec>(SCOPE, KEY, 0);
+    expect(first.records).toEqual([{ n: 1 }]);
+    const nextByte = first.nextByte;
+
+    record.append<Rec>(SCOPE, KEY, { n: 2 });
+    record.append<Rec>(SCOPE, KEY, { n: 3 });
+    const delta = await record.readFrom<Rec>(SCOPE, KEY, nextByte);
+    expect(delta.records).toEqual([{ n: 2 }, { n: 3 }]);
+    expect(delta.nextByte).toBeGreaterThan(nextByte);
+    expect(delta.truncated).toBe(false);
+  });
+
+  it('flags truncated when the log is rewritten shorter than the offset', async () => {
+    for (let n = 0; n < 4; n++) record.append<Rec>(SCOPE, KEY, { n });
+    const first = await record.readFrom<Rec>(SCOPE, KEY, 0);
+    expect(first.records).toEqual([{ n: 0 }, { n: 1 }, { n: 2 }, { n: 3 }]);
+
+    await record.rewrite<Rec>(SCOPE, KEY, [{ n: 100 }]);
+
+    const next = await record.readFrom<Rec>(SCOPE, KEY, first.nextByte);
+    expect(next.truncated).toBe(true);
+    expect(next.records).toEqual([]);
+
+    // The caller rebuilds from 0 after truncated.
+    const rebuilt = await record.readFrom<Rec>(SCOPE, KEY, 0);
+    expect(rebuilt.records).toEqual([{ n: 100 }]);
+    expect(rebuilt.truncated).toBe(false);
+  });
+
+  it('treats a missing log and a fromByte at EOF as no new records', async () => {
+    expect(await record.readFrom<Rec>(SCOPE, KEY, 0)).toEqual({
+      records: [],
+      nextByte: 0,
+      truncated: false,
+    });
+
+    record.append<Rec>(SCOPE, KEY, { n: 1 });
+    const first = await record.readFrom<Rec>(SCOPE, KEY, 0);
+    const atEof = await record.readFrom<Rec>(SCOPE, KEY, first.nextByte);
+    expect(atEof).toEqual({
+      records: [],
+      nextByte: first.nextByte,
+      truncated: false,
+    });
+    const beyond = await record.readFrom<Rec>(SCOPE, KEY, first.nextByte + 10);
+    expect(beyond.truncated).toBe(true);
+  });
+
+  it('throws AppendLogCorruptedError on a corrupted line after the offset', async () => {
+    const raw = `${JSON.stringify({ n: 1 })}\nGARBAGE\n${JSON.stringify({ n: 3 })}\n`;
+    await storage.append(SCOPE, KEY, enc.encode(raw));
+
+    await expect(record.readFrom<Rec>(SCOPE, KEY, 0)).rejects.toSatisfy((error: unknown) => {
+      expect(error).toBeInstanceOf(AppendLogCorruptedError);
+      const corrupted = error as AppendLogCorruptedError;
+      expect(corrupted.code).toBe('storage.corrupted');
+      expect(corrupted.details).toEqual({ scope: SCOPE, key: KEY, lineNumber: 2 });
+      return true;
+    });
+  });
+
+  it('treats a corrupted first line of the delta as torn, but throws for later ones', async () => {
+    const raw = `${JSON.stringify({ n: 1 })}\nGARBAGE\n${JSON.stringify({ n: 3 })}\n`;
+    await storage.append(SCOPE, KEY, enc.encode(raw));
+    const text = new TextDecoder().decode((await storage.read(SCOPE, KEY))!);
+    const line1End = text.indexOf('\n') + 1;
+
+    // Offset right after line 1: GARBAGE becomes the delta's first line and
+    // is indistinguishable from a torn line → dropped, reading continues.
+    const result = await record.readFrom<Rec>(SCOPE, KEY, line1End);
+    expect(result.records).toEqual([{ n: 3 }]);
+    expect(result.truncated).toBe(false);
+
+    // Offset after GARBAGE: {n:3} is the delta's first line → kept.
+    const mid = text.indexOf('\n', line1End) + 1;
+    const result2 = await record.readFrom<Rec>(SCOPE, KEY, mid);
+    expect(result2.records).toEqual([{ n: 3 }]);
   });
 });

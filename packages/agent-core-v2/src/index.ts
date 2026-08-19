@@ -320,8 +320,27 @@ export * from '#/agent/goal/goalService';
 export * from '#/agent/goal/types';
 export * from '#/agent/tools/agent-swarm/agent-swarm';
 import '#/agent/tools/agent-swarm/agentSwarmTool';
+export * from '#/agent/tools/send-message/sendMessage';
+import '#/agent/tools/send-message/sendMessageTool';
 export * from '#/agent/swarm/swarm';
 export * from '#/agent/swarm/swarmService';
+export * from '#/agent/ultracode/ultracode';
+export * from '#/agent/ultracode/ultracodeService';
+import '#/agent/ultracode/configSection';
+export * from '#/agent/ultracode/configSection';
+export * from '#/agent/workflow/types';
+export * from '#/agent/workflow/compile/index';
+export * from '#/agent/workflow/budget/workflowBudget';
+import '#/agent/workflow/budget/workflowBudgetService';
+export * from '#/agent/workflow/budget/workflowBudgetService';
+export {
+  IWorkflowTool,
+  WORKFLOW_TOOL_NAME,
+  WORKFLOW_DEFAULT_TOKEN_BUDGET,
+} from '#/agent/tools/workflow/workflow';
+import '#/agent/tools/workflow/workflowTool';
+import '#/agent/tools/workflow/configSection';
+export * from '#/agent/tools/workflow/configSection';
 export * from '#/agent/usage/usage';
 export * from '#/agent/usage/usageService';
 export * from '#/agent/toolDedupe/toolDedupe';

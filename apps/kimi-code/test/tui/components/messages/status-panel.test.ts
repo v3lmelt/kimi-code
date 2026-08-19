@@ -51,7 +51,7 @@ describe('status panel report lines', () => {
     }).map(strip);
 
     const output = lines.join('\n');
-    expect(output).toContain('>_ Kimi Code (v1.2.3)');
+    expect(output).toContain('>_ Hasu (v1.2.3)');
     expect(output).toContain('Model        Kimi K2 (thinking high)');
     expect(output).toContain('Directory    /tmp/project');
     expect(output).toContain('Permissions  auto');
@@ -129,5 +129,36 @@ describe('status panel report lines', () => {
     expect(output).toContain('Session      none');
     expect(output).toContain('Warning      No active session');
     expect(output).toContain('No context window data available.');
+  });
+
+  it('renders an OpenCode Go usage section in the status report', () => {
+    const lines = buildStatusReportLines({
+      version: '1.2.3',
+      model: 'go-flash',
+      workDir: '/tmp/project',
+      sessionId: 'ses-1',
+      sessionTitle: null,
+      thinkingEffort: 'off',
+      permissionMode: 'manual',
+      planMode: false,
+      contextUsage: 0,
+      contextTokens: 0,
+      maxContextTokens: 0,
+      availableModels: {
+        'go-flash': { provider: 'opencode-go', model: 'deepseek-v4-flash', maxContextSize: 10000 },
+      },
+      goUsage: {
+        summary: { window: { duration: 5, unit: 'hour' }, used: 14, limit: 100 },
+        limits: [{ window: { duration: 1, unit: 'week' }, used: 3, limit: 100 }],
+      },
+    }).map(strip);
+
+    const output = lines.join('\n');
+    expect(output).toContain('OpenCode Go usage');
+    expect(output).toContain('5h limit');
+    expect(output).toContain('14% used');
+    expect(output).toContain('Weekly limit');
+    expect(output).toContain('3% used');
+    expect(output).not.toContain('Plan usage');
   });
 });

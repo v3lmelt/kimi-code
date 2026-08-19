@@ -114,20 +114,27 @@ export class AgentContextInjectorService extends Service implements IAgentContex
     const isNewTurn = this.isNewTurn;
     this.isNewTurn = false;
     const history = this.context.get();
-    for (const entry of this.entries) {
-      const injectedPositions: readonly number[] = [...entry.positions];
-      const lastInjectedAt = injectedPositions.at(-1) ?? null;
-      const lastInjection = lastInjectedAt === null ? undefined : history[lastInjectedAt];
-      const content = await entry.provider({
-        injectedPositions,
-        lastInjectedAt,
-        lastInjection,
-        lastDisclosure:
-          lastInjection?.origin?.kind === 'injection'
-            ? lastInjection.origin.disclosure
-            : undefined,
-        isNewTurn,
-      });
+    // Run providers concurrently; commit results in registration order so the
+    // relative message order matches the previous serial loop.
+    const results = await Promise.all(
+      [...this.entries].map(async (entry) => {
+        const injectedPositions: readonly number[] = [...entry.positions];
+        const lastInjectedAt = injectedPositions.at(-1) ?? null;
+        const lastInjection = lastInjectedAt === null ? undefined : history[lastInjectedAt];
+        const content = await entry.provider({
+          injectedPositions,
+          lastInjectedAt,
+          lastInjection,
+          lastDisclosure:
+            lastInjection?.origin?.kind === 'injection'
+              ? lastInjection.origin.disclosure
+              : undefined,
+          isNewTurn,
+        });
+        return { entry, content };
+      }),
+    );
+    for (const { entry, content } of results) {
       if (!this.entries.has(entry)) continue;
       if (content === undefined) continue;
       const result: ContextInjectionResult =

@@ -362,11 +362,63 @@ function formatFinishReasonHint(stream: StreamedMessage): string {
 }
 
 /**
- * Produce a shallow-ish copy of a StreamedMessagePart.
+ * Produce a copy of a StreamedMessagePart that the onMessagePart callback can
+ * freely mutate without aliasing the stream's own part objects.
  *
- * This is intentionally minimal: we only need isolation for the mutable
- * string fields that `mergeInPlace` mutates (text, think, arguments).
+ * Hot path: this runs once per streamed chunk, so it avoids structuredClone's
+ * generic-object-graph machinery and instead copies each part type by hand.
+ * Strings/numbers/null are immutable and copied by reference; nested objects
+ * (`imageUrl`/`audioUrl`/`videoUrl`, `usage`, `extras`) are copied to the
+ * depth callbacks actually mutate: media payloads one level, `extras` fully
+ * recursive (callbacks have been observed mutating `extras.metadata.*` and
+ * pushing into `extras.tags`).
+ *
+ * Exported (module-internal, not re-exported from the package index) so the
+ * hot-path benchmark in `bench/` can measure it.
  */
-function deepCopyPart(part: StreamedMessagePart): StreamedMessagePart {
-  return structuredClone(part);
+export function deepCopyPart(part: StreamedMessagePart): StreamedMessagePart {
+  switch (part.type) {
+    case 'text':
+      return { type: 'text', text: part.text };
+    case 'think':
+      return { type: 'think', think: part.think, encrypted: part.encrypted };
+    case 'image_url':
+      return { type: 'image_url', imageUrl: { ...part.imageUrl } };
+    case 'audio_url':
+      return { type: 'audio_url', audioUrl: { ...part.audioUrl } };
+    case 'video_url':
+      return { type: 'video_url', videoUrl: { ...part.videoUrl } };
+    case 'function':
+      return {
+        type: 'function',
+        id: part.id,
+        name: part.name,
+        arguments: part.arguments,
+        extras: part.extras === undefined ? undefined : deepCopyExtras(part.extras),
+        _streamIndex: part._streamIndex,
+      };
+    case 'tool_call_part':
+      return { type: 'tool_call_part', argumentsPart: part.argumentsPart, index: part.index };
+    case 'usage':
+      return { type: 'usage', usage: { ...part.usage } };
+  }
+}
+
+/** Recursive copy of a ToolCall `extras` record (plain objects and arrays). */
+function deepCopyExtras(extras: Record<string, unknown>): Record<string, unknown> {
+  const copy: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(extras)) {
+    copy[key] = deepCopyExtrasValue(value);
+  }
+  return copy;
+}
+
+function deepCopyExtrasValue(value: unknown): unknown {
+  if (Array.isArray(value)) {
+    return value.map(deepCopyExtrasValue);
+  }
+  if (typeof value === 'object' && value !== null) {
+    return deepCopyExtras(value as Record<string, unknown>);
+  }
+  return value;
 }

@@ -23,6 +23,7 @@ import type { TranscriptTurn } from '../model/turn';
 import {
   EMPTY_AGENT_STATE,
   applyOperation,
+  findTurn,
   type AgentState,
 } from '../ops/apply';
 import type {
@@ -89,10 +90,7 @@ export class AgentTranscript {
   }
 
   getTurn(turnId: TurnId): TranscriptTurn | undefined {
-    const item = this.#state.items.find(
-      (entry) => entry.kind === 'turn' && entry.turnId === turnId,
-    );
-    return item?.kind === 'turn' ? item : undefined;
+    return findTurn(this.#state, turnId)?.turn;
   }
 
   getTasks(): ReadonlyMap<TaskId, TranscriptTask> {

@@ -240,8 +240,11 @@ describe('AgentPlanService plan-guard listener', () => {
           }),
         );
 
+        // allow() no longer short-circuits later listeners: the plan guard's
+        // allow still lets the plan-file write through (decision stays
+        // undefined), but later adjudicators (the permission chain) now run.
         expect(decision).toBeUndefined();
-        expect(permissionRan).toBe(false);
+        expect(permissionRan).toBe(true);
       },
     );
 
@@ -258,7 +261,7 @@ describe('AgentPlanService plan-guard listener', () => {
       );
 
       expect(decision).toBeUndefined();
-      expect(permissionRan).toBe(false);
+      expect(permissionRan).toBe(true);
     });
 
     it.each(['Write', 'Edit'] as const)(

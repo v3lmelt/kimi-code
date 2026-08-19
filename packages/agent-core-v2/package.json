@@ -45,6 +45,7 @@
   },
   "scripts": {
     "build": "tsdown",
+    "bench:assembly-pipeline": "tsx --import ../../build/register-raw-text-loader.mjs bench/assembly-pipeline.ts",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "gen:contract-types": "node scripts/gen-contract-types.mjs",
@@ -52,6 +53,7 @@
     "gen:wire-manifest": "tsx --import ../../build/register-raw-text-loader.mjs scripts/gen-wire-manifest.mts",
     "gen:state-manifest": "tsx scripts/gen-state-manifest.mts",
     "lint:imports": "node scripts/check-import-boundaries.mjs",
+    "bench:append-fsync": "node --import tsx bench/append-fsync.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {
@@ -65,6 +67,7 @@
     "@moonshot-ai/protocol": "workspace:^",
     "@moonshot-ai/tree-sitter-bash": "workspace:^",
     "@mozilla/readability": "^0.6.0",
+    "acorn": "8.17.0",
     "ajv": "^8.18.0",
     "ajv-formats": "^3.0.1",
     "chokidar": "^4.0.3",

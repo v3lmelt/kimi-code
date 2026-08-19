@@ -31,6 +31,7 @@ function fakeInitialAppState(): AppState {
     availableProviders: {},
     sessionTitle: null,
     mcpServersSummary: null,
+    workflowRuns: [],
   };
 }
 

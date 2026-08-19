@@ -52,6 +52,10 @@ function makeHost(options: { createGoalRejects?: boolean } = {}) {
         streamingPhase: 'waiting',
         model: 'kimi-model',
         permissionMode: 'auto',
+        // The footer agent-row sync reads the workflow ledger; keep the
+        // fixture on the real AppState shape (see the cache/background-tasks
+        // fixtures) so the throttled sync cannot crash after the test ends.
+        workflowRuns: [],
       },
       queuedMessages: [],
       queuedMessageDispatchPending: false,

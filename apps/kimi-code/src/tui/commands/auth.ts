@@ -1,9 +1,14 @@
 import {
+  applyOpenCodeGoConfig,
   applyOpenPlatformConfig,
   fetchOpenPlatformModels,
   filterModelsByPrefix,
   getOpenPlatformById,
+  OPENCODE_GO_DEFAULT_BASE_URL,
+  OPENCODE_GO_MODELS,
+  OPENCODE_GO_PROVIDER_ID,
   OpenPlatformApiError,
+  toManagedModelInfo,
   type ManagedKimiCodeModelInfo,
   type ManagedKimiConfigShape,
   type OpenPlatformDefinition,
@@ -11,7 +16,7 @@ import {
 import { log } from '@moonshot-ai/kimi-code-sdk';
 
 import type { ChoiceOption } from '../components/dialogs/choice-picker';
-import { DEFAULT_OAUTH_PROVIDER_NAME, PRODUCT_NAME } from '../constant/kimi-tui';
+import { DEFAULT_OAUTH_PROVIDER_NAME } from '../constant/kimi-tui';
 import { formatErrorMessage } from '../utils/event-payload';
 import type { LoginProgressSpinnerHandle } from '../types';
 import {
@@ -32,6 +37,11 @@ export async function handleLoginCommand(host: SlashCommandHost): Promise<void> 
 
   if (platformId === 'kimi-code') {
     await handleKimiCodeOAuthLogin(host);
+    return;
+  }
+
+  if (platformId === OPENCODE_GO_PROVIDER_ID) {
+    await handleOpenCodeGoLogin(host);
     return;
   }
 
@@ -179,6 +189,54 @@ async function handleOpenPlatformLogin(
   host.showStatus(`Setup complete: ${platform.name} · ${selection.model.id}`);
 }
 
+async function handleOpenCodeGoLogin(host: SlashCommandHost): Promise<void> {
+  const platformName = 'OpenCode Go';
+  const subtitleLines = [
+    `${'base_url'.padEnd(12)}${OPENCODE_GO_DEFAULT_BASE_URL}`,
+    `${'saved to'.padEnd(12)}~/.kimi-code/config.toml`,
+  ];
+  const apiKey = await promptApiKey(host, platformName, subtitleLines);
+  if (apiKey === undefined) return;
+
+  // OpenCode Go models come from the built-in static table (no /models fetch);
+  // reuse the existing model-selection UI via the ManagedKimiCodeModelInfo shape.
+  const models = OPENCODE_GO_MODELS.map((model) => toManagedModelInfo(model));
+  const platform: OpenPlatformDefinition = {
+    id: OPENCODE_GO_PROVIDER_ID,
+    name: platformName,
+    baseUrl: OPENCODE_GO_DEFAULT_BASE_URL,
+  };
+  const selection = await promptModelSelectionForOpenPlatform(host, models, platform);
+  if (selection === undefined) return;
+
+  const existingConfig = await host.harness.getConfig();
+  if (existingConfig.providers[OPENCODE_GO_PROVIDER_ID] !== undefined) {
+    await host.harness.removeProvider(OPENCODE_GO_PROVIDER_ID);
+  }
+
+  const config = await host.harness.getConfig();
+  applyOpenCodeGoConfig(config as ManagedKimiConfigShape, {
+    apiKey,
+    selectedModel: OPENCODE_GO_MODELS.find((m) => m.id === selection.model.id),
+    thinking: selection.thinking !== 'off',
+    effort:
+      selection.thinking !== 'off' && selection.thinking !== 'on'
+        ? selection.thinking
+        : undefined,
+  });
+
+  await host.harness.setConfig({
+    providers: config.providers,
+    models: config.models,
+    defaultModel: config.defaultModel,
+    thinking: config.thinking,
+  });
+
+  await host.authFlow.refreshConfigAfterLogin();
+  host.track('login', { provider: OPENCODE_GO_PROVIDER_ID, method: 'api_key' });
+  host.showStatus(`Setup complete: OpenCode Go · ${selection.model.id}`);
+}
+
 export async function handleLogoutCommand(host: SlashCommandHost): Promise<void> {
   const oauthStatus = await host.harness.auth.status(DEFAULT_OAUTH_PROVIDER_NAME);
   const hasOAuthToken = oauthStatus.providers.some(
@@ -195,7 +253,7 @@ export async function handleLogoutCommand(host: SlashCommandHost): Promise<void>
   if (hasManagedRemnant) {
     options.push({
       value: DEFAULT_OAUTH_PROVIDER_NAME,
-      label: PRODUCT_NAME,
+      label: 'Kimi Code',
       description: 'OAuth login',
     });
   }
@@ -237,6 +295,6 @@ export async function handleLogoutCommand(host: SlashCommandHost): Promise<void>
   }
 
   host.track('logout', { provider: target });
-  const label = target === DEFAULT_OAUTH_PROVIDER_NAME ? PRODUCT_NAME : target;
+  const label = target === DEFAULT_OAUTH_PROVIDER_NAME ? 'Kimi Code' : target;
   host.showStatus(`Logged out from ${label}.`);
 }

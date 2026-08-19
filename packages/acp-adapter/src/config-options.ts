@@ -194,7 +194,9 @@ export function buildModeOption(currentModeId: AcpModeId): SessionConfigOption {
  *
  * Calls {@link listModelsFromHarness} exactly once per invocation so a
  * session refresh after each model/mode/thinking change is a single
- * round-trip to the harness. The helper itself is tolerant to
+ * round-trip to the harness. When `config` (an already-fetched harness
+ * config snapshot) is supplied, even that round-trip is skipped — the
+ * snapshot is shared across the request. The helper itself is tolerant to
  * partial-stub harnesses: missing `getConfig` or a throwing one resolve
  * to an empty catalog, so the model picker ships an empty options
  * array and the thinking picker is suppressed (no current model means
@@ -211,8 +213,9 @@ export async function buildSessionConfigOptions(
   currentBaseModelId: string,
   currentThinkingEffort: string,
   currentModeId: AcpModeId,
+  config?: Awaited<ReturnType<KimiHarness['getConfig']>>,
 ): Promise<SessionConfigOption[]> {
-  const models = await listModelsFromHarness(harness);
+  const models = await listModelsFromHarness(harness, config);
   const currentModelEntry = models.find((m) => m.id === currentBaseModelId);
   const showThinking = currentModelEntry?.thinkingSupported === true;
   const out: SessionConfigOption[] = [buildModelOption(models, currentBaseModelId)];

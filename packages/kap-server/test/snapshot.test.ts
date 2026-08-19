@@ -117,6 +117,7 @@ describe('server-v2 snapshot route enrichment', () => {
           {
             // No persisted records in this fake — the transcript is empty.
             read: async function* () {},
+            readFrom: async () => ({ records: [], nextByte: 0, truncated: false }),
           },
         ],
       ]),

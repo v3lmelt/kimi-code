@@ -27,6 +27,7 @@ export function thinkingEffortToConfig(
 } {
   if (effort === 'off') return { enabled: false };
   if (effort === 'on') return { enabled: true };
+  if (effort === 'ultracode') return { enabled: true };
   const top = supportEfforts?.at(-1);
   if (top !== undefined && effort === top) return { enabled: true };
   return { enabled: true, effort };

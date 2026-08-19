@@ -7,7 +7,7 @@ import { CompactionComponent } from '../components/dialogs/compaction';
 import { ReadGroupComponent } from '../components/messages/read-group';
 import { ThinkingComponent } from '../components/messages/thinking';
 import { ToolCallComponent } from '../components/messages/tool-call';
-import { STREAMING_UI_FLUSH_MS } from '../constant/streaming';
+import { STREAMING_UI_FIRST_FLUSH_MS, STREAMING_UI_FLUSH_MS } from '../constant/streaming';
 import { hasDispose } from '../utils/component-capabilities';
 import { appendStreamingArgsPreview, parseStreamingArgs } from '../utils/event-payload';
 import { notifyTerminalOnce } from '../utils/terminal-notification';
@@ -22,6 +22,12 @@ import type {
   TranscriptEntry,
 } from '../types';
 import type { TUIState } from '../tui-state';
+
+const SEARCH_READ_TOOLS = new Set(['Read', 'Grep', 'Glob']);
+
+function isSearchReadTool(name: string): boolean {
+  return SEARCH_READ_TOOLS.has(name);
+}
 
 export interface StreamingUIHost {
   state: TUIState;
@@ -39,6 +45,10 @@ export interface StreamingUIHost {
   mergeCurrentTurnSteps(): void;
   mergeCompletedTurnAssistants(): void;
 }
+
+/** How long a completed tool call's `ran tool for Ns` stays on the status
+ *  suffix before fading back to the normal usage row. */
+const TOOL_RUN_SHOW_MS = 5_000;
 
 export class StreamingUIController {
   private flushTimer: ReturnType<typeof setTimeout> | undefined;
@@ -63,6 +73,13 @@ export class StreamingUIController {
   private _thinkingStartedAtMs: number | undefined = undefined;
   private _activeCompactionBlock: CompactionComponent | undefined = undefined;
   private _activeToolCalls = new Map<string, ToolCallBlockData>();
+  /** Wall-clock start of each in-flight tool call, kept beyond
+   *  `ToolCallBlockData.streamingStartedAtMs` because a full `tool.call.started`
+   *  event carries no start time. Feeds the spinner's tool-call timer suffix. */
+  private _toolCallStartedAtMs = new Map<string, number>();
+  /** Last completed tool call's run window, so the spinner can briefly show
+   *  `ran tool for Ns` after a call finishes. */
+  private _lastToolRun: { startedAtMs: number; endedAtMs: number } | undefined = undefined;
   private _streamingToolCallArguments = new Map<
     string,
     { name?: string; argumentsText: string; startedAtMs: number }
@@ -94,6 +111,13 @@ export class StreamingUIController {
   /** Current thinking state for the spinner status row (see `_thinkingStatus`). */
   getThinkingStatus(): 'thinking' | number | null {
     return this._thinkingStatus;
+  }
+
+  /** Wall-clock start of the current thinking run, for the spinner's
+   *  long-thinking intensity ramp / phrase ladder. `undefined` once thinking
+   *  ends (use {@link getThinkingStatus} for the settled duration). */
+  getThinkingStartedAtMs(): number | undefined {
+    return this._thinkingStartedAtMs;
   }
 
   setTurnId(turnId: string | undefined): void {
@@ -163,6 +187,25 @@ export class StreamingUIController {
 
   removeActiveToolCall(id: string): void {
     this._activeToolCalls.delete(id);
+  }
+
+  /** Timing for the spinner's tool-call suffix. Returns the in-flight call's
+   *  start while one is running, otherwise the last completed call's run window
+   *  if it finished within the last TOOL_RUN_SHOW_MS. */
+  getToolCallTimerInfo(): { startedAtMs: number; endedAtMs: number | undefined } | undefined {
+    let runningStart: number | undefined;
+    for (const call of this._activeToolCalls.values()) {
+      if (call.result !== undefined || call.truncated === true) continue;
+      const start = this._toolCallStartedAtMs.get(call.id) ?? call.streamingStartedAtMs;
+      if (start === undefined) continue;
+      if (runningStart === undefined || start < runningStart) runningStart = start;
+    }
+    if (runningStart !== undefined) return { startedAtMs: runningStart, endedAtMs: undefined };
+    const last = this._lastToolRun;
+    if (last !== undefined && Date.now() - last.endedAtMs < TOOL_RUN_SHOW_MS) {
+      return { startedAtMs: last.startedAtMs, endedAtMs: last.endedAtMs };
+    }
+    return undefined;
   }
 
   getToolComponent(id: string): ToolCallComponent | undefined {
@@ -321,6 +364,12 @@ export class StreamingUIController {
     this._activeToolCalls.set(toolCall.id, toolCall);
     this.pendingToolCallFlushIds.delete(toolCall.id);
     this._streamingToolCallArguments.delete(toolCall.id);
+    // Stamp a start time the first time we see the call (a full
+    // `tool.call.started` event carries none; a streaming preview may already
+    // have set one, which we keep as the earliest).
+    if (!this._toolCallStartedAtMs.has(toolCall.id)) {
+      this._toolCallStartedAtMs.set(toolCall.id, toolCall.streamingStartedAtMs ?? Date.now());
+    }
     const existingComponent = this._pendingToolComponents.get(toolCall.id);
     if (existingComponent !== undefined) {
       existingComponent.updateToolCall(toolCall);
@@ -345,6 +394,9 @@ export class StreamingUIController {
     const name = eventName ?? existing?.name ?? this._activeToolCalls.get(id)?.name ?? 'Tool';
     const startedAtMs = existing?.startedAtMs ?? Date.now();
     this._streamingToolCallArguments.set(id, { name, argumentsText, startedAtMs });
+    if (!this._toolCallStartedAtMs.has(id)) {
+      this._toolCallStartedAtMs.set(id, startedAtMs);
+    }
     this.pendingToolCallFlushIds.add(id);
   }
 
@@ -368,7 +420,12 @@ export class StreamingUIController {
     if (matchedCall !== undefined) {
       this.onToolCallEnd(toolCallId, result);
     }
+    const startedAt = this._toolCallStartedAtMs.get(toolCallId) ?? matchedCall?.streamingStartedAtMs;
+    if (startedAt !== undefined) {
+      this._lastToolRun = { startedAtMs: startedAt, endedAtMs: Date.now() };
+    }
     this._activeToolCalls.delete(toolCallId);
+    this._toolCallStartedAtMs.delete(toolCallId);
     this._streamingToolCallArguments.delete(toolCallId);
     return matchedCall;
   }
@@ -401,6 +458,8 @@ export class StreamingUIController {
   /** Tears down replay-specific state after session history has been rendered. */
   cleanupAfterReplay(completedToolCallIds: Set<string>): void {
     this._activeToolCalls.clear();
+    this._toolCallStartedAtMs.clear();
+    this._lastToolRun = undefined;
     for (const toolCallId of completedToolCallIds) {
       this._pendingToolComponents.delete(toolCallId);
     }
@@ -474,7 +533,7 @@ export class StreamingUIController {
     if (this.flushTimer !== undefined) return;
     const delay =
       this.lastFlushAt === undefined
-        ? 0
+        ? STREAMING_UI_FIRST_FLUSH_MS
         : Math.max(0, STREAMING_UI_FLUSH_MS - (Date.now() - this.lastFlushAt));
     this.flushTimer = setTimeout(() => {
       this.flushTimer = undefined;
@@ -571,6 +630,8 @@ export class StreamingUIController {
 
   resetToolCallState(): void {
     this._activeToolCalls.clear();
+    this._toolCallStartedAtMs.clear();
+    this._lastToolRun = undefined;
   }
 
   finalizeLiveTextBuffers(nextMode: LivePaneState['mode'] = 'idle'): void {
@@ -610,7 +671,7 @@ export class StreamingUIController {
     this.host.setAppState({ streamingPhase: 'idle' });
     this.host.resetLivePane();
     notifyTerminalOnce(state, `turn-complete:${completedTurnKey}`, {
-      title: 'Kimi Code task complete',
+      title: 'Hasu task complete',
       body: state.appState.sessionTitle ?? undefined,
     });
   }
@@ -714,10 +775,10 @@ export class StreamingUIController {
     this._pendingToolComponents.set(toolCall.id, tc);
 
     if (toolCall.name !== 'Agent') this._pendingAgentGroup = null;
-    if (toolCall.name !== 'Read') this._pendingReadGroup = null;
+    if (!isSearchReadTool(toolCall.name)) this._pendingReadGroup = null;
 
     let handled = this.tryAttachAgentToolCall(toolCall, tc);
-    if (!handled) handled = this.tryAttachReadToolCall(toolCall, tc);
+    if (!handled) handled = this.tryAttachSearchReadToolCall(toolCall, tc);
     if (!handled) {
       state.transcriptContainer.addChild(tc);
       state.ui.requestRender();
@@ -877,9 +938,9 @@ export class StreamingUIController {
     const children = state.transcriptContainer.children;
     const idx = children.indexOf(solo);
     if (idx >= 0) {
-      // In-place replacement is picked up by the container's ref-checked
-      // render cache; a tree-wide invalidate is unnecessary (and costly).
-      children[idx] = group;
+      // In-place replacement rewires PARENT/version state via replaceChild
+      // without a tree-wide invalidate.
+      state.transcriptContainer.replaceChild(idx, group);
     } else {
       state.transcriptContainer.addChild(group);
     }
@@ -887,9 +948,9 @@ export class StreamingUIController {
     return group;
   }
 
-  private tryAttachReadToolCall(toolCall: ToolCallBlockData, tc: ToolCallComponent): boolean {
+  private tryAttachSearchReadToolCall(toolCall: ToolCallBlockData, tc: ToolCallComponent): boolean {
     const { state } = this.host;
-    if (toolCall.name !== 'Read') {
+    if (!isSearchReadTool(toolCall.name)) {
       this._pendingReadGroup = null;
       return false;
     }
@@ -935,9 +996,9 @@ export class StreamingUIController {
     const children = state.transcriptContainer.children;
     const idx = children.indexOf(solo);
     if (idx >= 0) {
-      // In-place replacement is picked up by the container's ref-checked
-      // render cache; a tree-wide invalidate is unnecessary (and costly).
-      children[idx] = group;
+      // In-place replacement rewires PARENT/version state via replaceChild
+      // without a tree-wide invalidate.
+      state.transcriptContainer.replaceChild(idx, group);
     } else {
       state.transcriptContainer.addChild(group);
     }

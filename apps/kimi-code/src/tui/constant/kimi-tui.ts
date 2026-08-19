@@ -16,8 +16,14 @@ export const EXIT_CONFIRM_WINDOW_MS = 1500;
 // presses far apart don't accidentally trigger undo.
 export const DOUBLE_ESC_WINDOW_MS = 600;
 
+export const OPENCODE_GO_PROVIDER_NAME = 'opencode-go';
+
 export function isManagedUsageProvider(
   providerKey: string | undefined,
 ): providerKey is typeof DEFAULT_OAUTH_PROVIDER_NAME {
   return providerKey === DEFAULT_OAUTH_PROVIDER_NAME;
+}
+
+export function isOpenCodeGoProvider(providerKey: string | undefined): boolean {
+  return providerKey === OPENCODE_GO_PROVIDER_NAME;
 }

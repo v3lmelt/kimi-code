@@ -9,6 +9,7 @@ import {
 import {
   applyManagedKimiCodeConfig,
   applyManagedKimiCodeLogoutConfig,
+  fetchGoUsage,
   KIMI_CODE_PROVIDER_NAME,
   KimiOAuthToolkit,
   resolveKimiCodeLoginAuth,
@@ -23,6 +24,7 @@ import {
   type KimiOAuthLoginOptions,
   type ManagedKimiConfigShape,
   type OAuthRefreshOutcome,
+  type ParsedGoUsage,
 } from '@moonshot-ai/kimi-code-oauth';
 
 import { mapOAuthTokenError } from '#/oauth-error';
@@ -95,6 +97,10 @@ export interface KimiAuthFacadeOptions {
 }
 
 type SDKManagedConfig = KimiConfig & ManagedKimiConfigShape;
+
+export type AuthGoUsageResult =
+  | { readonly kind: 'ok'; readonly parsed: ParsedGoUsage }
+  | { readonly kind: 'error'; readonly status?: number; readonly message: string };
 
 export class KimiAuthFacade {
   private readonly toolkit: KimiOAuthToolkit<SDKManagedConfig>;
@@ -173,6 +179,21 @@ export class KimiAuthFacade {
       oauthRef: auth.oauthRef,
       baseUrl: auth.baseUrl,
     });
+  }
+
+  async getGoUsage(): Promise<AuthGoUsageResult> {
+    const provider = loadRuntimeConfigSafe(this.options.configPath).config.providers['opencode-go'];
+    const baseUrl =
+      process.env['OPENCODE_GO_BASE_URL'] ?? provider?.baseUrl ?? 'https://opencode.ai/zen/go/v1';
+    const apiKey = process.env['OPENCODE_GO_API_KEY'] ?? provider?.apiKey;
+    if (!apiKey) {
+      return {
+        kind: 'error',
+        message:
+          'No opencode-go API key configured (set OPENCODE_GO_API_KEY or providers.opencode-go.api_key in config.toml).',
+      };
+    }
+    return fetchGoUsage(baseUrl, apiKey);
   }
 
   async submitFeedback(

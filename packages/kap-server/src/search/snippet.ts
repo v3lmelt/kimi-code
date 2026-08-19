@@ -29,12 +29,17 @@ export function snippetTerms(query: string): string[] {
  * window math clamps out-of-range offsets, so an anchor taken from a
  * normalized copy of the text (NFKC can shift offsets) degrades to a
  * slightly shifted window, never an error.
+ *
+ * `terms` — optional precomputed `snippetTerms(query)`; callers that render
+ * many hits from one query (search pagination) pass it to avoid re-splitting
+ * the query per hit.
  */
 export function makeSnippet(
   text: string,
   query: string,
   radius = 80,
   anchor?: { at: number; len: number },
+  terms?: string[],
 ): string {
   let hitAt = -1;
   let hitLen = 0;
@@ -44,7 +49,7 @@ export function makeSnippet(
   } else {
     const lower = text.toLowerCase();
     // Earliest occurrence across all terms wins; on ties prefer the longer term.
-    for (const term of snippetTerms(query)) {
+    for (const term of terms ?? snippetTerms(query)) {
       const i = lower.indexOf(term.toLowerCase());
       if (i === -1) continue;
       if (hitAt === -1 || i < hitAt || (i === hitAt && term.length > hitLen)) {

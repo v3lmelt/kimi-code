@@ -1,11 +1,12 @@
 import chalk from 'chalk';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { FooterComponent } from '#/tui/components/chrome/footer';
 import { setRainbowDance, type RainbowDanceController } from '#/tui/easter-eggs/dance';
 import { currentTheme, darkColors, lightColors } from '#/tui/theme';
 import type { ModelAlias } from '@moonshot-ai/kimi-code-sdk';
 import type { AppState } from '#/tui/types';
+import { QuotaRunner } from '#/tui/utils/quota-runner';
 
 const TRUECOLOR_PATTERN = /\[38;2;(\d+);(\d+);(\d+)m/g;
 
@@ -58,6 +59,7 @@ const appState: AppState = {
   availableModels: {},
   availableProviders: {},
   mcpServersSummary: null,
+  workflowRuns: [],
 };
 
 describe('FooterComponent', () => {
@@ -122,7 +124,7 @@ describe('FooterComponent', () => {
     };
     const footer = new FooterComponent(state);
 
-    expect(footer.render(120).join('\n')).toContain('thinking: max');
+    expect(footer.render(120).join('\n')).toContain('kimi-k2 max');
   });
 
   it('does not show the effort for a legacy boolean model', () => {
@@ -143,6 +145,35 @@ describe('FooterComponent', () => {
     expect(rendered).toContain('thinking');
     expect(rendered).not.toContain('thinking:high');
   });
+
+  it('keeps mode/goal/model on line 1, wraps the rest to line 2, and omits cwd/git', () => {
+    const state: AppState = {
+      ...appState,
+      permissionMode: 'yolo',
+      sessionCacheUsage: { inputOther: 30, inputCacheRead: 62, inputCacheCreation: 8 },
+    };
+    const footer = new FooterComponent(state);
+    const lines = footer.render(120);
+
+    expect(lines[0]).toContain('bypass permissions on');
+    expect(lines[0]).toContain('kimi-k2');
+    expect(lines[0]).not.toContain('context');
+    expect(lines[1]).toContain('cache 62%');
+    expect(lines[1]).not.toContain('/tmp/project');
+  });
+
+  it('shows cwd/git again when explicitly configured via status_line items', () => {
+    const state: AppState = {
+      ...appState,
+      sessionCacheUsage: { inputOther: 30, inputCacheRead: 62, inputCacheCreation: 8 },
+      statusLine: { items: ['mode', 'goal', 'model', 'cwd', 'git'], command: null },
+    };
+    const footer = new FooterComponent(state);
+    const lines = footer.render(120);
+
+    expect(lines[0]).toContain('kimi-k2');
+    expect(lines[1]).toContain('/tmp/project');
+  });
 });
 
 describe('FooterComponent overrides', () => {
@@ -162,7 +193,7 @@ describe('FooterComponent overrides', () => {
     };
     const footer = new FooterComponent(state);
 
-    expect(footer.render(120).join('\n')).toContain('thinking: high');
+    expect(footer.render(120).join('\n')).toContain('kimi-k2 high');
   });
 });
 
@@ -185,5 +216,175 @@ describe('FooterComponent displayName override', () => {
 
     expect(footer.render(120).join('\n')).toContain('Custom Name');
     expect(footer.render(120).join('\n')).not.toContain('Remote Name');
+  });
+});
+
+describe('FooterComponent quota slot', () => {
+  const GO_MODEL: ModelAlias = {
+    provider: 'opencode-go',
+    model: 'deepseek-v4-flash',
+    maxContextSize: 262144,
+  };
+
+  it('renders compact quota rows for an opencode-go provider with a snapshot', async () => {
+    const state: AppState = {
+      ...appState,
+      model: 'go-flash',
+      availableModels: { 'go-flash': GO_MODEL },
+    };
+    const footer = new FooterComponent(state);
+    const runner = new QuotaRunner(
+      async () => ({
+        rows: [
+          {
+            used: 14,
+            limit: 100,
+            resetAt: new Date(Date.now() + 4.5 * 3600_000).toISOString(),
+            duration: 5,
+            unit: 'hour',
+          },
+          {
+            used: 3,
+            limit: 100,
+            resetAt: new Date(Date.now() + 6 * 86_400_000).toISOString(),
+            duration: 1,
+            unit: 'week',
+          },
+        ],
+      }),
+      () => {},
+    );
+    footer.setQuotaRunner(runner);
+    try {
+      await vi.waitFor(() => {
+        expect(runner.current()).not.toBeNull();
+      });
+      const output = footer.render(120).join('\n');
+      expect(output).toContain('◱ 14% (');
+      expect(output).toContain('◑ 3% (');
+    } finally {
+      footer.dispose();
+    }
+  });
+
+  it('renders quota rows for the kimi managed provider', async () => {
+    const state: AppState = {
+      ...appState,
+      model: 'kimi-k2',
+      availableModels: {
+        'kimi-k2': { provider: 'managed:kimi-code', model: 'kimi-k2', maxContextSize: 262144 },
+      },
+    };
+    const footer = new FooterComponent(state);
+    const runner = new QuotaRunner(
+      async () => ({
+        rows: [
+          { used: 0, limit: 100, duration: 5, unit: 'hour' },
+          {
+            used: 89,
+            limit: 100,
+            resetAt: new Date(Date.now() + 3 * 86_400_000).toISOString(),
+            duration: 1,
+            unit: 'week',
+          },
+        ],
+      }),
+      () => {},
+    );
+    footer.setQuotaRunner(runner);
+    try {
+      await vi.waitFor(() => {
+        expect(runner.current()).not.toBeNull();
+      });
+      const output = footer.render(120).join('\n');
+      expect(output).toContain('◱ 0%');
+      expect(output).toContain('◑ 89% (');
+    } finally {
+      footer.dispose();
+    }
+  });
+
+  it('hides the quota slot for providers without quota data', async () => {
+    const footer = new FooterComponent(appState); // no availableModels → provider undefined
+    const runner = new QuotaRunner(async () => ({ rows: [{ used: 14, limit: 100 }] }), () => {});
+    footer.setQuotaRunner(runner);
+    try {
+      await vi.waitFor(() => {
+        expect(runner.current()).not.toBeNull();
+      });
+      const output = footer.render(120).join('\n');
+      expect(output).not.toContain('◱');
+      expect(output).not.toContain('◑');
+    } finally {
+      footer.dispose();
+    }
+  });
+
+  it('hides the quota slot until the runner lands a snapshot', () => {
+    const state: AppState = {
+      ...appState,
+      model: 'go-flash',
+      availableModels: { 'go-flash': GO_MODEL },
+    };
+    const footer = new FooterComponent(state);
+    const runner = new QuotaRunner(async () => ({ rows: [] }), () => {});
+    footer.setQuotaRunner(runner);
+    try {
+      // Render synchronously before the async loader resolves.
+      const output = footer.render(120).join('\n');
+      expect(output).not.toContain('◱');
+    } finally {
+      footer.dispose();
+    }
+  });
+
+  it('never renders the quota slot when the snapshot has no rows', async () => {
+    const state: AppState = {
+      ...appState,
+      model: 'go-flash',
+      availableModels: { 'go-flash': GO_MODEL },
+    };
+    const footer = new FooterComponent(state);
+    const runner = new QuotaRunner(async () => ({ rows: [] }), () => {});
+    footer.setQuotaRunner(runner);
+    try {
+      await vi.waitFor(() => {
+        expect(runner.current()).not.toBeNull();
+      });
+      const output = footer.render(120).join('\n');
+      expect(output).not.toContain('◱');
+      expect(output).not.toContain('◑');
+    } finally {
+      footer.dispose();
+    }
+  });
+});
+
+describe('FooterComponent cache slot', () => {
+  it('renders the session cache hit rate from accumulated usage', () => {
+    const state: AppState = {
+      ...appState,
+      sessionCacheUsage: { inputOther: 30, inputCacheRead: 62, inputCacheCreation: 8 },
+    };
+    const footer = new FooterComponent(state);
+
+    const output = footer.render(120).join('\n');
+    expect(output).toContain('cache 62%');
+  });
+
+  it('hides the cache slot until a step with exact usage completes', () => {
+    const footer = new FooterComponent(appState);
+
+    expect(footer.render(120).join('\n')).not.toContain('cache');
+  });
+
+  it('hides the cache slot when no input tokens were observed', () => {
+    const state: AppState = {
+      ...appState,
+      sessionCacheUsage: { inputOther: 0, inputCacheRead: 0, inputCacheCreation: 0 },
+    };
+    const footer = new FooterComponent(state);
+
+    expect(footer.render(120).join('\n')).not.toContain('cache');
   });
 });

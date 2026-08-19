@@ -79,6 +79,7 @@ import {
   resolveAuthBackedClient,
 } from '../request-auth';
 import { normalizeToolCallIdsForProvider, sanitizeToolCallId } from '../tool-call-id';
+import { stripSystemPromptBoundary } from '#/kosong/provider/systemPromptBoundary';
 
 
 const CHAT_COMPLETIONS_MAX_OUTPUT_TOKENS_CEILING = 128 * 1024;
@@ -585,7 +586,7 @@ export class OpenAILegacyChatProvider implements ChatProvider {
 
     const messages: Record<string, unknown>[] = [];
     if (systemPrompt) {
-      messages.push({ role: 'system', content: systemPrompt });
+      messages.push({ role: 'system', content: stripSystemPromptBoundary(systemPrompt) });
     }
 
     const policy = this._hooks?.toolCallIdPolicy?.() ?? OPENAI_CHAT_TOOL_CALL_ID_POLICY;

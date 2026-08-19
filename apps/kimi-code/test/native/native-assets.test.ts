@@ -164,6 +164,46 @@ describe('native assets', () => {
     }
   });
 
+  it('skips re-verification on repeated lookups once the tree is verified', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'kimi-native-assets-memo-'));
+    try {
+      const { manifest, source } = fakeManifest({
+        'node_modules/fake-native/package.json': '{"main":"index.js"}',
+        'node_modules/fake-native/index.js': "module.exports = { value: 'ok' };\n",
+      });
+      let rawCalls = 0;
+      const countingSource: NativeAssetSource = {
+        getAssetKeys: () => source.getAssetKeys(),
+        getRawAsset: (key) => {
+          rawCalls += 1;
+          return source.getRawAsset(key);
+        },
+      };
+      const options = { cacheBase: dir, manifest, source: countingSource, version: 'test' };
+
+      const first = getNativePackageRoot('fake-native', options);
+      expect(first).not.toBeNull();
+      expect(rawCalls).toBe(2); // one SEA read per extracted file
+
+      const markerPath = join(
+        dir,
+        'native',
+        'test',
+        'test-target',
+        sha256(JSON.stringify(manifest)),
+        '.kimi-native-verified.json',
+      );
+      expect(existsSync(markerPath)).toBe(true);
+
+      const second = getNativePackageRoot('fake-native', options);
+      expect(second).toBe(first);
+      // The verified marker short-circuits the whole tree: no SEA reads, no hashing.
+      expect(rawCalls).toBe(2);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
   it('extracts, reuses, and repairs the runtime worker in the unified cache tree', () => {
     const dir = mkdtempSync(join(tmpdir(), 'kimi-native-worker-'));
     try {

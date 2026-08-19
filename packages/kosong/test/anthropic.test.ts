@@ -2733,6 +2733,41 @@ describe('AnthropicChatProvider', () => {
       });
     });
 
+    it('maps cache read and cache creation into the usage breakdown', async () => {
+      const provider = createProvider();
+      (provider as any)._client.messages.create = vi.fn().mockResolvedValue({
+        id: 'msg_cache',
+        content: [{ type: 'text', text: 'Hello world' }],
+        usage: {
+          input_tokens: 10,
+          output_tokens: 5,
+          cache_read_input_tokens: 3,
+          cache_creation_input_tokens: 2,
+        },
+      });
+
+      const stream = await provider.generate(
+        '',
+        [],
+        [{ role: 'user', content: [{ type: 'text', text: 'Hi' }], toolCalls: [] }],
+      );
+
+      const parts = [];
+      for await (const part of stream) {
+        parts.push(part);
+      }
+
+      expect(parts).toEqual([{ type: 'text', text: 'Hello world' }]);
+      // `input_tokens` is the non-cache portion (Anthropic reports cache
+      // buckets disjoint from it), so no subtraction happens here.
+      expect(stream.usage).toEqual({
+        inputOther: 10,
+        output: 5,
+        inputCacheRead: 3,
+        inputCacheCreation: 2,
+      });
+    });
+
     it('yields thinking and tool_use from non-stream response', async () => {
       const provider = createProvider();
       (provider as any)._client.messages.create = vi.fn().mockResolvedValue({

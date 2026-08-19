@@ -27,6 +27,8 @@ import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { unwrapErrorCause } from '#/_base/errors/errors';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import { IAgentReadStateService } from '#/agent/readState/readState';
+import '#/agent/readState/readStateService';
 import {
   ToolAccesses,
   type ExecutableToolResult,
@@ -81,6 +83,10 @@ interface FinishReadResultInput {
   readonly totalLines: number;
   readonly requestedLines: number;
   readonly detectedEncoding?: UtfTextEncoding;
+  readonly path: string;
+  readonly mtimeMs?: number;
+  readonly offset: number;
+  readonly lines: number;
 }
 
 function truncateLine(line: string, maxLength: number): string {
@@ -236,6 +242,7 @@ export class ReadTool implements IReadTool {
     @IHostEnvironment private readonly env: IHostEnvironment,
     @ISessionWorkspaceContext private readonly workspaceCtx: ISessionWorkspaceContext,
     @ISessionSkillCatalog private readonly skillCatalog?: ISessionSkillCatalog,
+    @IAgentReadStateService private readonly readState?: IAgentReadStateService,
   ) {}
 
   private get workspaceConfig(): WorkspaceConfig {
@@ -328,6 +335,14 @@ export class ReadTool implements IReadTool {
       const requestedLines = args.n_lines ?? MAX_LINES;
       const effectiveLimit = Math.min(requestedLines, MAX_LINES);
 
+      const deduped = this.dedupeIfUnchanged(
+        safePath,
+        stat.mtimeMs,
+        lineOffset,
+        effectiveLimit,
+      );
+      if (deduped !== undefined) return deduped;
+
       if (lineOffset < 0) {
         return await this.readTail(
           args.path,
@@ -336,6 +351,8 @@ export class ReadTool implements IReadTool {
           effectiveLimit,
           requestedLines,
           detectedEncoding,
+          safePath,
+          stat.mtimeMs,
         );
       }
       return await this.readForward(
@@ -345,6 +362,8 @@ export class ReadTool implements IReadTool {
         effectiveLimit,
         requestedLines,
         detectedEncoding,
+        safePath,
+        stat.mtimeMs,
       );
     } catch (error) {
       if (isTextDecodeError(error)) {
@@ -357,6 +376,36 @@ export class ReadTool implements IReadTool {
     }
   }
 
+  private dedupeIfUnchanged(
+    path: string,
+    mtimeMs: number | undefined,
+    offset: number,
+    lines: number,
+  ): ExecutableToolResult | undefined {
+    if (this.readState?.isEnabled() !== true) return undefined;
+    const entry = this.readState.find(path);
+    if (entry === undefined || entry.mtimeMs !== mtimeMs) return undefined;
+    const matched = entry.ranges.some(
+      (range) => range.offset === offset && range.lines === lines,
+    );
+    if (!matched) return undefined;
+    return {
+      output:
+        `[File unchanged since last read — ${String(entry.totalLines)} lines at offset ${String(offset)}. ` +
+        'Use offset to read further…]',
+    };
+  }
+
+  private recordReadState(input: FinishReadResultInput): void {
+    if (this.readState?.isEnabled() !== true) return;
+    this.readState.recordRead(input.path, {
+      mtimeMs: input.mtimeMs,
+      totalLines: input.totalLines,
+      offset: input.offset,
+      lines: input.lines,
+    });
+  }
+
   private async readForward(
     displayPath: string,
     lines: AsyncIterable<string>,
@@ -364,6 +413,8 @@ export class ReadTool implements IReadTool {
     effectiveLimit: number,
     requestedLines: number,
     detectedEncoding?: UtfTextEncoding,
+    path?: string,
+    mtimeMs?: number,
   ): Promise<ExecutableToolResult> {
     const selectedEntries: ReadLineEntry[] = [];
     const flags: LineEndingFlags = { hasCrLf: false, hasLf: false, hasLoneCr: false };
@@ -413,6 +464,10 @@ export class ReadTool implements IReadTool {
       totalLines: currentLineNo,
       requestedLines,
       detectedEncoding,
+      path: path ?? displayPath,
+      mtimeMs,
+      offset: lineOffset,
+      lines: effectiveLimit,
     });
   }
 
@@ -423,6 +478,8 @@ export class ReadTool implements IReadTool {
     effectiveLimit: number,
     requestedLines: number,
     detectedEncoding?: UtfTextEncoding,
+    path?: string,
+    mtimeMs?: number,
   ): Promise<ExecutableToolResult> {
     const tailCount = Math.abs(lineOffset);
     const entries: ReadLineEntry[] = [];
@@ -451,6 +508,9 @@ export class ReadTool implements IReadTool {
       totalLines: currentLineNo,
       requestedLines,
       detectedEncoding,
+      path: path ?? displayPath,
+      mtimeMs,
+      offset: lineOffset,
     });
   }
 
@@ -461,6 +521,9 @@ export class ReadTool implements IReadTool {
     totalLines: number;
     requestedLines: number;
     detectedEncoding?: UtfTextEncoding;
+    path: string;
+    mtimeMs?: number;
+    offset: number;
   }): ExecutableToolResult {
     const lineEndingStyle = lineEndingStyleFromFlags(input.lineEndingFlags);
     let renderedCandidates = input.entries.slice(0, input.effectiveLimit).map((entry) => {
@@ -507,10 +570,15 @@ export class ReadTool implements IReadTool {
       totalLines: input.totalLines,
       requestedLines: input.requestedLines,
       detectedEncoding: input.detectedEncoding,
+      path: input.path,
+      mtimeMs: input.mtimeMs,
+      offset: input.offset,
+      lines: input.effectiveLimit,
     });
   }
 
   private finishReadResult(input: FinishReadResultInput): ExecutableToolResult {
+    this.recordReadState(input);
     return {
       output: input.renderedLines.join('\n'),
       note: `<system>${this.finishMessage(input)}</system>`,

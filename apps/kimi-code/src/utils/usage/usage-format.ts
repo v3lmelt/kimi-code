@@ -1,9 +1,25 @@
+import type { TokenUsage } from '@moonshot-ai/kimi-code-sdk';
+
 /**
  * Formatting helpers for the `/usage` slash command.
  *
  * Kept pure + ANSI-free so they're trivial to unit-test; the slash
  * command itself chalks the colour afterwards.
  */
+
+/**
+ * Total input tokens across the cache/uncached split, mirroring how
+ * subagent token counters read provider usage.
+ */
+function usageInputTotal(usage: TokenUsage): number {
+  return (usage.inputOther ?? 0) + (usage.inputCacheRead ?? 0) + (usage.inputCacheCreation ?? 0);
+}
+
+/** Total tokens (input + output) for a usage report; 0 when absent. */
+export function usageTotal(usage: TokenUsage | undefined): number {
+  if (usage === undefined) return 0;
+  return usageInputTotal(usage) + usage.output;
+}
 
 /**
  * Format a token count in 1024-based units: context sizes are powers of

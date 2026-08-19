@@ -74,6 +74,11 @@ export function turnOutputTokens(
  * estimated output tokens of the in-flight step (see
  * {@link estimateStreamedTokens}); the larger of it and the exact live usage
  * wins so the counter never jumps backwards when the estimate overshoots.
+ * `displayedOutput`, when given, overrides the token total entirely so callers
+ * can share a single smoothed counter across display positions (the footer's
+ * main-agent line and the spinner row stay in lock-step). `toolTimer`, when
+ * given, folds a `running tool for Ns` / `ran tool for Ns` segment into the
+ * suffix (gated by the caller behind an experimental flag).
  */
 export function formatTurnUsage(
   phase: TurnPhase,
@@ -81,14 +86,24 @@ export function formatTurnUsage(
   now: number = Date.now(),
   estimatedOutput = 0,
   thinkingStatus: 'thinking' | number | null = null,
+  displayedOutput?: number,
+  toolTimer?: { startedAtMs: number; endedAtMs: number | undefined } | undefined,
 ): string {
   if (usage === undefined || usage.turnStartedAt <= 0 || phase === 'idle') return '';
-  const totalOutput = turnOutputTokens(usage, estimatedOutput);
+  const totalOutput = displayedOutput ?? turnOutputTokens(usage, estimatedOutput);
   const parts: string[] = [];
   if (thinkingStatus === 'thinking') {
     parts.push('thinking');
   } else if (typeof thinkingStatus === 'number') {
     parts.push(`thought for ${Math.max(1, Math.round(thinkingStatus / 1000))}s`);
+  }
+  if (toolTimer !== undefined) {
+    const seconds = Math.max(1, Math.round((now - toolTimer.startedAtMs) / 1000));
+    parts.push(
+      toolTimer.endedAtMs === undefined
+        ? `running tool for ${seconds}s`
+        : `ran tool for ${seconds}s`,
+    );
   }
   parts.push(formatElapsed(now, usage.turnStartedAt));
   if (totalOutput > 0) {

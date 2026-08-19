@@ -1,6 +1,6 @@
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
-import { join, normalize } from 'pathe';
+import { dirname, join, normalize } from 'pathe';
 
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -32,6 +32,10 @@ import { IWireService } from '#/wire/wire';
 import type { ExecutableTool, ToolExecution, ToolResult, ToolSource } from '#/tool/toolContract';
 
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
+
+import { encodeWorkDirKey } from '#/_base/utils/workdir-slug';
+import { IMemoryService, MEMORY_SECTION_HEADING } from '#/agent/memory/memory';
+import { ISessionContext } from '#/session/sessionContext/sessionContext';
 
 import { deferredAgentIdentityStub } from '../../app/agentIdentity/stubs';
 import {
@@ -1158,5 +1162,113 @@ describe('agentsMdReminder seeding', () => {
     );
 
     expect(seedInjected).not.toHaveBeenCalled();
+  });
+});
+
+describe('AgentProfileService.bind memory scope', () => {
+  let ctx: TestAgentContext;
+  let homeDir: string;
+
+  beforeAll(() => {
+    registerAgentProfile({
+      name: 'memory-scoped',
+      memory: 'project',
+      systemPrompt: () => 'memory scope test',
+    });
+    registerAgentProfile({
+      name: 'memory-default',
+      systemPrompt: () => 'memory default test',
+    });
+  });
+
+  beforeEach(async () => {
+    homeDir = await mkdtemp(join(tmpdir(), 'kimi-bind-home-'));
+  });
+
+  afterEach(async () => {
+    await ctx?.dispose();
+    await rm(homeDir, { recursive: true, force: true });
+  });
+
+  function buildContext(): { ctx: TestAgentContext; profile: IAgentProfileService } {
+    ctx = createTestAgent(hostEnvironmentServices(homeDir));
+    return { ctx, profile: ctx.get(IAgentProfileService) };
+  }
+
+  it('keeps the user scope for profiles without a memory field', async () => {
+    const { ctx: c, profile } = buildContext();
+    const memory = c.get(IMemoryService);
+
+    await profile.bind({ profile: 'memory-default', model: MOCK_MODEL });
+
+    expect(memory.memoryScope()).toBe('user');
+    expect(memory.memoryFilePath()).toBe(join(memory.memoryDir(), 'MEMORY.md'));
+  });
+
+  it('scopes the memory file per project and injects it before the prompt freezes', async () => {
+    const { ctx: c, profile } = buildContext();
+    const memory = c.get(IMemoryService);
+    const cwd = c.get(ISessionContext).cwd;
+
+    expect(memory.memoryScope()).toBe('user');
+
+    const projectFile = join(
+      memory.memoryDir(),
+      'projects',
+      encodeWorkDirKey(cwd),
+      'MEMORY.md',
+    );
+    await mkdir(dirname(projectFile), { recursive: true });
+    await writeFile(projectFile, `${MEMORY_SECTION_HEADING}\n\nproject-scoped note\n`, 'utf8');
+
+    await profile.bind({ profile: 'memory-scoped', model: MOCK_MODEL });
+
+    expect(memory.memoryScope()).toBe('project');
+    expect(memory.memoryFilePath()).toBe(projectFile);
+    expect(profile.getSystemPrompt()).toContain('project-scoped note');
+  });
+
+  it('re-derives the scope from the bound profile after a snapshot restore', async () => {
+    const { ctx: c, profile } = buildContext();
+    const memory = c.get(IMemoryService);
+
+    await profile.bind({ profile: 'memory-scoped', model: MOCK_MODEL });
+    expect(memory.memoryScope()).toBe('project');
+
+    // A binding-snapshot fork rebuilds the profile without re-running `bind`;
+    // the scope must be re-pointed at the restored profile.
+    profile.applyBindingSnapshot(profile.data());
+    expect(profile.isRunnable()).toBe(true);
+    await profile.syncMemoryScope();
+    expect(memory.memoryScope()).toBe('project');
+    expect(memory.memoryFilePath()).toBe(
+      join(
+        memory.memoryDir(),
+        'projects',
+        encodeWorkDirKey(c.get(ISessionContext).cwd),
+        'MEMORY.md',
+      ),
+    );
+  });
+
+  it('refreshSystemPrompt re-scopes the memory file at the restored profile', async () => {
+    const { ctx: c, profile } = buildContext();
+    const memory = c.get(IMemoryService);
+
+    await profile.bind({ profile: 'memory-scoped', model: MOCK_MODEL });
+    // Simulate a recovery path that left the scope behind at the default.
+    memory.setScope('user');
+    expect(memory.memoryScope()).toBe('user');
+
+    await profile.refreshSystemPrompt();
+    expect(memory.memoryScope()).toBe('project');
+  });
+
+  it('syncMemoryScope is a no-op before any profile is bound', async () => {
+    const { ctx: c, profile } = buildContext();
+    const memory = c.get(IMemoryService);
+
+    await profile.syncMemoryScope();
+    expect(memory.memoryScope()).toBe('user');
   });
 });

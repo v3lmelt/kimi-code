@@ -28,8 +28,11 @@ import { toInputJsonSchema } from '#/tool/input-schema';
 import { literalRulePattern, matchesPathRuleSubject } from '#/tool/rule-match';
 import { IFileEditService } from '#/app/edit/fileEdit';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import { IAgentReadStateService } from '#/agent/readState/readState';
+import '#/agent/readState/readStateService';
 import {
   ToolAccesses,
   type ExecutableToolResult,
@@ -51,6 +54,8 @@ export class EditTool implements IEditTool {
     @IHostEnvironment private readonly env: IHostEnvironment,
     @ISessionWorkspaceContext private readonly workspaceCtx: ISessionWorkspaceContext,
     @ISessionSkillCatalog private readonly skillCatalog?: ISessionSkillCatalog,
+    @IAgentReadStateService private readonly readState?: IAgentReadStateService,
+    @IHostFileSystem private readonly fs?: IHostFileSystem,
   ) {}
 
   private get workspaceConfig(): WorkspaceConfig {
@@ -99,6 +104,9 @@ export class EditTool implements IEditTool {
       };
     }
 
+    const stale = await this.staleReadCheck(args.path, safePath);
+    if (stale !== undefined) return stale;
+
     const result = await this.editor.edit({
       path: safePath,
       displayPath: args.path,
@@ -109,8 +117,51 @@ export class EditTool implements IEditTool {
     if (!result.ok) {
       return { isError: true, output: result.error };
     }
+    await this.refreshReadStateAfterEdit(safePath);
     const word = result.count === 1 ? 'occurrence' : 'occurrences';
     return { output: `Replaced ${String(result.count)} ${word} in ${args.path}` };
+  }
+
+  private async staleReadCheck(
+    displayPath: string,
+    safePath: string,
+  ): Promise<ExecutableToolResult | undefined> {
+    if (this.readState?.isEnabled() !== true) return undefined;
+    const state = this.readState.find(safePath);
+    if (state === undefined) {
+      return {
+        isError: true,
+        output: `请先 Read "${displayPath}" 再 Edit：编辑前必须先用 Read 工具读取该文件。`,
+      };
+    }
+    if (this.fs === undefined) return undefined;
+    try {
+      const stat = await this.fs.stat(safePath);
+      if (
+        stat.mtimeMs !== undefined &&
+        state.mtimeMs !== undefined &&
+        stat.mtimeMs !== state.mtimeMs
+      ) {
+        return {
+          isError: true,
+          output: `文件 "${displayPath}" 自上次 Read 后已变更，请重新 Read 后再 Edit。`,
+        };
+      }
+    } catch {
+      // stat failed — do not block the edit
+    }
+    return undefined;
+  }
+
+  private async refreshReadStateAfterEdit(safePath: string): Promise<void> {
+    if (this.readState?.isEnabled() !== true) return;
+    if (this.fs === undefined) return;
+    try {
+      const stat = await this.fs.stat(safePath);
+      this.readState.recordEdit(safePath, stat.mtimeMs);
+    } catch {
+      this.readState.recordEdit(safePath, undefined);
+    }
   }
 }
 

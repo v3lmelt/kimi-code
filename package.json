@@ -11,9 +11,6 @@
     "dev:cli": "pnpm -C apps/kimi-code run dev",
     "dev:cli:legacy": "KIMI_CODE_LEGACY_FLAG=1 pnpm -C apps/kimi-code run dev",
     "dev:cli:marketplace": "KIMI_CODE_DEV_MARKETPLACE_URL=https://code.kimi.com/kimi-code/plugins/marketplace.json pnpm -C apps/kimi-code run dev",
-    "dev:server": "pnpm -C apps/kimi-code run dev:server",
-    "dev:kap-server": "pnpm -C apps/kimi-code run dev:kap-server",
-    "dev:v2": "pnpm -C apps/kimi-code run dev:kap-server:multi",
     "build:plugin-marketplace": "pnpm -C apps/kimi-code run build:plugin-marketplace",
     "vis": "pnpm -C apps/vis run dev",
     "dev:docs": "pnpm -C docs install --ignore-workspace && pnpm -C docs run dev",
@@ -51,8 +48,7 @@
     "typescript": "6.0.2",
     "vitest": "4.1.4"
   },
-  "simple-git-hooks": {
-  },
+  "simple-git-hooks": {},
   "lint-staged": {
     "*.{js,jsx,ts,tsx,mjs,cjs,mts,cts}": [
       "oxlint --fix --quiet",
@@ -62,5 +58,8 @@
   "engines": {
     "node": ">=24.15.0"
   },
-  "packageManager": "pnpm@10.33.0"
+  "packageManager": "pnpm@10.33.0",
+  "dependencies": {
+    "zod": "^4.3.6"
+  }
 }

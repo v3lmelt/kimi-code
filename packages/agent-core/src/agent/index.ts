@@ -629,6 +629,24 @@ export class Agent {
       getSwarmMode: () => {
         return this.swarmMode.isActive;
       },
+      enterUltracode: () => {
+        throw new KimiError(
+          ErrorCodes.NOT_IMPLEMENTED,
+          'Ultracode is only supported by the v2 engine.',
+        );
+      },
+      exitUltracode: () => {
+        throw new KimiError(
+          ErrorCodes.NOT_IMPLEMENTED,
+          'Ultracode is only supported by the v2 engine.',
+        );
+      },
+      getUltracode: () => {
+        throw new KimiError(
+          ErrorCodes.NOT_IMPLEMENTED,
+          'Ultracode is only supported by the v2 engine.',
+        );
+      },
       beginCompaction: (payload) => {
         this.fullCompaction.begin({ source: 'manual', instruction: payload.instruction });
       },

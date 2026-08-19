@@ -136,7 +136,7 @@ export async function runPrompt(
     },
     sessionStartedProperties: { yolo: false, plan: false, afk: true },
   });
-  log.info('kimi-code starting', {
+  log.info('hasu starting', {
     version,
     uiMode: PROMPT_UI_MODE,
     nodeVersion: process.version,
@@ -160,7 +160,7 @@ export async function runPrompt(
     // Bound cleanup so a wedged shutdown step (e.g. a SessionEnd hook, MCP
     // shutdown, or a connection blackholed by a restrictive firewall) cannot
     // keep a completed headless run alive forever. The cleanup keeps running in
-    // the background if it overruns; the caller (`kimi -p`) force-exits shortly
+    // the background if it overruns; the caller (`hasu -p`) force-exits shortly
     // after, so any straggling work is torn down with the process.
     await raceWithTimeout(pending, PROMPT_CLEANUP_TIMEOUT_MS);
   };
@@ -196,7 +196,7 @@ export async function runPrompt(
     });
     setCrashPhase('runtime');
 
-    // Headless goal mode: `kimi -p "/goal <objective>"`. The goal driver keeps
+    // Headless goal mode: `hasu -p "/goal <objective>"`. The goal driver keeps
     // the turn-run alive across continuation turns, so the normal prompt-turn
     // waiter blocks until the goal is terminal; we then emit a summary and set a
     // distinct exit code.
@@ -309,7 +309,7 @@ async function resolvePromptSession(
       stderr.write(
         `${chalk.hex('#E8A838')(
           `Session "${opts.session}" was created under a different directory.\n` +
-            `  cd "${target.workDir}" && kimi -r ${opts.session}`,
+            `  cd "${target.workDir}" && hasu -r ${opts.session}`,
         )}\n\n`,
       );
       throw new Error(
@@ -413,7 +413,7 @@ export function requireConfiguredModel(...models: readonly (string | undefined)[
   const model = configuredModel(...models);
   if (model === undefined) {
     throw new Error(
-      'No model configured. Run `kimi` and use /login to sign in, then retry; or set default_model in config.toml.',
+      'No model configured. Run `hasu` and use /login to sign in, then retry; or set default_model in config.toml.',
     );
   }
   return model;
@@ -479,7 +479,7 @@ function runPromptTurn(
       : new PromptTranscriptWriter(stdout, stderr);
   let settled = false;
   let unsubscribe: (() => void) | undefined;
-  // A `kimi -p` run is not done just because the model ended a turn: an active
+  // A `hasu -p` run is not done just because the model ended a turn: an active
   // goal drives continuation turns on its own, and a scheduled cron task fires
   // later from an idle session — both trigger new turns after `end_turn`. While
   // either is pending, something must keep the event loop alive: the cron
