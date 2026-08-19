@@ -8,7 +8,7 @@
  */
 
 import { createHash, randomBytes } from 'node:crypto';
-import { createServer, type Server } from 'node:http';
+import { createServer, type RequestListener, type Server } from 'node:http';
 
 import {
   DeviceCodeTimeoutError,
@@ -33,6 +33,8 @@ const OPENAI_CODEX_DEVICE_AUTH_URL = 'https://auth.openai.com/codex/device';
 const OPENAI_CODEX_DEVICE_REDIRECT_URI = 'https://auth.openai.com/deviceauth/callback';
 const OPENAI_CODEX_CALLBACK_PORT = 1455;
 const OPENAI_CODEX_CALLBACK_PATH = '/auth/callback';
+const IPV4_LOOPBACK = '127.0.0.1';
+const IPV6_LOOPBACK = '::1';
 const OPENAI_CODEX_REDIRECT_URI =
   `http://localhost:${OPENAI_CODEX_CALLBACK_PORT}${OPENAI_CODEX_CALLBACK_PATH}`;
 const OPENAI_CODEX_SCOPE =
@@ -136,7 +138,7 @@ export async function loginOpenAICodex(
       redirectUri: OPENAI_CODEX_REDIRECT_URI,
     });
   } finally {
-    await closeServer(callback.server);
+    await Promise.all(callback.servers.map(closeServer));
   }
 }
 
@@ -302,7 +304,7 @@ async function startCallbackServer(
   expectedState: string,
   signal?: AbortSignal,
   timeoutMs = LOGIN_TIMEOUT_MS,
-): Promise<{ readonly server: Server; readonly code: Promise<string> }> {
+): Promise<{ readonly servers: readonly Server[]; readonly code: Promise<string> }> {
   let resolveCode: (code: string) => void;
   let rejectCode: (error: Error) => void;
   const code = new Promise<string>((resolve, reject) => {
@@ -310,7 +312,7 @@ async function startCallbackServer(
     rejectCode = reject;
   });
 
-  const server = createServer((request, response) => {
+  const handleRequest: RequestListener = (request, response) => {
     const url = new URL(request.url ?? '/', OPENAI_CODEX_REDIRECT_URI);
     if (request.method !== 'GET' || url.pathname !== OPENAI_CODEX_CALLBACK_PATH) {
       response.writeHead(404).end('Not found');
@@ -333,7 +335,7 @@ async function startCallbackServer(
       '<!doctype html><meta charset="utf-8"><title>Signed in</title><p>ChatGPT sign-in completed. You can close this window.</p>',
     );
     resolveCode(authorizationCode);
-  });
+  };
 
   const timeout = setTimeout(() => {
     rejectCode(new DeviceCodeTimeoutError('ChatGPT browser authorization timed out.'));
@@ -349,13 +351,7 @@ async function startCallbackServer(
   };
   void code.then(cleanup, cleanup);
 
-  await new Promise<void>((resolve, reject) => {
-    server.once('error', reject);
-    server.listen(OPENAI_CODEX_CALLBACK_PORT, 'localhost', () => {
-      server.off('error', reject);
-      resolve();
-    });
-  }).catch((error: unknown) => {
+  const servers = await startLoopbackServers(handleRequest).catch((error: unknown) => {
     clearTimeout(timeout);
     signal?.removeEventListener('abort', abort);
     throw new OAuthError(
@@ -364,7 +360,45 @@ async function startCallbackServer(
     );
   });
 
-  return { server, code };
+  return { servers, code };
+}
+
+async function startLoopbackServers(handleRequest: RequestListener): Promise<readonly Server[]> {
+  const ipv4 = createServer(handleRequest);
+  await listenServer(ipv4, IPV4_LOOPBACK);
+
+  const ipv6 = createServer(handleRequest);
+  try {
+    await listenServer(ipv6, IPV6_LOOPBACK);
+    return [ipv4, ipv6];
+  } catch (error) {
+    await closeServer(ipv6);
+    if (!isAddressInUse(error)) return [ipv4];
+    await closeServer(ipv4);
+    throw error;
+  }
+}
+
+async function listenServer(server: Server, host: string): Promise<void> {
+  await new Promise<void>((resolve, reject) => {
+    const onError = (error: Error): void => {
+      server.off('listening', onListening);
+      reject(error);
+    };
+    const onListening = (): void => {
+      server.off('error', onError);
+      resolve();
+    };
+    server.once('error', onError);
+    server.once('listening', onListening);
+    server.listen(OPENAI_CODEX_CALLBACK_PORT, host);
+  });
+}
+
+function isAddressInUse(error: unknown): boolean {
+  const code = (error as { readonly code?: unknown } | null)?.code;
+  if (typeof code === 'string') return code === 'EADDRINUSE';
+  return error instanceof Error && /EADDRINUSE|in use/i.test(error.message);
 }
 
 async function fetchJson(
