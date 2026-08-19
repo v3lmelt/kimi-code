@@ -2,7 +2,7 @@ import { visibleWidth, type TUI } from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { ToolCallComponent } from '#/tui/components/messages/tool-call';
+import { formatDetachHint, ToolCallComponent } from '#/tui/components/messages/tool-call';
 import { STATUS_BULLET } from '#/tui/constant/symbols';
 import { STREAMING_UI_FLUSH_MS } from '#/tui/constant/streaming';
 import { darkColors } from '#/tui/theme/colors';
@@ -28,6 +28,7 @@ function stubTui(rows: number): TUI {
 describe('ToolCallComponent', () => {
   afterEach(() => {
     vi.useRealTimers();
+    vi.unstubAllEnvs();
   });
 
   it('uses the shared non-emoji tool status bullet', () => {
@@ -51,6 +52,11 @@ describe('ToolCallComponent', () => {
   });
 
   describe('detach hint for long-running foreground Bash/Agent', () => {
+    it('shows the doubled tmux prefix needed to forward Ctrl+B', () => {
+      vi.stubEnv('TMUX', '/tmp/tmux-1000/default,1,0');
+      expect(formatDetachHint()).toBe('(ctrl+b ctrl+b (twice) to run in background)');
+    });
+
     it('shows the Ctrl+B hint after 10s for a running Bash call', () => {
       vi.useFakeTimers();
       const component = new ToolCallComponent(
@@ -60,12 +66,12 @@ describe('ToolCallComponent', () => {
       );
 
       expect(strip(component.render(100).join('\n'))).not.toContain(
-        'Press Ctrl+B to run in background',
+        '(ctrl+b to run in background)',
       );
 
       vi.advanceTimersByTime(10_000);
       expect(strip(component.render(100).join('\n'))).toContain(
-        'Press Ctrl+B to run in background',
+        '(ctrl+b to run in background)',
       );
 
       component.dispose();
@@ -81,7 +87,7 @@ describe('ToolCallComponent', () => {
 
       // No timer advancement — Agents advertise Ctrl+B immediately.
       expect(strip(component.render(100).join('\n'))).toContain(
-        'Press Ctrl+B to run in background',
+        '(ctrl+b to run in background)',
       );
 
       component.dispose();
@@ -97,7 +103,7 @@ describe('ToolCallComponent', () => {
 
       vi.advanceTimersByTime(15_000);
       expect(strip(component.render(100).join('\n'))).not.toContain(
-        'Press Ctrl+B to run in background',
+        '(ctrl+b to run in background)',
       );
 
       component.dispose();
@@ -116,7 +122,7 @@ describe('ToolCallComponent', () => {
       vi.advanceTimersByTime(10_000);
 
       expect(strip(component.render(100).join('\n'))).not.toContain(
-        'Press Ctrl+B to run in background',
+        '(ctrl+b to run in background)',
       );
 
       component.dispose();
@@ -990,7 +996,9 @@ describe('ToolCallComponent', () => {
     });
 
     let out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Explore Agent Queued (explore project xxx)');
+    expect(out).toContain('Explore (explore project xxx)');
+    expect(out).toContain('⎿  Initializing…');
+    expect(out).not.toContain('Explore Agent');
     expect(out).not.toContain('Using Agent');
     expect(out).not.toContain('Used Agent');
 
@@ -1007,8 +1015,8 @@ describe('ToolCallComponent', () => {
     vi.advanceTimersByTime(STREAMING_UI_FLUSH_MS);
 
     out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Explore Agent Running (explore project xxx)');
-    expect(out).toContain('Using Read (apps/kimi-code/src/tui/utils/background-agent-status.ts)');
+    expect(out).toContain('Explore (explore project xxx)');
+    expect(out).toContain('⎿  Using Read (apps/kimi-code/src/tui/utils/background-agent-status.ts)');
     // Thinking and text are mutually exclusive in the active window: the most
     // recently streamed (text) wins, so thinking is hidden entirely.
     expect(out).not.toContain('think1');
@@ -1029,7 +1037,8 @@ describe('ToolCallComponent', () => {
     vi.setSystemTime(30_000);
 
     out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Explore Agent Completed (explore project xxx)');
+    expect(out).toContain('Explore (explore project xxx)');
+    expect(out).toContain('⎿  Done (1 tool use · 12s)');
     expect(out).not.toContain('think3');
     expect(out).toContain('│ answer3');
     expect(out).not.toContain('Used Agent');
@@ -1055,16 +1064,53 @@ describe('ToolCallComponent', () => {
     });
 
     let out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Explore Agent Queued (explore project)');
+    expect(out).toContain('Explore (explore project)');
+    expect(out).toContain('⎿  Initializing…');
     expect(out).not.toContain('Kimi K2.5');
 
-    component.updateSubagentMetrics({ modelDisplay: 'Kimi K2.5' });
+    component.updateSubagentMetrics({ modelDisplay: 'Kimi K2.5', effortDisplay: 'high' });
 
     // Model/effort updates render immediately — the user must see the bound
     // model from spawn, not after the coalesced flush window.
     out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Kimi K2.5');
+    expect(out).toContain('Explore (explore project) · Kimi K2.5 · high');
     expect(component.getSubagentSnapshot().model).toBe('Kimi K2.5');
+    expect(component.getSubagentSnapshot().effort).toBe('high');
+  });
+
+  it('uses a compact progress summary on short terminals and expands on demand', () => {
+    const ui = stubTui(15);
+    const component = new ToolCallComponent(
+      { id: 'call_agent_compact', name: 'Agent', args: { description: 'inspect project' } },
+      undefined,
+      ui,
+      undefined,
+      () => 2,
+    );
+    component.onSubagentSpawned({
+      agentId: 'sub_compact_1',
+      agentName: 'explore',
+      runInBackground: false,
+    });
+    component.updateSubagentMetrics({
+      usage: { inputOther: 100, inputCacheRead: 50, inputCacheCreation: 20, output: 30 },
+    });
+
+    let out = strip(component.render(120).join('\n'));
+    expect(out).toContain('In progress… · 0 tool uses · 200 tokens · (ctrl+o to expand)');
+    expect(out).not.toContain('⎿  Initializing…');
+
+    component.setExpanded(true);
+    out = strip(component.render(120).join('\n'));
+    expect(out).toContain('⎿  Initializing…');
+    expect(out).not.toContain('In progress…');
+
+    component.setExpanded(false);
+    expect(strip(component.render(120).join('\n'))).toContain('In progress…');
+    (ui.terminal as unknown as { rows: number }).rows = 40;
+    out = strip(component.render(120).join('\n'));
+    expect(out).toContain('⎿  Initializing…');
+    expect(out).not.toContain('In progress…');
   });
 
   it('reports total usage tokens in the snapshot over context tokens', () => {
@@ -1116,7 +1162,7 @@ describe('ToolCallComponent', () => {
     expect(component.getSubagentSnapshot().tokens).toBe(5_000);
   });
 
-  it('does not show usage tokens in the completed header (snapshot still reports them)', () => {
+  it('shows usage tokens in the completed status line', () => {
     const component = new ToolCallComponent(
       { id: 'call_agent_tokens', name: 'Agent', args: { description: 'explore project' } },
       undefined,
@@ -1132,8 +1178,8 @@ describe('ToolCallComponent', () => {
       usage: { inputOther: 100, inputCacheRead: 50, inputCacheCreation: 20, output: 30 },
     });
     const out = strip(component.render(120).join('\n'));
-    expect(out).not.toContain('200 tok');
-    expect(out).not.toContain('5k tok');
+    expect(out).toContain('0 tool uses · 200 tokens');
+    expect(out).not.toContain('5k tokens');
     expect(component.getSubagentSnapshot().tokens).toBe(200);
   });
 
@@ -1157,7 +1203,7 @@ describe('ToolCallComponent', () => {
     expect(out).not.toContain('5k tok');
   });
 
-  it('shows Backgrounded after a foreground subagent is detached, even after setResult', () => {
+  it('shows the background status after a foreground subagent is detached, even after setResult', () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const component = new ToolCallComponent(
@@ -1180,28 +1226,28 @@ describe('ToolCallComponent', () => {
       runInBackground: false,
     });
 
-    // Sanity: running before detach.
-    expect(strip(component.render(120).join('\n'))).toContain('Running');
+    // Sanity: the foreground card is active before detach.
+    expect(strip(component.render(120).join('\n'))).toContain('⎿  Initializing…');
 
     component.markBackgrounded();
     let out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Backgrounded');
-    expect(out).not.toContain('Completed');
+    expect(out).toContain('⎿  Running in the background');
+    expect(out).not.toContain('Done (');
 
-    // The spawn-success ToolResult landing must NOT flip the card to Completed.
+    // The spawn-success ToolResult landing must NOT flip the card to Done.
     component.setResult({
       tool_call_id: 'call_agent_detach',
       output: 'agent_id: sub_detach_1\nactual_subagent_type: explore\n',
       is_error: false,
     });
     out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Backgrounded');
-    expect(out).not.toContain('Completed');
+    expect(out).toContain('⎿  Running in the background');
+    expect(out).not.toContain('Done (');
 
     component.dispose();
   });
 
-  it('summarizes subagent tools as a count plus the current tool', () => {
+  it('shows the current subagent tool below the agent header', () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const component = new ToolCallComponent(
@@ -1233,9 +1279,10 @@ describe('ToolCallComponent', () => {
     vi.advanceTimersByTime(STREAMING_UI_FLUSH_MS);
 
     const out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Explore Agent Running (inspect tools)');
-    // Only the current (most recent ongoing) tool appears in the summary line.
-    expect(out).toContain('Using Grep (auth)');
+    expect(out).toContain('Explore (inspect tools)');
+    expect(out).not.toContain('Explore Agent Running');
+    // Only the current (most recent ongoing) tool appears in the status line.
+    expect(out).toContain('⎿  Using Grep (auth)');
     // No per-tool activity rows are rendered.
     expect(out).not.toContain('file1.ts');
     expect(out).not.toContain('file2.ts');
@@ -1468,7 +1515,8 @@ describe('ToolCallComponent', () => {
     component.onSubagentFailed({ error: 'subagent exceeded max_steps' });
 
     const out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Explore Agent Failed (check failure)');
+    expect(out).toContain('Explore (check failure)');
+    expect(out).toContain('⎿  Failed');
     expect(out).toContain('│ subagent exceeded max_steps');
     expect(out).not.toContain('Using Agent');
     expect(out).not.toContain('Used Agent');
@@ -1609,23 +1657,23 @@ describe('ToolCallComponent', () => {
     // mounted on its own. The standalone header derives its label from
     // `getDerivedSubagentPhase()` (separate from `getSubagentSnapshot`).
     // Without the override threading into that path AND a header rebuild,
-    // a lost bg agent keeps the green "✓ Completed" label.
-    it('standalone render: lost bg agent must show Failed/Lost, not Completed', () => {
+    // a lost bg agent keeps the green `Done` status.
+    it('standalone render: lost bg agent must show Failed/Lost, not Done', () => {
       const component = makeBackgroundAgentComponent();
       component.setBackgroundTaskTerminalStatus('lost');
       const out = strip(component.render(120).join('\n'));
-      expect(out).not.toContain('Completed');
+      expect(out).not.toContain('⎿  Done');
       expect(out).toMatch(/Failed|Lost/);
       // Friendly failure message must reach the rendered card.
       expect(out).toContain('lost');
       expect(out).not.toContain('task_id:');
     });
 
-    it('standalone render: completed bg agent still shows Completed', () => {
+    it('standalone render: completed bg agent shows Done', () => {
       const component = makeBackgroundAgentComponent();
       component.setBackgroundTaskTerminalStatus('completed');
       const out = strip(component.render(120).join('\n'));
-      expect(out).toContain('Completed');
+      expect(out).toContain('⎿  Done (0 tool uses');
       expect(out).not.toMatch(/Failed/);
       expect(out).not.toContain('task_id:');
     });

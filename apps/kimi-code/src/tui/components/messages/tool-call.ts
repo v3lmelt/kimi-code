@@ -74,9 +74,16 @@ const EXPANDED_WRITE_HIGHLIGHT_MAX_LINE_CHARS = 2_000;
  *  a multi-hundred-KB rebuild. */
 const BODY_REBUILD_DEFER_MAX_CHARS = 200_000;
 
-/** Delay before a long-running foreground Bash/Agent card advertises Ctrl+B. */
+/** Delay before a long-running foreground Bash card advertises Ctrl+B. */
 const DETACH_HINT_DELAY_MS = 10_000;
-const DETACH_HINT_TEXT = 'Press Ctrl+B to run in background';
+/** Claude keeps roughly nine rows per active agent plus seven rows of chrome. */
+const COMPACT_AGENT_ROWS_PER_CALL = 9;
+const COMPACT_AGENT_CHROME_ROWS = 7;
+
+export function formatDetachHint(): string {
+  const chord = process.env['TMUX'] ? 'ctrl+b ctrl+b (twice)' : 'ctrl+b';
+  return `(${chord} to run in background)`;
+}
 
 type SubagentTextKind = 'thinking' | 'text';
 type SubagentPhase = 'queued' | 'spawning' | 'running' | 'done' | 'failed' | 'backgrounded';
@@ -184,10 +191,6 @@ function formatElapsed(seconds: number): string {
   const minutes = Math.floor(seconds / 60);
   const remainder = seconds % 60;
   return `${String(minutes)}m ${String(remainder)}s`;
-}
-
-function formatTokens(n: number): string {
-  return `${formatTokenCount(n)} tok`;
 }
 
 function extractApprovedPlan(output: string): string {
@@ -412,14 +415,12 @@ function extractKeyArgument(
 
 function formatSubagentLabel(agentName: string | undefined): string {
   const raw = agentName?.trim();
-  if (raw === undefined || raw.length === 0) return 'SubAgent';
-  const label = raw
+  if (raw === undefined || raw.length === 0) return 'Subagent';
+  return raw
     .split(/[-_\s]+/)
     .filter((part) => part.length > 0)
     .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
     .join(' ');
-  if (/\bagent$/i.test(label)) return label;
-  return `${label} Agent`;
 }
 
 function tailNonEmptyLines(text: string, maxLines: number): string[] {
@@ -556,7 +557,7 @@ export class ToolCallComponent extends Container {
    * task as `lost`). Beats the spawn-success ToolResult in both render
    * paths (`getDerivedSubagentPhase` for standalone, `getSubagentSnapshot`
    * for grouped), which would otherwise mislabel every terminated
-   * background agent — including lost ones — as `✓ Completed`.
+   * background agent — including lost ones — as `Done`.
    */
   private backgroundTaskTerminalPhase: 'done' | 'failed' | undefined;
   private subagentContextTokens: number | undefined;
@@ -601,12 +602,10 @@ export class ToolCallComponent extends Container {
   private static readonly MAX_PROGRESS_LINES = 24;
   private liveOutput = '';
 
-  /**
-   * Advertises `Ctrl+B` on a foreground Bash/Agent card that has been running
-   * for {@link DETACH_HINT_DELAY_MS}. Cleared when the result lands.
-   */
+  /** Bash waits briefly before advertising Ctrl+B; Agent cards show it immediately. */
   private detachHintTimer: ReturnType<typeof setTimeout> | undefined;
   private detachHintVisible = false;
+  private compactSubagentView = false;
 
   /**
    * Registered by a group container (`AgentGroupComponent` or
@@ -623,6 +622,7 @@ export class ToolCallComponent extends Container {
     result: ToolResultBlockData | undefined,
     ui?: TUI,
     private readonly workspaceDir?: string,
+    private readonly getInProgressToolCallCount: () => number = () => 1,
   ) {
     super();
     this.toolCall = toolCall;
@@ -649,6 +649,13 @@ export class ToolCallComponent extends Container {
     | undefined;
 
   override render(width: number): string[] {
+    const compactSubagentView = this.shouldCompactSubagentView();
+    if (compactSubagentView !== this.compactSubagentView) {
+      this.compactSubagentView = compactSubagentView;
+      this.rebuildBody();
+      this.renderCache = undefined;
+    }
+
     const cache = this.renderCache;
     const cacheValid =
       isRenderCacheEnabled() &&
@@ -683,6 +690,16 @@ export class ToolCallComponent extends Container {
       this.renderCache = { width, lines: out, childRefs, childLines };
     }
     return out;
+  }
+
+  private shouldCompactSubagentView(): boolean {
+    if (!this.isSingleSubagentView() || this.expanded) return false;
+    const phase = this.getDerivedSubagentPhase();
+    if (phase === 'done' || phase === 'failed' || phase === 'backgrounded') return false;
+    const rows = this.ui?.terminal.rows;
+    if (rows === undefined || !Number.isFinite(rows) || rows <= 0) return false;
+    const inProgress = Math.max(1, this.getInProgressToolCallCount());
+    return rows < inProgress * COMPACT_AGENT_ROWS_PER_CALL + COMPACT_AGENT_CHROME_ROWS;
   }
 
   override invalidate(): void {
@@ -859,7 +876,7 @@ export class ToolCallComponent extends Container {
   }
 
   getSubagentSnapshot(): ToolCallSubagentSnapshot {
-    const finished = this.finishedSubCalls.length + this.hiddenSubCallCount;
+    const toolCount = this.subToolActivities.size;
     const contextTokens = this.subagentContextTokens;
     // Total usage (input + output) wins so the count reflects all consumed
     // tokens; context tokens remain the fallback until usage is reported.
@@ -888,7 +905,7 @@ export class ToolCallComponent extends Container {
     // `backgrounded` has no result because background agents do not enter the
     // transcript — but a foreground subagent detached via Ctrl+B keeps
     // `subagentPhase === 'backgrounded'` even after its ToolResult lands, so
-    // the group card shows `◐ backgrounded` rather than `✓ Completed`. Reuse
+    // the group card shows `Running in the background` rather than `Done`. Reuse
     // the standalone derivation so both paths agree.
     const derivedPhase = this.getDerivedSubagentPhase();
     const errorText =
@@ -901,7 +918,7 @@ export class ToolCallComponent extends Container {
       model: this.subagentModel,
       effort: this.subagentEffort,
       phase: derivedPhase,
-      toolCount: finished,
+      toolCount,
       elapsedSeconds: this.getSubagentElapsedSeconds(),
       tokens,
       isError: derivedPhase === 'failed',
@@ -1048,7 +1065,7 @@ export class ToolCallComponent extends Container {
   private buildDetachHintBlock(): void {
     if (!this.detachHintVisible) return;
     if (this.result !== undefined) return;
-    this.addChild(new Text(currentTheme.dim(DETACH_HINT_TEXT), 2, 0));
+    this.addChild(new Text(currentTheme.dim(formatDetachHint()), 2, 0));
   }
 
   private syncSubagentElapsedTimer(): void {
@@ -1264,8 +1281,8 @@ export class ToolCallComponent extends Container {
   /**
    * Mark a foreground subagent as detached-to-background. Called when a
    * `background.task.started` event arrives for this agent (i.e. the user
-   * pressed Ctrl+B). Keeps the card showing `◐ backgrounded` instead of
-   * flipping to `✓ Completed` when the spawn-success ToolResult lands.
+   * pressed Ctrl+B). Keeps the card showing `Running in the background` instead
+   * of flipping to `Done` when the spawn-success ToolResult lands.
    */
   markBackgrounded(): void {
     if (this.detachedFromForeground) return;
@@ -1811,7 +1828,7 @@ export class ToolCallComponent extends Container {
     }
     // A foreground subagent detached via Ctrl+B keeps showing `backgrounded`
     // even after its spawn-success ToolResult lands, so the card doesn't flip
-    // to `✓ Completed` and look like the work actually finished. Agents that
+    // to `Done` and look like the work actually finished. Agents that
     // started in the background (`detachedFromForeground === false`) read as
     // `done` once their result lands.
     if (this.detachedFromForeground && this.subagentPhase === 'backgrounded') {
@@ -1823,59 +1840,42 @@ export class ToolCallComponent extends Container {
 
   private buildSingleSubagentHeader(): string {
     const phase = this.getDerivedSubagentPhase();
-    const isDone = phase === 'done';
     const marker = this.buildSingleSubagentMarker(phase);
     const labelText = formatSubagentLabel(this.subagentAgentName);
-    const label = currentTheme.boldFg('primary', labelText);
-    const status = this.formatSingleSubagentStatus(phase);
+    const label =
+      phase === 'done'
+        ? currentTheme.boldFg('success', labelText)
+        : phase === 'failed'
+          ? currentTheme.boldFg('error', labelText)
+          : currentTheme.boldFg('primary', labelText);
     const rawDescription = str(this.toolCall.args['description']);
     const description =
       rawDescription.length > MAX_SUBAGENT_DESCRIPTION_LENGTH
         ? `${rawDescription.slice(0, MAX_SUBAGENT_DESCRIPTION_LENGTH - 1)}…`
         : rawDescription;
-    const descriptionPlain = description.length > 0 ? ` (${description})` : '';
-    const descriptionText = descriptionPlain.length > 0 ? currentTheme.dim(descriptionPlain) : '';
-    const statsText = this.formatSingleSubagentStatsText();
-    if (isDone) {
-      return `${marker}${currentTheme.boldFg('success', labelText)} ${currentTheme.fg('success', `Completed${descriptionPlain}${statsText}`)}`;
-    }
-    const stats = currentTheme.dim(statsText);
-    return `${marker}${label} ${status}${descriptionText}${stats}`;
+    const descriptionText = description.length > 0 ? currentTheme.dim(` (${description})`) : '';
+    const metadata = [this.subagentModel, this.subagentEffort].filter(
+      (value): value is string => value !== undefined,
+    );
+    const metadataText =
+      metadata.length > 0 ? currentTheme.dim(` · ${metadata.join(' · ')}`) : '';
+    return `${marker}${label}${descriptionText}${metadataText}`;
   }
 
-  private formatSingleSubagentStatus(phase: SubagentPhase | undefined): string {
-    switch (phase) {
-      case 'done':
-        return currentTheme.fg('success', 'Completed');
-      case 'failed':
-        return currentTheme.fg('error', 'Failed');
-      case 'running':
-        return currentTheme.fg('primary', 'Running');
-      case 'backgrounded':
-        return 'Backgrounded';
-      case 'queued':
-        return currentTheme.fg('primary', 'Queued');
-      case 'spawning':
-      case undefined:
-        return currentTheme.fg('primary', 'Starting');
-    }
-  }
-
-  private formatSingleSubagentStatsText(): string {
-    const parts: string[] = [];
-    if (this.subagentModel !== undefined) parts.push(this.subagentModel);
-    if (this.subagentEffort !== undefined) parts.push(this.subagentEffort);
-    parts.push(`${String(this.subToolActivities.size)} tool${this.subToolActivities.size === 1 ? '' : 's'}`);
-    const elapsed = this.getSubagentElapsedSeconds();
-    if (elapsed !== undefined) parts.push(formatElapsed(elapsed));
+  private formatSingleSubagentStats(includeDuration: boolean): string {
+    const toolCount = this.subToolActivities.size;
+    const parts = [`${String(toolCount)} tool ${toolCount === 1 ? 'use' : 'uses'}`];
+    const usageTokens = this.subagentUsage === undefined ? 0 : usageTotal(this.subagentUsage);
     const tokens =
-      this.subagentContextTokens && this.subagentContextTokens > 0
-        ? this.subagentContextTokens
-        : this.subagentUsage === undefined
-          ? 0
-          : usageTotal(this.subagentUsage);
-    if (tokens > 0) parts.push(formatTokens(tokens));
-    return ` · ${parts.join(' · ')}`;
+      usageTokens > 0
+        ? usageTokens
+        : this.subagentContextTokens && this.subagentContextTokens > 0
+          ? this.subagentContextTokens
+          : 0;
+    if (tokens > 0) parts.push(`${formatTokenCount(tokens)} tokens`);
+    const elapsed = this.getSubagentElapsedSeconds();
+    if (includeDuration && elapsed !== undefined) parts.push(formatElapsed(elapsed));
+    return parts.join(' · ');
   }
 
   private getSubagentElapsedSeconds(): number | undefined {
@@ -1896,12 +1896,19 @@ export class ToolCallComponent extends Container {
 
   private buildSingleSubagentBlock(): void {
     const phase = this.getDerivedSubagentPhase();
+    if (this.compactSubagentView) {
+      const summary = this.formatSingleSubagentStats(false);
+      this.addChild(
+        new Text(
+          currentTheme.dim(`  ⎿  In progress… · ${summary} · (ctrl+o to expand)`),
+          0,
+          0,
+        ),
+      );
+      return;
+    }
 
-    // Every state shares the same skeleton — header, a one-line tool summary,
-    // and a fixed two-row content window — so the card height is identical
-    // while running and after it finishes (no end-of-run shrink).
-    this.addChild(new Text(this.buildSingleSubagentSummaryLine(), 0, 0));
-
+    this.addChild(new Text(this.buildSingleSubagentSummaryLine(phase), 0, 0));
     if (phase === 'failed') {
       this.addChild(this.buildSingleSubagentResultWindow('error'));
       return;
@@ -1956,20 +1963,16 @@ export class ToolCallComponent extends Container {
     return undefined;
   }
 
-  private buildSingleSubagentSummaryLine(): string {
-    const toolCount = this.subToolActivities.size;
-    const countLabel = `${String(toolCount)} tool${toolCount === 1 ? '' : 's'}`;
-    // The bound model / effort ride the summary line so the card advertises
-    // them from spawn (the `· N tools` counter alone made the row look bare
-    // and dropped the model the event stream explicitly provides).
-    const metaParts: string[] = [];
-    if (this.subagentModel !== undefined) metaParts.push(this.subagentModel);
-    if (this.subagentEffort !== undefined) metaParts.push(`· ${this.subagentEffort}`);
-    const meta = metaParts.length > 0 ? currentTheme.dim(`  · ${metaParts.join(' ')}`) : '';
-    const current = this.getCurrentSubToolActivity();
-    if (current === undefined) {
-      return `${currentTheme.dim(`  · ${countLabel}`)}${meta}`;
+  private buildSingleSubagentSummaryLine(phase: SubagentPhase | undefined): string {
+    const prefix = currentTheme.dim('  ⎿  ');
+    if (phase === 'done') {
+      return `${prefix}${currentTheme.fg('success', `Done (${this.formatSingleSubagentStats(true)})`)}`;
     }
+    if (phase === 'failed') return `${prefix}${currentTheme.fg('error', 'Failed')}`;
+    if (phase === 'backgrounded') return `${prefix}${currentTheme.dim('Running in the background')}`;
+
+    const current = this.getCurrentSubToolActivity();
+    if (current === undefined) return `${prefix}${currentTheme.dim('Initializing…')}`;
     const verb = current.phase === 'ongoing' ? 'Using' : 'Used';
     const keyArg = extractKeyArgument(current.name, current.args, this.workspaceDir);
     const nameCol = currentTheme.fg('primary', current.name);
@@ -1980,7 +1983,7 @@ export class ToolCallComponent extends Container {
         : current.phase === 'done'
           ? currentTheme.fg('success', ' ✓')
           : '';
-    return `${currentTheme.dim(`  · ${countLabel} · `)}${verb} ${nameCol}${argCol}${mark}${meta}`;
+    return `${prefix}${verb} ${nameCol}${argCol}${mark}`;
   }
 
   private buildSingleSubagentActiveWindow(): Component {
