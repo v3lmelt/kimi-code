@@ -110,10 +110,12 @@ api_key = "sk-xxxxx"
 
 ## `openai-codex`
 
-运行 `/login`，选择 **OpenAI ChatGPT OAuth**，选择一个内置 GPT-5.6 模型，
-然后在浏览器中完成授权。CLI 会在 `localhost:1455` 等待 OAuth 回调，把供应商和模型配置写入 `config.toml`，
-将 OAuth 凭据保存在 Hasu 主目录中，并自动刷新访问令牌。运行 `/logout` 并
-选择 **OpenAI ChatGPT** 后，CLI 会同时移除凭据与供应商配置。
+运行 `/login`，选择 **OpenAI ChatGPT OAuth**，然后在浏览器中完成授权。打开浏览器前，
+CLI 会把完整授权地址复制到剪贴板，必要时可以手动粘贴。CLI 会在 `localhost:1455`
+等待 OAuth 回调。认证成功后，选择一个内置 GPT-5.6 模型。CLI 会把全部内置 OpenAI
+模型写入 `config.toml`，将所选模型设为默认模型，把 OAuth 凭据保存在 Hasu 主目录中，
+并自动刷新访问令牌。此后这些模型会显示在 `/model` 的 **OpenAI ChatGPT** 标签页中。
+运行 `/logout` 并选择 **OpenAI ChatGPT** 后，CLI 会同时移除凭据与供应商配置。
 
 该登录入口通过 ChatGPT 订阅访问 Codex Responses 后端，不会使用
 `OPENAI_API_KEY`。OpenAI Platform API 密钥计费仍属于独立认证路径。

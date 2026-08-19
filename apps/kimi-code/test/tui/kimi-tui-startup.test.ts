@@ -19,6 +19,7 @@ import { WelcomeComponent } from '#/tui/components/chrome/welcome';
 import { KimiTUI, type KimiTUIStartupInput, type TUIState } from '#/tui/kimi-tui';
 import { REPLAY_TURN_LIMIT } from '#/tui/utils/message-replay';
 import { copyTextToClipboard } from '#/utils/clipboard/clipboard-text';
+import { openUrl } from '#/utils/open-url';
 import { quoteShellArg } from '#/utils/shell-quote';
 import {
   DISABLE_TERMINAL_THEME_REPORTING,
@@ -40,8 +41,10 @@ vi.mock('#/tui/commands/prompts', async (importOriginal) => {
 vi.mock('#/utils/clipboard/clipboard-text', () => ({
   copyTextToClipboard: vi.fn(async () => {}),
 }));
+vi.mock('#/utils/open-url', () => ({ openUrl: vi.fn() }));
 
 const copyTextToClipboardMock = vi.mocked(copyTextToClipboard);
+const openUrlMock = vi.mocked(openUrl);
 
 interface StartupDriver {
   state: TUIState;
@@ -1721,6 +1724,9 @@ describe('KimiTUI startup', () => {
   });
 
   it('logs into OpenAI from the platform selector and provisions the selected model', async () => {
+    const events: string[] = [];
+    const authorizationUrl =
+      'https://auth.openai.com/oauth/authorize?response_type=code&client_id=example&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback';
     const session = makeSession();
     const config = {
       defaultModel: 'k2',
@@ -1733,12 +1739,21 @@ describe('KimiTUI startup', () => {
     const setConfig = vi.fn(async (next: Record<string, unknown>) => {
       Object.assign(config, next);
     });
-    const loginOpenAI = vi.fn(async () => ({
-      providerName: 'openai-codex',
-      ok: true as const,
-      accountId: 'account-test',
-      expiresAt: 1_800_000_000,
-    }));
+    const loginOpenAI = vi.fn(
+      async (options: {
+        onAuthorization?: (info: { url: string; userCode?: string }) => void;
+      }) => {
+        events.push('authentication:start');
+        options.onAuthorization?.({ url: authorizationUrl });
+        events.push('authentication:complete');
+        return {
+          providerName: 'openai-codex',
+          ok: true as const,
+          accountId: 'account-test',
+          expiresAt: 1_800_000_000,
+        };
+      },
+    );
     const harness = makeHarness(session, {
       getConfig: vi.fn(async () => config),
       setConfig,
@@ -1759,23 +1774,34 @@ describe('KimiTUI startup', () => {
 
     await expect(driver.init()).resolves.toBe(false);
     vi.mocked(promptPlatformSelection).mockResolvedValue('openai-codex');
-    vi.mocked(promptModelSelectionForOpenPlatform).mockResolvedValue({
-      model: {
-        id: 'gpt-5.6-sol',
-        contextLength: 1_000_000,
-        supportsReasoning: true,
-        supportsImageIn: true,
-        supportsVideoIn: false,
-      },
-      thinking: 'high',
+    vi.mocked(promptModelSelectionForOpenPlatform).mockImplementation(async () => {
+      events.push('model-selection');
+      return {
+        model: {
+          id: 'gpt-5.6-sol',
+          contextLength: 1_000_000,
+          supportsReasoning: true,
+          supportsImageIn: true,
+          supportsVideoIn: false,
+        },
+        thinking: 'high',
+      };
     });
+    copyTextToClipboardMock.mockResolvedValue('native');
 
     await handleLoginCommand(driver as any);
 
+    expect(events).toEqual([
+      'authentication:start',
+      'authentication:complete',
+      'model-selection',
+    ]);
     expect(loginOpenAI).toHaveBeenCalledWith({
       signal: expect.any(AbortSignal),
       onAuthorization: expect.any(Function),
     });
+    expect(copyTextToClipboardMock).toHaveBeenCalledWith(authorizationUrl);
+    expect(openUrlMock).toHaveBeenCalledWith(authorizationUrl);
     expect(setConfig).toHaveBeenCalledWith(
       expect.objectContaining({
         defaultModel: 'openai-codex/gpt-5.6-sol',
@@ -1787,6 +1813,25 @@ describe('KimiTUI startup', () => {
         type: 'openai-codex',
         oauth: { storage: 'file', key: 'openai-codex' },
       },
+    });
+    expect(config.models).toMatchObject({
+      'openai-codex/gpt-5.6-sol': {
+        provider: 'openai-codex',
+        model: 'gpt-5.6-sol',
+      },
+      'openai-codex/gpt-5.6-terra': {
+        provider: 'openai-codex',
+        model: 'gpt-5.6-terra',
+      },
+      'openai-codex/gpt-5.6-luna': {
+        provider: 'openai-codex',
+        model: 'gpt-5.6-luna',
+      },
+    });
+    expect(driver.state.appState.availableModels).toMatchObject({
+      'openai-codex/gpt-5.6-sol': { provider: 'openai-codex' },
+      'openai-codex/gpt-5.6-terra': { provider: 'openai-codex' },
+      'openai-codex/gpt-5.6-luna': { provider: 'openai-codex' },
     });
     expect(harness.track).toHaveBeenCalledWith('login', {
       provider: 'openai-codex',

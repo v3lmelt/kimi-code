@@ -11,7 +11,7 @@ function strip(text: string): string {
 const url = 'https://www.kimi.com/code/authorize_device?user_code=N32D-W3YD';
 const code = 'N32D-W3YD';
 const title = 'Sign in to Hasu';
-const hint = 'Press Ctrl-C to cancel';
+const hint = 'Full URL copied to clipboard · Press Ctrl-C to cancel';
 
 describe('DeviceCodeBoxComponent', () => {
   it('renders a rounded border that frames the title, url and code', () => {

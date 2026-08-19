@@ -110,13 +110,16 @@ api_key = "sk-xxxxx"
 
 ## `openai-codex`
 
-Run `/login`, select **OpenAI ChatGPT OAuth**, choose a built-in GPT-5.6 model,
-and complete the browser authorization. The CLI listens on `localhost:1455`
-for the OAuth callback, writes the
-provider and model entries to `config.toml`, stores the OAuth credential under
-the Hasu home directory, and refreshes access tokens automatically. Run
-`/logout` and select **OpenAI ChatGPT** to remove both the credential and the
-provider configuration.
+Run `/login`, select **OpenAI ChatGPT OAuth**, and complete the browser
+authorization. Before opening the browser, the CLI copies the full
+authorization URL to the clipboard so you can paste it manually if needed. The
+CLI listens on `localhost:1455` for the OAuth callback. After authentication
+succeeds, choose a built-in GPT-5.6 model. The CLI writes all built-in OpenAI
+models to `config.toml`, makes the selected model the default, stores the OAuth
+credential under the Hasu home directory, and refreshes access tokens
+automatically. The models then appear under the **OpenAI ChatGPT** tab in
+`/model`. Run `/logout` and select **OpenAI ChatGPT** to remove both the
+credential and the provider configuration.
 
 This login path uses a ChatGPT subscription with the Codex Responses backend.
 It does not use `OPENAI_API_KEY`; OpenAI Platform API-key billing remains a

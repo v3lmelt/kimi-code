@@ -61,32 +61,14 @@ export async function handleLoginCommand(host: SlashCommandHost): Promise<void> 
 }
 
 async function handleOpenAICodexLogin(host: SlashCommandHost): Promise<void> {
-  const models: ManagedKimiCodeModelInfo[] = OPENAI_HARNESS_MODELS.map((model) => ({
-    id: model.id,
-    contextLength: Math.min(model.maxContextTokens, 1_000_000),
-    supportsReasoning: true,
-    supportsImageIn: true,
-    supportsVideoIn: false,
-    supportsToolUse: true,
-    supportsThinkingType: 'both',
-    supportEfforts: model.supportEfforts?.filter((effort) => effort !== 'off'),
-    defaultEffort: model.defaultEffort,
-    displayName: model.displayName,
-  }));
-  const platform: OpenPlatformDefinition = {
-    id: OPENAI_CODEX_PROVIDER_NAME,
-    name: 'OpenAI ChatGPT',
-    baseUrl: 'https://chatgpt.com/backend-api/codex',
-  };
-  const selection = await promptModelSelectionForOpenPlatform(host, models, platform);
-  if (selection === undefined) return;
-
   const previous = await host.harness.auth.getOpenAIStatus();
   const alreadyLoggedIn = previous.authenticated && previous.accountId !== undefined;
   let accountId = previous.accountId;
   let spinner: LoginProgressSpinnerHandle | undefined;
   const controller = new AbortController();
-  const cancelLogin = (): void => controller.abort();
+  const cancelLogin = (): void => {
+    controller.abort();
+  };
   host.cancelInFlight = cancelLogin;
 
   try {
@@ -111,6 +93,26 @@ async function handleOpenAICodexLogin(host: SlashCommandHost): Promise<void> {
     if (accountId === undefined) {
       throw new Error('ChatGPT OAuth token does not contain an account id.');
     }
+
+    const models: ManagedKimiCodeModelInfo[] = OPENAI_HARNESS_MODELS.map((model) => ({
+      id: model.id,
+      contextLength: Math.min(model.maxContextTokens, 1_000_000),
+      supportsReasoning: true,
+      supportsImageIn: true,
+      supportsVideoIn: false,
+      supportsToolUse: true,
+      supportsThinkingType: 'both',
+      supportEfforts: model.supportEfforts?.filter((effort) => effort !== 'off'),
+      defaultEffort: model.defaultEffort,
+      displayName: model.displayName,
+    }));
+    const platform: OpenPlatformDefinition = {
+      id: OPENAI_CODEX_PROVIDER_NAME,
+      name: 'OpenAI ChatGPT',
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+    };
+    const selection = await promptModelSelectionForOpenPlatform(host, models, platform);
+    if (selection === undefined) return;
 
     const config = await host.harness.getConfig();
     applyOpenAICodexConfig(config, {
