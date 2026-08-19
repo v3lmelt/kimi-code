@@ -138,3 +138,26 @@ read_byte_budget = 65536
     expect(harness.imageLimits?.maxEdgePx()).toBe(900);
   });
 });
+
+describe('KimiHarness OpenAI models', () => {
+  it('selects GPT-5.6 Sol by default and exposes the other registered models', async () => {
+    const homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-openai-home-'));
+    const workDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-openai-work-'));
+    tempDirs.push(homeDir, workDir);
+    const harness = createKimiHarness({
+      identity: TEST_IDENTITY,
+      homeDir,
+      openai: { apiKey: 'YOUR_API_KEY' },
+    });
+
+    try {
+      const session = await harness.createSession({ workDir });
+      expect((await session.getStatus()).model).toBe('gpt-5.6-sol');
+
+      await session.setModel('gpt-5.6-luna');
+      expect((await session.getStatus()).model).toBe('gpt-5.6-luna');
+    } finally {
+      await harness.close();
+    }
+  });
+});

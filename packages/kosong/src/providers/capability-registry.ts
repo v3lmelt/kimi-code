@@ -61,6 +61,15 @@ const OPENAI_REASONING_CAPABILITY: ModelCapability = Object.freeze({
   max_context_tokens: 0,
 });
 
+const OPENAI_GPT5_CAPABILITY: ModelCapability = Object.freeze({
+  image_in: true,
+  video_in: false,
+  audio_in: false,
+  thinking: true,
+  tool_use: true,
+  max_context_tokens: 0,
+});
+
 const OPENAI_VISION_TOOL_CAPABILITY: ModelCapability = Object.freeze({
   image_in: true,
   video_in: false,
@@ -117,6 +126,10 @@ const GEMINI_THINKING_MULTIMODAL_TOOL_CAPABILITY: ModelCapability = Object.freez
 
 const OPENAI_LEGACY_CAPABILITY_CATALOG: readonly CapabilityCatalogEntry[] = [
   {
+    matches: isOpenAIGpt5Model,
+    capability: OPENAI_GPT5_CAPABILITY,
+  },
+  {
     matches: isOpenAIReasoningModel,
     capability: OPENAI_REASONING_CAPABILITY,
   },
@@ -131,6 +144,10 @@ const OPENAI_LEGACY_CAPABILITY_CATALOG: readonly CapabilityCatalogEntry[] = [
 ];
 
 const OPENAI_RESPONSES_CAPABILITY_CATALOG: readonly CapabilityCatalogEntry[] = [
+  {
+    matches: isOpenAIGpt5Model,
+    capability: OPENAI_GPT5_CAPABILITY,
+  },
   {
     matches: isOpenAIReasoningModel,
     capability: OPENAI_REASONING_CAPABILITY,
@@ -162,6 +179,10 @@ function hasPrefix(modelName: string, prefixes: readonly string[]): boolean {
 
 function isOpenAIReasoningModel(modelName: string): boolean {
   return /^o\d/.test(modelName);
+}
+
+function isOpenAIGpt5Model(modelName: string): boolean {
+  return /^gpt-5(?:[.-]|$)/.test(modelName);
 }
 
 function capabilityFromCatalog(
@@ -202,6 +223,7 @@ export function getGoogleGenAIModelCapability(modelName: string): ModelCapabilit
 
 export function usesOpenAIResponsesDeveloperRole(modelName: string): boolean {
   const normalized = normalizeModelName(modelName);
+  if (isOpenAIGpt5Model(normalized)) return true;
   if (OPENAI_RESPONSES_DEVELOPER_ROLE_MODELS.has(normalized)) return true;
   for (const cataloguedModel of OPENAI_RESPONSES_DEVELOPER_ROLE_MODELS) {
     if (normalized.startsWith(cataloguedModel + '-')) return true;

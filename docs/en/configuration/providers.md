@@ -107,6 +107,30 @@ base_url = "https://api.openai.com/v1"
 api_key = "sk-xxxxx"
 ```
 
+### In-process harness
+
+The TypeScript harness has a runtime-only OpenAI entry that does not persist
+the API key to `config.toml`:
+
+```ts
+import { createKimiHarness } from '@moonshot-ai/kimi-code-sdk';
+
+const harness = createKimiHarness({
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY,
+    defaultModel: 'gpt-5.6-terra',
+  },
+});
+
+const session = await harness.createSession({ workDir: process.cwd() });
+```
+
+The built-in entries are `gpt-5.6-sol`, `gpt-5.6-terra`, and
+`gpt-5.6-luna`. All three use the Responses API with a 1,050,000-token context
+window, a 128,000-token output limit, image input, function tools, and reasoning
+levels from off through max. The default is `gpt-5.6-sol`. Omitted credentials
+and endpoints fall back to `OPENAI_API_KEY` and `OPENAI_BASE_URL`.
+
 ## `google-genai`
 
 For connecting directly to the Google Gemini API. Thinking, vision, and multimodal capabilities are auto-detected by model name.

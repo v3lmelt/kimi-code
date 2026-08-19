@@ -121,6 +121,13 @@ describe('getModelCapability: anthropic', () => {
 });
 
 describe('getModelCapability: openai', () => {
+  it('gpt-5.6-sol → image_in + thinking + tool_use', () => {
+    const cap = getModelCapability('openai', 'gpt-5.6-sol');
+    expect(cap.image_in).toBe(true);
+    expect(cap.thinking).toBe(true);
+    expect(cap.tool_use).toBe(true);
+  });
+
   it('gpt-4o → image_in + tool_use', () => {
     const cap = getModelCapability('openai', 'gpt-4o');
     expect(cap.image_in).toBe(true);
@@ -145,6 +152,15 @@ describe('getModelCapability: openai', () => {
 });
 
 describe('getModelCapability: openai_responses', () => {
+  it('gpt-5.6 family → image_in + thinking + tool_use', () => {
+    for (const model of ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna']) {
+      const cap = getModelCapability('openai_responses', model);
+      expect(cap.image_in).toBe(true);
+      expect(cap.thinking).toBe(true);
+      expect(cap.tool_use).toBe(true);
+    }
+  });
+
   it('gpt-4.1 → image_in + tool_use (Responses flagship)', () => {
     const cap = getModelCapability('openai_responses', 'gpt-4.1');
     expect(cap.image_in).toBe(true);

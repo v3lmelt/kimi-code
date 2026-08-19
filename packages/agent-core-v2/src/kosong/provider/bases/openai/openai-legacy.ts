@@ -60,8 +60,10 @@ import {
   extractUsage,
   hasModelPrefix,
   isFunctionToolCall,
+  isOpenAIGpt5Model,
   isOpenAIReasoningModel,
   normalizeOpenAIFinishReason,
+  OPENAI_GPT5_CAPABILITY,
   OPENAI_REASONING_CAPABILITY,
   OPENAI_TEXT_TOOL_CAPABILITY,
   OPENAI_VISION_TOOL_CAPABILITY,
@@ -774,6 +776,9 @@ export class OpenAILegacyChatProvider implements ChatProvider {
 
 export function getOpenAILegacyModelCapability(modelName: string) {
   const normalized = modelName.toLowerCase();
+  if (isOpenAIGpt5Model(normalized)) {
+    return OPENAI_GPT5_CAPABILITY;
+  }
   if (isOpenAIReasoningModel(normalized)) {
     return OPENAI_REASONING_CAPABILITY;
   }

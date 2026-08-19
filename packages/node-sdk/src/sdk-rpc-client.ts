@@ -18,6 +18,10 @@ import { assertKimiHostIdentity, createKimiDefaultHeaders } from '@moonshot-ai/k
 
 import { KimiAuthFacade } from '#/auth';
 import { KimiHarness } from '#/kimi-harness';
+import {
+  OpenAIResponsesModelProvider,
+  type OpenAIResponsesModelProviderOptions,
+} from '#/openai-model-provider';
 import { ClientAPI, SDKRpcClientBase } from '#/rpc';
 import type {
   CreateSessionOptions,
@@ -43,6 +47,7 @@ export interface SDKRpcClientOptions {
    * `'print'`.
    */
   readonly uiMode?: string;
+  readonly openai?: OpenAIResponsesModelProviderOptions;
 }
 
 export class SDKRpcClient extends SDKRpcClientBase {
@@ -57,6 +62,7 @@ export class SDKRpcClient extends SDKRpcClientBase {
 
   constructor(options: SDKRpcClientOptions = {}) {
     super();
+    const openai = options.openai;
     this.identity =
       options.identity === undefined ? undefined : assertKimiHostIdentity(options.identity);
     this.homeDir = resolveKimiHome(options.homeDir);
@@ -85,6 +91,14 @@ export class SDKRpcClient extends SDKRpcClientBase {
       telemetry: this.telemetry,
       appVersion: this.identity?.version,
       uiMode: options.uiMode,
+      modelProviderFactory:
+        openai === undefined
+          ? undefined
+          : (sessionId) =>
+              new OpenAIResponsesModelProvider({
+                ...openai,
+                promptCacheKey: openai.promptCacheKey ?? sessionId,
+              }),
     });
     this.ready = sdkRpc(new ClientAPI(this));
   }

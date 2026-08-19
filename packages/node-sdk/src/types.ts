@@ -10,6 +10,8 @@ import type { Kaos } from '@moonshot-ai/kaos';
 import type { KimiHostIdentity, OAuthRefreshOutcome } from '@moonshot-ai/kimi-code-oauth';
 import type { ContentPart } from '@moonshot-ai/kosong';
 
+import type { OpenAIResponsesModelProviderOptions } from '#/openai-model-provider';
+
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | { readonly [key: string]: JsonValue };
 export type JsonObject = { readonly [key: string]: JsonValue };
@@ -112,6 +114,8 @@ export interface KimiHarnessOptions {
   readonly telemetry?: TelemetryClient | undefined;
   readonly onOAuthRefresh?: ((outcome: OAuthRefreshOutcome) => void) | undefined;
   readonly sessionStartedProperties?: TelemetryProperties;
+  /** Runtime-only OpenAI Responses models. The API key is never written to config.toml. */
+  readonly openai?: OpenAIResponsesModelProviderOptions;
 }
 
 export interface CreateSessionOptions {
