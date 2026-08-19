@@ -129,7 +129,7 @@ describe('OpenAIResponsesModelProvider', () => {
     });
   });
 
-  it('registers the GPT-5.6 family on the Responses API with official limits', () => {
+  it('registers the GPT-5.6 family on the Responses API with configured limits', () => {
     const provider = new OpenAIResponsesModelProvider({
       apiKey: 'YOUR_API_KEY',
       promptCacheKey: 'session-1',
@@ -155,7 +155,7 @@ describe('OpenAIResponsesModelProvider', () => {
         image_in: true,
         thinking: true,
         tool_use: true,
-        max_context_tokens: 1_050_000,
+        max_context_tokens: 272_000,
       },
       supportEfforts: ['off', 'low', 'medium', 'high', 'xhigh', 'max'],
       defaultEffort: 'medium',
@@ -190,7 +190,7 @@ describe('OpenAIResponsesModelProvider', () => {
         },
         codex: { responsesLite: true },
       },
-      modelCapabilities: { max_context_tokens: 1_000_000 },
+      modelCapabilities: { max_context_tokens: 272_000 },
       supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     });
   });
