@@ -177,12 +177,20 @@ function normalizeThinkingEffortForModel(
 ): ThinkingEffort {
   if (effort === 'off' && model?.alwaysThinking !== true) return 'off';
   const efforts = effortsFor(model);
+  // A model explicitly declared without thinking capability must not leak a
+  // configured global effort (e.g. thinking.effort = 'high') onto the wire —
+  // third-party endpoints may reject or stall on an unexpected reasoning
+  // parameter for a non-reasoning model. `undefined` means "unknown" (no
+  // metadata loaded) and keeps the passthrough. 'on' passes through so
+  // always-thinking models keep their default.
+  if (model !== undefined && !modelSupportsThinking(model)) {
+    return effort === 'on' ? 'on' : 'off';
+  }
   if (!strictValidation) {
     return effort === 'on' && efforts.length > 0
       ? defaultThinkingEffortForModel(model)
       : effort;
   }
-  if (!modelSupportsThinking(model)) return 'off';
   if (efforts.length === 0) return 'on';
   if (effort === 'on' || !efforts.includes(effort)) {
     return defaultThinkingEffortForModel(model);

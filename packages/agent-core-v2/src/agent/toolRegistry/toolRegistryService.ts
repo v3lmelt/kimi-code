@@ -32,17 +32,24 @@ interface ToolEntry {
 export class AgentToolRegistryService implements IAgentToolRegistryService {
   declare readonly _serviceBrand: undefined;
   private readonly tools = new Map<string, ToolEntry>();
+  private revisionCount = 0;
+
+  get revision(): number {
+    return this.revisionCount;
+  }
 
   register(tool: ExecutableTool, options: ToolRegistrationOptions = {}): IDisposable {
     const source = options.source ?? 'builtin';
     const entry: ToolEntry = { tool, source, disclosure: options.disclosure };
     this.unregisterTool(tool.name);
     this.tools.set(tool.name, entry);
+    this.revisionCount += 1;
 
     return toDisposable(() => {
       const current = this.tools.get(tool.name);
       if (current !== entry) return;
       this.unregisterTool(tool.name);
+      this.revisionCount += 1;
     });
   }
 

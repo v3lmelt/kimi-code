@@ -675,6 +675,55 @@ max_context_size = 262144
     expect(headers.get('x-msh-platform')).toBeNull();
   });
 
+  it('getGoUsage reports an error when no opencode-go API key is configured', async () => {
+    vi.stubEnv('OPENCODE_GO_API_KEY', '');
+    const harness = createKimiHarness({ homeDir });
+
+    await expect(harness.auth.getGoUsage()).resolves.toEqual({
+      kind: 'error',
+      message:
+        'No opencode-go API key configured (set OPENCODE_GO_API_KEY or providers.opencode-go.api_key in config.toml).',
+    });
+  });
+
+  it('getGoUsage fetches opencode-go usage with the configured API key', async () => {
+    await writeFile(
+      join(homeDir, 'config.toml'),
+      `
+[providers."opencode-go"]
+type = "opencode-go"
+api_key = "sk-opencode-go-test"
+`,
+    );
+    const fetchMock = vi.fn<FetchMock>(
+      async (_input, _init) =>
+        new Response(
+          JSON.stringify({
+            usage: {
+              rolling: { status: 'ok', percent: 11, resetsAt: '2026-08-14T09:14:53Z' },
+              weekly: { status: 'ok', percent: 44, resetsAt: '2026-08-17T00:00:00Z' },
+            },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json' } },
+        ),
+    );
+    vi.stubGlobal('fetch', fetchMock);
+    const harness = createKimiHarness({ homeDir });
+
+    const result = await harness.auth.getGoUsage();
+
+    expect(result).toEqual({
+      kind: 'ok',
+      parsed: {
+        rolling: { percent: 11, resetsAt: '2026-08-14T09:14:53Z' },
+        weekly: { percent: 44, resetsAt: '2026-08-17T00:00:00Z' },
+      },
+    });
+    const [url, init] = fetchMock.mock.calls[0] ?? [];
+    expect(url).toBe('https://opencode.ai/zen/go/v1/usage');
+    expect(new Headers(init?.headers).get('authorization')).toBe('Bearer sk-opencode-go-test');
+  });
+
   it('uses configured scoped OAuth refs and base URLs for managed usage and feedback', async () => {
     const baseUrl = 'https://api.dev.example.test/coding/v1';
     const oauthKey = resolveKimiCodeOAuthKey({

@@ -1,17 +1,23 @@
 /**
  * Footer/status bar — multi-line status display at the bottom of the TUI.
  *
- * Layout:
- *   Line 1: <mode pills> <model> <cwd>  <git-badge>  <esc to interrupt / ? for shortcuts>
- *   Line 2: context: N% (tokens/max)
+ * Layout (always two lines):
+ *   Line 1: <mode pills> <goal> <model>  <esc to interrupt / ? for shortcuts>
+ *   Line 2: <quota> <cache> <tasks> [transient hint]  context: N% (tokens/max)
+ *
+ * The default layout stays minimal: cwd and git badge are left out (still
+ * available via `[status_line].items`), and the context readout only
+ * appears once usage approaches the window limit.
  */
 
 import { bumpVersion, type Component } from '@moonshot-ai/pi-tui';
 import { truncateToWidth, visibleWidth } from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
+import { formatDuration } from '@moonshot-ai/kimi-code-oauth';
 import { effectiveModelAlias } from '@moonshot-ai/kimi-code-sdk';
 
 import { ALL_TIPS, type ToolbarTip } from '#/tui/constant/tips';
+import { isManagedUsageProvider, isOpenCodeGoProvider } from '#/tui/constant/kimi-tui';
 import { isRainbowDancing, renderDanceFooterModel } from '#/tui/easter-eggs/dance';
 import { AUTO_ACCEPT_DARK, AUTO_ACCEPT_LIGHT, currentTheme } from '#/tui/theme';
 import type { ColorPalette } from '#/tui/theme/colors';
@@ -20,6 +26,7 @@ import {
   StatusLineCommandRunner,
   type StatusLinePayload,
 } from '#/tui/utils/status-line-command';
+import { QuotaRunner, type QuotaSnapshot } from '#/tui/utils/quota-runner';
 import {
   createGitStatusCache,
   formatGitBadgeBase,
@@ -32,12 +39,37 @@ import {
   usagePercent,
   usagePercentFromRatio,
 } from '#/utils/usage/usage-format';
+import { isReducedMotion } from '#/tui/utils/accessibility';
+import { rippleText } from '#/tui/utils/color';
 import { turnOutputTokens } from '#/tui/utils/turn-usage';
 
-const DEFAULT_STATUS_LINE_ITEMS = ['mode', 'goal', 'model', 'tasks', 'cwd', 'git'] as const;
+const DEFAULT_STATUS_LINE_ITEMS = [
+  'mode',
+  'goal',
+  'model',
+  'quota',
+  'cache',
+  'tasks',
+] as const;
+
+/**
+ * Slots that always stay on footer line 1 (mode/goal/model); every other
+ * configured slot wraps onto line 2 so the model identity never gets pushed
+ * off by quota/cache/tasks noise on narrow terminals.
+ */
+const PRIMARY_STATUS_SLOTS = new Set(['mode', 'goal', 'model']);
+
+/** Claude-style TokenWarning appears once usage reaches this percentage. */
+const CONTEXT_WARNING_MIN_PERCENT = 60;
+/** Context readout appears only once usage reaches this percentage of the window. */
+const CONTEXT_DISPLAY_MIN_PERCENT = 80;
 
 const MAX_CWD_SEGMENTS = 3;
 const GOAL_TIMER_INTERVAL_MS = 1_000;
+/** Repaint cadence while the ultracode pill's yellow ripple is animating. */
+const ULTRACODE_RIPPLE_INTERVAL_MS = 150;
+/** Lighter yellow the ultracode ripple sweeps toward from `effortUltra`. */
+const ULTRACODE_RIPPLE_LIGHT = '#FFE082';
 
 // Toolbar tips — rotates every 10s. Most tips are short and pair up (two
 // joined by " · ") when space allows; tips flagged `solo` are long or
@@ -150,9 +182,50 @@ function formatBadgeElapsed(ms: number): string {
 function formatFooterAgentElapsed(seconds: number): string {
   if (seconds < 60) return `${String(seconds)}s`;
   const minutes = Math.floor(seconds / 60);
-  if (minutes < 60) return `${String(minutes)}m`;
+  if (minutes < 60) {
+    // Minute+second granularity (`1m10s`), dropping the seconds on exact
+    // minutes so `60s` reads `1m` rather than `1m0s`.
+    return `${String(minutes)}m${seconds % 60 > 0 ? `${String(seconds % 60)}s` : ''}`;
+  }
   const hours = Math.floor(minutes / 60);
   return `${String(hours)}h${String(minutes % 60)}m`;
+}
+
+/**
+ * Map workflow child rows (`workflow:<runId>:<agentId>`) to their tree-branch
+ * kind so a run's agents render as `├──` branches under the run row, with
+ * `└──` for the last child. Only children contiguously following their run
+ * row count — an orphan (or non-contiguous) row keeps the plain bullet.
+ */
+function workflowBranchMap(
+  agents: readonly RunningAgentSummary[],
+): ReadonlyMap<string, 'mid' | 'last'> {
+  const childrenByRun = new Map<string, string[]>();
+  let currentRunId: string | undefined;
+  for (const agent of agents) {
+    if (!agent.id.startsWith('workflow:')) {
+      currentRunId = undefined;
+      continue;
+    }
+    const rest = agent.id.slice('workflow:'.length);
+    const separator = rest.indexOf(':');
+    if (separator === -1) {
+      // The run row itself.
+      currentRunId = rest;
+      continue;
+    }
+    if (rest.slice(0, separator) !== currentRunId) continue;
+    const children = childrenByRun.get(currentRunId) ?? [];
+    children.push(agent.id);
+    childrenByRun.set(currentRunId, children);
+  }
+  const branches = new Map<string, 'mid' | 'last'>();
+  for (const ids of childrenByRun.values()) {
+    ids.forEach((id, index) => {
+      branches.set(id, index === ids.length - 1 ? 'last' : 'mid');
+    });
+  }
+  return branches;
 }
 
 function modelDisplayName(state: AppState): string {
@@ -191,18 +264,47 @@ function shortenCwd(path: string): string {
   return `…/${tail}`;
 }
 
+function contextPercent(usage: number, tokens?: number, maxTokens?: number): number {
+  if (maxTokens !== undefined && maxTokens > 0 && tokens !== undefined) {
+    return usagePercent(tokens, maxTokens);
+  }
+  return usagePercentFromRatio(usage);
+}
+
 /**
  * Footer context readout. Percent comes from the exact token counts when
  * both are known (the ratio can lag a step behind); otherwise it falls
  * back to the precomputed ratio. Counts use the shared 1024-based
- * formatter.
+ * formatter. Renders nothing until usage approaches the window limit so
+ * the bottom line stays minimal for most of a session.
  */
 function formatContextStatus(usage: number, tokens?: number, maxTokens?: number): string {
+  const pct = contextPercent(usage, tokens, maxTokens);
+  if (pct < CONTEXT_DISPLAY_MIN_PERCENT) return '';
   if (maxTokens !== undefined && maxTokens > 0 && tokens !== undefined) {
-    const pct = String(usagePercent(tokens, maxTokens));
     return `context: ${pct}% (${formatTokenCount(tokens)}/${formatTokenCount(maxTokens)})`;
   }
-  return `context: ${String(usagePercentFromRatio(usage))}%`;
+  return `context: ${String(pct)}%`;
+}
+
+/**
+ * Claude-style TokenWarning. Auto-compact is always on in this engine, so
+ * the copy counts down to that event rather than prompting `/compact`.
+ * Hidden while a compaction is already running.
+ */
+export function formatContextWarning(
+  usage: number,
+  tokens: number | undefined,
+  maxTokens: number | undefined,
+  isCompacting: boolean,
+): string {
+  if (isCompacting) return '';
+  const pct = contextPercent(usage, tokens, maxTokens);
+  if (pct < CONTEXT_WARNING_MIN_PERCENT) return '';
+  if (pct < CONTEXT_DISPLAY_MIN_PERCENT) {
+    return `${String(Math.max(0, 100 - pct))}% until auto-compact`;
+  }
+  return 'auto-compact soon';
 }
 
 export function formatFooterGitBadge(status: GitStatus, colors: ColorPalette): string {
@@ -225,8 +327,13 @@ export class FooterComponent implements Component {
   private goalSnapshotKey: string | null = null;
   private goalObservedAtMs = Date.now();
   private goalTimer: ReturnType<typeof setInterval> | null = null;
+  /** Timer keeping the ultracode pill's yellow ripple repainting while active. */
+  private ultracodeTimer: ReturnType<typeof setInterval> | null = null;
   /** Timer that keeps per-agent elapsed counters ticking while agents run. */
   private agentTimer: ReturnType<typeof setInterval> | null = null;
+  /** Signature of the last elapsed readout the agent timer bumped for, so a
+   *  settled footer isn't redrawn once a second for nothing. */
+  private lastAgentElapsedSignature: string | null = null;
   /** Displayed main-agent token count, chased toward the estimate on each render. */
   private tokenDisplay = 0;
   /** Supplies the live streamed output-token estimate (see turn-usage.ts). */
@@ -234,15 +341,17 @@ export class FooterComponent implements Component {
   /** Last time the catch-up animation advanced (for the 50ms throttle). */
   private tokenLastTickMs = 0;
   private statusLineRunner: StatusLineCommandRunner | null = null;
-  /**
-   * Non-terminal background-task counts split by kind so the footer can
+  /** Background quota snapshot source for the compact quota slot. */
+  private quotaRunner: QuotaRunner | null = null;
+  /** Non-terminal background-task counts split by kind so the footer can
    * render two distinct badges. `bashTasks` covers `bash-*` BPM tasks
    * spawned via `Shell run_in_background=true`; `agentTasks` covers
-   * `agent-*` BPM tasks (background subagents). Either zero hides its
-   * respective badge.
+   * `agent-*` BPM tasks (background subagents); `workflowTasks` covers
+   * `workflow` runs. Either zero hides its respective badge.
    */
   private backgroundBashTaskCount = 0;
   private backgroundAgentCount = 0;
+  private backgroundWorkflowCount = 0;
   /** Live per-agent rows shown below the standard footer lines. */
   private runningAgents: readonly RunningAgentSummary[] = [];
 
@@ -254,6 +363,7 @@ export class FooterComponent implements Component {
     this.syncGoalClock(state.goal);
     this.syncGoalTimer(state.goal);
     this.syncStatusLineRunner(state);
+    this.syncUltracodeTimer(state);
   }
 
   setState(state: AppState): void {
@@ -264,6 +374,7 @@ export class FooterComponent implements Component {
     this.syncGoalClock(state.goal);
     this.syncGoalTimer(state.goal);
     this.syncStatusLineRunner(state);
+    this.syncUltracodeTimer(state);
     this.state = state;
     bumpVersion(this);
   }
@@ -284,9 +395,22 @@ export class FooterComponent implements Component {
   }
 
   /**
-   * Short-lived hint that replaces the rotating toolbar tips on line 1.
-   * Used by the exit-confirmation double-tap flow to show "Press Ctrl+C
-   * again to exit" without requiring a toast/overlay subsystem.
+   * Replace the background quota snapshot source for the compact quota slot.
+   * The previous runner is disposed first; passing `null` clears the slot.
+   */
+  setQuotaRunner(runner: QuotaRunner | null): void {
+    if (this.quotaRunner === runner) return;
+    this.quotaRunner?.dispose();
+    this.quotaRunner = runner;
+    bumpVersion(this);
+  }
+
+  /**
+   * Short-lived hint shown at the bottom-left of footer line 2 (before the
+   * context readout on the right). Used by the exit-confirmation double-tap
+   * flow to show "Press Ctrl+C again to exit" without requiring a
+   * toast/overlay subsystem. When secondary slots occupy line 2, the hint is
+   * appended after them and dropped first if it does not fit.
    * Pass `null` to clear.
    */
   setTransientHint(hint: string | null): void {
@@ -303,9 +427,14 @@ export class FooterComponent implements Component {
    * count produces its own bracketed badge on line 1; zeros hide them
    * independently.
    */
-  setBackgroundCounts(counts: { bashTasks: number; agentTasks: number }): void {
+  setBackgroundCounts(counts: {
+    bashTasks: number;
+    agentTasks: number;
+    workflowTasks: number;
+  }): void {
     this.backgroundBashTaskCount = Math.max(0, counts.bashTasks);
     this.backgroundAgentCount = Math.max(0, counts.agentTasks);
+    this.backgroundWorkflowCount = Math.max(0, counts.workflowTasks);
     bumpVersion(this);
   }
 
@@ -342,6 +471,19 @@ export class FooterComponent implements Component {
     bumpVersion(this);
   }
 
+  /**
+   * The main-agent token counter currently shown in the footer (the smoothed
+   * `tokenDisplay`). The activity-spinner row reads this same value so both
+   * display positions stay in lock-step instead of showing different totals.
+   * While no turn is in flight the value falls back to the session-cumulative
+   * output tokens (`sessionOutputTokens` on AppState, supplied by the state
+   * layer; absent states read as 0), so an idle `main` row keeps its total.
+   */
+  getDisplayedMainTokens(): number {
+    if (this.state.turnUsage !== undefined) return this.tokenDisplay;
+    return this.state.sessionOutputTokens ?? 0;
+  }
+
   private stopTokenAnimation(): void {
     this.tokenDisplay = 0;
     this.tokenLastTickMs = 0;
@@ -361,6 +503,7 @@ export class FooterComponent implements Component {
     if (now - this.tokenLastTickMs < TOKEN_ANIMATION_INTERVAL_MS) return;
     this.tokenLastTickMs = now;
 
+    const before = this.tokenDisplay;
     const target = turnOutputTokens(this.state.turnUsage, this.tokenTargetProvider());
     if (target <= 0) {
       this.tokenDisplay = 0;
@@ -374,6 +517,31 @@ export class FooterComponent implements Component {
         this.tokenDisplay = Math.min(this.tokenDisplay + increment, target);
       }
     }
+    // Only a display change is worth a re-render: once caught up to the target
+    // (stream paused / settled) stop bumping, so the footer stops redrawing the
+    // same line on every frame while the estimate keeps coming in.
+    if (this.tokenDisplay !== before) bumpVersion(this);
+  }
+
+  /**
+   * Deterministic snapshot of the time-driven part of the agent rows — the
+   * elapsed readout per rendered row. Every other row input (name, phase,
+   * tokens, activity) changes only through `setRunningAgents`, which bumps the
+   * footer on its own; the 1s timer exists solely to advance elapsed readouts,
+   * so this is all it needs to compare between ticks.
+   */
+  private agentElapsedSignature(): string {
+    const now = Date.now();
+    const parts: string[] = [];
+    if (this.state.streamingPhase !== 'idle') {
+      const seconds = Math.max(0, Math.floor((now - (this.state.streamingStartTime ?? now)) / 1000));
+      parts.push(`main:${formatFooterAgentElapsed(seconds)}`);
+    }
+    for (const agent of this.runningAgents) {
+      const seconds = Math.max(0, Math.floor((now - agent.startedAtMs) / 1000));
+      parts.push(`${agent.id}:${formatFooterAgentElapsed(seconds)}`);
+    }
+    return parts.join('|');
   }
 
   private syncAgentTimer(): void {
@@ -383,13 +551,23 @@ export class FooterComponent implements Component {
         clearInterval(this.agentTimer);
         this.agentTimer = null;
       }
+      this.lastAgentElapsedSignature = null;
       return;
     }
     if (this.agentTimer !== null) return;
     const requestRender = this.onRefresh;
     this.agentTimer = setInterval(() => {
-      bumpVersion(this);
-      requestRender();
+      // Only bump when the elapsed readout actually changed. `formatFooterAgentElapsed`
+      // now shows second granularity below a minute and minute+seconds above it, so
+      // a run's elapsed text changes every second — the signature check stays so a
+      // tick that did not cross a whole-second boundary still skips the redraw
+      // (byte-identical output never forces one).
+      const signature = this.agentElapsedSignature();
+      if (signature !== this.lastAgentElapsedSignature) {
+        this.lastAgentElapsedSignature = signature;
+        bumpVersion(this);
+        requestRender();
+      }
     }, AGENT_TIMER_INTERVAL_MS);
     this.agentTimer.unref?.();
   }
@@ -407,7 +585,7 @@ export class FooterComponent implements Component {
     // cadence (the spinner redraws ~120ms while animating).
     this.tickTokenAnimation();
 
-    // ── Line 1: slots composed per status_line.items, or a user command ──
+    // ── Line 1: primary slots (mode/goal/model) or a user command ──
     let line1: string;
     let customLine: string | null = null;
     if (this.statusLineRunner !== null) {
@@ -415,6 +593,10 @@ export class FooterComponent implements Component {
       customLine = this.statusLineRunner.current();
     }
 
+    // Secondary slots (quota/cache/tasks/cwd/git/…) render on line 2. With a
+    // custom status_line.command the whole status readout is suppressed,
+    // leaving line 2 to the transient hint + context as before.
+    let secondaryLine = '';
     if (customLine !== null) {
       // status_line.command: the first stdout line takes over line 1.
       line1 = chalk.hex(colors.text)(customLine);
@@ -422,13 +604,17 @@ export class FooterComponent implements Component {
       const slots = this.buildSlots(colors);
       const configured = this.state.statusLine?.items ?? null;
       const order: readonly string[] = configured ?? DEFAULT_STATUS_LINE_ITEMS;
-      const left: string[] = [];
+      const primary: string[] = [];
+      const secondary: string[] = [];
       for (const slot of order) {
         const pieces = slots[slot];
-        if (pieces !== undefined) left.push(...pieces);
+        if (pieces !== undefined) {
+          (PRIMARY_STATUS_SLOTS.has(slot) ? primary : secondary).push(...pieces);
+        }
       }
+      secondaryLine = secondary.join('  ');
 
-      const leftLine = left.join('  ');
+      const leftLine = primary.join('  ');
       const leftWidth = visibleWidth(leftLine);
 
       // Claude-style right hint on the default layout: 'esc to interrupt'
@@ -457,15 +643,39 @@ export class FooterComponent implements Component {
       }
     }
 
-    // ── Line 2: transient hint (bottom-left) + context (right) ──
-    const contextText = formatContextStatus(
+    // ── Line 2: secondary slots + transient hint (left) + context (right) ──
+    const contextStatus = formatContextStatus(
       state.contextUsage,
       state.contextTokens,
       state.maxContextTokens,
     );
+    const contextWarning = formatContextWarning(
+      state.contextUsage,
+      state.contextTokens,
+      state.maxContextTokens,
+      state.isCompacting,
+    );
+    const contextParts: string[] = [];
+    if (contextStatus) contextParts.push(chalk.hex(colors.text)(contextStatus));
+    if (contextWarning) contextParts.push(chalk.hex(colors.textDim)(contextWarning));
+    const contextText = contextParts.join(' · ');
     const contextWidth = visibleWidth(contextText);
+    const maxLeftWidth = Math.max(0, width - contextWidth - 1);
     let line2: string;
-    if (this.transientHint) {
+    if (secondaryLine) {
+      // Secondary slots take the left side; the transient hint is appended
+      // only when it fits, and is the first thing dropped under pressure so
+      // the quota/cache/cwd/git readout stays intact.
+      let left = secondaryLine;
+      if (this.transientHint) {
+        const combined = `${secondaryLine}  ${this.transientHint}`;
+        if (visibleWidth(combined) <= maxLeftWidth) left = combined;
+      }
+      left = truncateToWidth(left, maxLeftWidth, '…');
+      const leftWidth = visibleWidth(left);
+      const pad = Math.max(0, width - leftWidth - contextWidth);
+      line2 = left + ' '.repeat(pad) + contextText;
+    } else if (this.transientHint) {
       const maxHintWidth = Math.max(0, width - contextWidth - 1);
       const shownHint =
         visibleWidth(this.transientHint) <= maxHintWidth
@@ -473,13 +683,10 @@ export class FooterComponent implements Component {
           : truncateToWidth(this.transientHint, maxHintWidth, '…');
       const hintWidth = visibleWidth(shownHint);
       const pad = Math.max(0, width - hintWidth - contextWidth);
-      line2 =
-        chalk.hex(colors.warning).bold(shownHint) +
-        ' '.repeat(pad) +
-        chalk.hex(colors.text)(contextText);
+      line2 = chalk.hex(colors.warning).bold(shownHint) + ' '.repeat(pad) + contextText;
     } else {
       const leftPad = Math.max(0, width - contextWidth);
-      line2 = ' '.repeat(leftPad) + chalk.hex(colors.text)(contextText);
+      line2 = ' '.repeat(leftPad) + contextText;
     }
 
     // ── Agent status rows: one line per running agent when details exist ──
@@ -513,12 +720,15 @@ export class FooterComponent implements Component {
         name: 'main',
         phase: 'running',
         startedAtMs: Date.now(),
-        tokens: 0,
+        // Session-cumulative output tokens once idle (0 before any turn).
+        tokens: this.getDisplayedMainTokens(),
       };
       lines.push(this.formatAgentLine(idleMain, true, colors, width));
     }
+    // Workflow child rows render as tree branches under their run row.
+    const branches = workflowBranchMap(this.runningAgents);
     for (const agent of this.runningAgents) {
-      lines.push(this.formatAgentLine(agent, false, colors, width));
+      lines.push(this.formatAgentLine(agent, false, colors, width, branches.get(agent.id)));
     }
     return lines;
   }
@@ -531,9 +741,8 @@ export class FooterComponent implements Component {
       phase: this.state.streamingPhase === 'waiting' ? 'waiting' : 'running',
       startedAtMs: this.state.streamingStartTime,
       // Display-only count chased toward the estimate by the 50ms animation
-      // timer; input tokens are excluded (they are the step's full context,
-      // not output produced this turn — see turnOutputTokens).
-      tokens: this.state.turnUsage === undefined ? 0 : this.tokenDisplay,
+      // timer (input tokens excluded — see getDisplayedMainTokens).
+      tokens: this.getDisplayedMainTokens(),
     };
     return this.formatAgentLine(summary, true, colors, width);
   }
@@ -543,19 +752,31 @@ export class FooterComponent implements Component {
     isMain: boolean,
     colors: ColorPalette,
     width: number,
+    branch?: 'mid' | 'last',
   ): string {
-    const bullet = isMain ? chalk.hex(colors.primary)('●') : chalk.hex(colors.textDim)('○');
+    let bullet: string;
+    if (isMain) {
+      bullet = chalk.hex(colors.primary)('●');
+    } else if (branch !== undefined) {
+      bullet = chalk.hex(colors.textDim)(branch === 'last' ? '└──' : '├──');
+    } else {
+      bullet = chalk.hex(colors.textDim)('○');
+    }
     const name = chalk.hex(colors.text)(agent.name);
-    const parts: string[] = [bullet, name];
+    const leftParts: string[] = [bullet, name];
 
     if (agent.description !== undefined && agent.description.length > 0) {
-      parts.push(chalk.hex(colors.textDim)(agent.description));
+      leftParts.push(chalk.hex(colors.textDim)(agent.description));
     }
 
     if (agent.latestActivity !== undefined && agent.latestActivity.length > 0) {
-      parts.push(chalk.hex(colors.textDim)(`→ ${agent.latestActivity}`));
+      leftParts.push(chalk.hex(colors.textDim)(`→ ${agent.latestActivity}`));
     }
+    const left = leftParts.join(' ');
 
+    // Right-fixed stats: elapsed + token count. The stats are preserved at the
+    // cost of truncating the middle activity text, matching line2's
+    // right-aligned context readout instead of tail-truncating the whole row.
     const elapsedSeconds = Math.max(0, Math.floor((Date.now() - agent.startedAtMs) / 1000));
     const stats: string[] = [];
     if (elapsedSeconds > 0) {
@@ -564,11 +785,29 @@ export class FooterComponent implements Component {
     if (agent.tokens > 0) {
       stats.push(`↓ ${formatTokenCount(agent.tokens)} tok`);
     }
-    if (stats.length > 0) {
-      parts.push(chalk.hex(colors.textDim)(stats.join(' ')));
+    const statsText = chalk.hex(colors.textDim)(stats.join(' '));
+    if (statsText.length === 0) {
+      return truncateToWidth(left, Math.max(1, width), '…');
     }
 
-    return truncateToWidth(parts.join(' '), Math.max(1, width), '…');
+    // Cap stats at half the row so a narrow terminal keeps room for the left.
+    const maxStatsWidth = Math.max(1, Math.floor(width / 2));
+    const shownStats = truncateToWidth(statsText, maxStatsWidth);
+    const leftWidth = Math.max(0, width - visibleWidth(shownStats) - 1);
+    const shownLeft = truncateToWidth(left, Math.max(1, leftWidth), '…');
+    const pad = Math.max(0, width - visibleWidth(shownLeft) - visibleWidth(shownStats));
+    return shownLeft + ' '.repeat(pad) + shownStats;
+  }
+
+  /**
+   * Ultracode mode pill (yellow). When motion is
+   * allowed, the label ripples through a per-character yellow sweep on a 2s
+   * wall-clock loop; under reduced motion it stays a static yellow pill.
+   */
+  private renderUltracodePill(): string {
+    const hex = currentTheme.palette.effortUltra;
+    if (isReducedMotion()) return chalk.hex(hex).bold('ultracode');
+    return rippleText('ultracode', hex, ULTRACODE_RIPPLE_LIGHT, Date.now(), true);
   }
 
   /**
@@ -581,6 +820,8 @@ export class FooterComponent implements Component {
       mode: [],
       goal: [],
       model: [],
+      quota: [],
+      cache: [],
       tasks: [],
       cwd: [],
       git: [],
@@ -598,8 +839,13 @@ export class FooterComponent implements Component {
       modes.push(chalk.hex(autoAcceptColor())('⏵⏵ auto-accept edits on'));
     if (state.permissionMode === 'yolo')
       modes.push(chalk.hex(colors.error)('⏵⏵ bypass permissions on'));
-    if (state.planMode) modes.push(chalk.hex(colors.primary)('⏸ plan mode on'));
+    // Auto/yolo imply plan mode is off (the ACP 4-mode taxonomy), so never
+    // render the plan pill alongside a permission pill even if the session
+    // reports a stale planMode.
+    if (state.planMode && state.permissionMode !== 'auto' && state.permissionMode !== 'yolo')
+      modes.push(chalk.hex(colors.primary)('⏸ plan mode on'));
     if (state.swarmMode) modes.push(chalk.hex(colors.accent).bold('swarm'));
+    if (state.ultracode) modes.push(this.renderUltracodePill());
     if (modes.length > 0) slots['mode'] = [modes.join(' ')];
 
     const goalBadge = formatGoalBadge(state.goal, colors, this.goalWallClockMs(state.goal));
@@ -612,12 +858,13 @@ export class FooterComponent implements Component {
       const currentModel =
         rawCurrentModel === undefined ? undefined : effectiveModelAlias(rawCurrentModel);
       // Only effort-capable models (those declaring support_efforts) show the
-      // concrete effort; legacy boolean models keep the plain "thinking" suffix.
+      // bare effort value (`model max`); legacy boolean models keep the plain
+      // "thinking" suffix.
       const hasEfforts = (currentModel?.supportEfforts?.length ?? 0) > 0;
       const thinkingLabel =
         effort !== 'off'
           ? hasEfforts && effort !== 'on'
-            ? ` thinking: ${effort}`
+            ? ` ${effort}`
             : ' thinking'
           : '';
       const modelLabel = `${model}${thinkingLabel}`;
@@ -627,6 +874,12 @@ export class FooterComponent implements Component {
       }
       slots['model'] = [renderedModelLabel];
     }
+
+    const quota = this.buildQuotaSlot(colors);
+    if (quota.length > 0) slots['quota'] = quota;
+
+    const cache = this.buildCacheSlot(colors);
+    if (cache.length > 0) slots['cache'] = cache;
 
     // Background-task badges. `bash-*` tasks (shell processes) are shown as a
     // count; `agent-*` tasks show a compact count on line 1 regardless of the
@@ -646,6 +899,12 @@ export class FooterComponent implements Component {
         chalk.hex(colors.primary)(`[${String(this.backgroundAgentCount)} ${noun} running]`),
       );
     }
+    if (this.backgroundWorkflowCount > 0) {
+      const noun = this.backgroundWorkflowCount === 1 ? 'workflow' : 'workflows';
+      taskBadges.push(
+        chalk.hex(colors.primary)(`[${String(this.backgroundWorkflowCount)} ${noun} running]`),
+      );
+    }
     slots['tasks'] = taskBadges;
 
     const cwd = shortenCwd(state.workDir);
@@ -655,6 +914,51 @@ export class FooterComponent implements Component {
     if (git !== null) slots['git'] = [formatFooterGitBadge(git, colors)];
 
     return slots;
+  }
+
+  /**
+   * Compact rolling/weekly usage readout for quota providers (opencode-go and
+   * the kimi managed provider). Renders nothing when the current provider has
+   * no quota data, the runner has not landed a snapshot yet, or a row carries
+   * no usable ratio. Never throws: every row is guarded before formatting.
+   */
+  private buildQuotaSlot(colors: ColorPalette): string[] {
+    const provider = this.state.availableModels[this.state.model]?.provider;
+    if (!isOpenCodeGoProvider(provider) && !isManagedUsageProvider(provider)) return [];
+    const snapshot: QuotaSnapshot | null | undefined = this.quotaRunner?.current();
+    if (snapshot === null || snapshot === undefined || snapshot.rows.length === 0) return [];
+
+    const parts: string[] = [];
+    for (const row of snapshot.rows) {
+      if (!Number.isFinite(row.used) || row.limit <= 0) continue;
+      const pct = Math.round((row.used / row.limit) * 100);
+      const symbol = row.unit === 'week' ? '◑' : '◱';
+      let text = `${symbol} ${String(pct)}%`;
+      if (row.resetAt !== undefined) {
+        const parsed = Date.parse(row.resetAt);
+        if (Number.isFinite(parsed)) {
+          text += ` (${formatDuration(Math.floor((parsed - Date.now()) / 1000))})`;
+        }
+      }
+      parts.push(chalk.hex(colors.textDim)(text));
+    }
+    return parts.length > 0 ? [parts.join('  ')] : [];
+  }
+
+  /**
+   * Session prompt-cache hit rate, e.g. `cache 62%`. The rate is the share of
+   * input tokens served from the provider cache (cache-read tokens over all
+   * input tokens — read + creation + uncached), matching the vis analysis
+   * definition. Renders nothing until a step with exact usage has completed;
+   * never throws (every term is guarded before dividing).
+   */
+  private buildCacheSlot(colors: ColorPalette): string[] {
+    const cache = this.state.sessionCacheUsage;
+    if (cache === undefined) return [];
+    const total = cache.inputOther + cache.inputCacheRead + cache.inputCacheCreation;
+    if (!Number.isFinite(total) || total <= 0) return [];
+    const pct = Math.round((cache.inputCacheRead / total) * 100);
+    return [chalk.hex(colors.textDim)(`cache ${String(pct)}%`)];
   }
 
   private statusLinePayload(): StatusLinePayload {
@@ -697,15 +1001,43 @@ export class FooterComponent implements Component {
     }
   }
 
+  /**
+   * Keeps the ultracode pill's yellow ripple repainting while ultracode mode
+   * is active and motion is allowed. Stops the timer when the mode exits or
+   * the user prefers reduced motion — the pill then renders static.
+   */
+  private syncUltracodeTimer(state: AppState): void {
+    const animate = state.ultracode === true && !isReducedMotion();
+    if (animate) {
+      if (this.ultracodeTimer !== null) return;
+      this.ultracodeTimer = setInterval(() => {
+        bumpVersion(this);
+        this.onRefresh();
+      }, ULTRACODE_RIPPLE_INTERVAL_MS);
+      this.ultracodeTimer.unref?.();
+      return;
+    }
+    if (this.ultracodeTimer !== null) {
+      clearInterval(this.ultracodeTimer);
+      this.ultracodeTimer = null;
+    }
+  }
+
   dispose(): void {
     if (this.goalTimer !== null) {
       clearInterval(this.goalTimer);
       this.goalTimer = null;
     }
+    if (this.ultracodeTimer !== null) {
+      clearInterval(this.ultracodeTimer);
+      this.ultracodeTimer = null;
+    }
     if (this.agentTimer !== null) {
       clearInterval(this.agentTimer);
       this.agentTimer = null;
     }
+    this.quotaRunner?.dispose();
+    this.quotaRunner = null;
     this.stopTokenAnimation();
   }
 

@@ -53,6 +53,7 @@ import {
   type StepTrackerState,
   type TitleDoc,
   type TurnCounterState,
+  type TurnOpener,
 } from './docs.ts';
 import {
   decodePageToken,
@@ -172,15 +173,22 @@ function advanceTurnCounter(
   effect: TurnEffect,
 ): { docTurn: number | undefined; state: TurnCounterState } {
   switch (effect.kind) {
-    case 'open':
+    case 'open': {
+      // Copy-on-write opener stack. Arrays produced by this module are
+      // exclusively owned by the linear replay loop (persisted states are
+      // defensively copied at the pass start, and the shared initial
+      // constant is identity-checked), so an in-place append is safe and
+      // turns the build-time O(n²) opener-array copies into O(n).
+      const opener: TurnOpener = { turn: state.next, anchor: effect.anchor };
+      const openers =
+        state.openers === INITIAL_TURN_STATE.openers
+          ? [opener]
+          : ((state.openers as TurnOpener[]).push(opener), state.openers);
       return {
         docTurn: state.next,
-        state: {
-          next: state.next + 1,
-          hasTurn: true,
-          openers: [...state.openers, { turn: state.next, anchor: effect.anchor }],
-        },
+        state: { next: state.next + 1, hasTurn: true, openers },
       };
+    }
     case 'ensure': {
       const next = state.hasTurn ? state : { ...state, next: state.next + 1, hasTurn: true };
       return { docTurn: next.next - 1, state: next };
@@ -212,7 +220,15 @@ function advanceStepTracker(state: StepTrackerState, effect: StepEffect): StepTr
   const begins = state.begins + 1;
   const ordinal = effect.ordinal ?? begins;
   if (state.byUuid[effect.uuid] === ordinal) return state;
-  return { byUuid: { ...state.byUuid, [effect.uuid]: ordinal }, begins };
+  // Copy-on-write uuid map: like the opener stack above, maps produced by
+  // this module are exclusively owned by the replay loop (the shared initial
+  // constant is identity-checked), so an entry can be set in place — O(n)
+  // per line instead of an O(n²) full-map copy at build time.
+  const byUuid =
+    state.byUuid === INITIAL_STEP_STATE.byUuid
+      ? { ...state.byUuid, [effect.uuid]: ordinal }
+      : (state.byUuid[effect.uuid] = ordinal, state.byUuid);
+  return { byUuid, begins };
 }
 
 // ---------------------------------------------------------------------------
@@ -890,8 +906,19 @@ export class SearchIndexCore {
     }
     const known = meta?.kind === 'fileMeta' ? meta : undefined;
     let offset = known?.offset ?? 0;
-    let turnState: TurnCounterState = known?.turnState ?? initialTurnState();
-    let stepState: StepTrackerState = known?.stepState ?? initialStepState();
+    // Defensive copies: states read from a persisted meta are db-owned, but
+    // the replay below mutates counter structures in place (COW), so never
+    // alias the stored objects. One linear copy per file per pass is cheap.
+    let turnState: TurnCounterState = known?.turnState === undefined
+      ? initialTurnState()
+      : {
+          next: known.turnState.next,
+          hasTurn: known.turnState.hasTurn,
+          openers: [...known.turnState.openers],
+        };
+    let stepState: StepTrackerState = known?.stepState === undefined
+      ? initialStepState()
+      : { byUuid: { ...known.stepState.byUuid }, begins: known.stepState.begins };
     const fileMeta = (
       nextOffset: number,
       turns: TurnCounterState,

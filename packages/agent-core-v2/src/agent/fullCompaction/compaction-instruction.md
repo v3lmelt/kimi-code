@@ -1,8 +1,16 @@
+任何工具调用都会被拒绝并浪费你唯一的一轮 —— 本回合只允许纯文本输出，不要尝试调用任何工具。
+
 You are about to run out of context. Write a first-person handoff note to
 yourself so you can seamlessly continue this task after the earlier
 conversation is cleared.
 
 --- This message is a direct task, not part of the above conversation ---
+
+先写 <analysis> 草稿区（在此整理思路、列出要点），再写 <summary> 正式区（只放最终交付的交接笔记）。
+<analysis> 区仅为草稿、不会被保留，正式内容务必放进 <summary> 区。
+
+若对话中包含用户的请求，用 verbatim 逐字引述最近一条用户请求中的关键约束，
+确保交接后仍能严格遵从这些约束。
 
 Write the note as your own continuing train of thought — first person, present
 tense, the way you would reason through the next move. Do not write a

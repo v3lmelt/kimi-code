@@ -286,12 +286,12 @@ describe('EditorKeyboardController shell history recall', () => {
   });
 });
 
-describe('EditorKeyboardController Shift-Tab plan toggle', () => {
+describe('EditorKeyboardController Shift-Tab mode cycle', () => {
   function createShiftTabHarness(options: { sessionless?: boolean; engineV2?: boolean } = {}) {
     const editor: Record<string, ((...args: never[]) => unknown) | undefined> = {
       setHistoryFilter: vi.fn() as unknown as (...args: never[]) => unknown,
     };
-    const handlePlanToggle = vi.fn();
+    const handleModeCycle = vi.fn();
     const track = vi.fn();
     const showError = vi.fn();
     const ensureSession = vi.fn(async (): Promise<{ id: string } | undefined> => ({ id: 'ses-lazy' }));
@@ -306,7 +306,7 @@ describe('EditorKeyboardController Shift-Tab plan toggle', () => {
       session: options.sessionless ? undefined : { cancel: vi.fn(async () => {}) },
       engineV2: options.engineV2 ?? false,
       ensureSession,
-      handlePlanToggle,
+      handleModeCycle,
       track,
       showError,
       btwPanelController: { cancelRunning: vi.fn(), closeOrCancel: vi.fn() },
@@ -314,47 +314,46 @@ describe('EditorKeyboardController Shift-Tab plan toggle', () => {
 
     new EditorKeyboardController(host, undefined as unknown as ImageAttachmentStore).install();
     const onShiftTab = editor['onShiftTab'] as unknown as () => void;
-    return { onShiftTab, handlePlanToggle, track, showError, ensureSession };
+    return { onShiftTab, handleModeCycle, ensureSession, showError };
   }
 
-  it('toggles plan mode directly with an active session', () => {
-    const { onShiftTab, handlePlanToggle, ensureSession } = createShiftTabHarness();
+  it('cycles modes directly with an active session', () => {
+    const { onShiftTab, handleModeCycle, ensureSession } = createShiftTabHarness();
 
     onShiftTab();
 
     expect(ensureSession).not.toHaveBeenCalled();
-    expect(handlePlanToggle).toHaveBeenCalledWith(true);
+    expect(handleModeCycle).toHaveBeenCalledOnce();
   });
 
   it('reports no active session on v1 when session-less', () => {
-    const { onShiftTab, showError, handlePlanToggle } = createShiftTabHarness({
+    const { onShiftTab, showError, handleModeCycle } = createShiftTabHarness({
       sessionless: true,
     });
 
     onShiftTab();
 
     expect(showError).toHaveBeenCalledWith(NO_ACTIVE_SESSION_MESSAGE);
-    expect(handlePlanToggle).not.toHaveBeenCalled();
+    expect(handleModeCycle).not.toHaveBeenCalled();
   });
 
-  it('lazy-creates the session before toggling on v2 when session-less', async () => {
-    const { onShiftTab, ensureSession, handlePlanToggle, track } = createShiftTabHarness({
+  it('lazy-creates the session before cycling on v2 when session-less', async () => {
+    const { onShiftTab, ensureSession, handleModeCycle } = createShiftTabHarness({
       sessionless: true,
       engineV2: true,
     });
 
     onShiftTab();
-    expect(handlePlanToggle).not.toHaveBeenCalled();
+    expect(handleModeCycle).not.toHaveBeenCalled();
 
     await vi.waitFor(() => {
-      expect(handlePlanToggle).toHaveBeenCalledWith(true);
+      expect(handleModeCycle).toHaveBeenCalledOnce();
     });
     expect(ensureSession).toHaveBeenCalledOnce();
-    expect(track).toHaveBeenCalledWith('shortcut_plan_toggle', { enabled: true });
   });
 
-  it('does not toggle when the lazy creation fails on v2', async () => {
-    const { onShiftTab, ensureSession, handlePlanToggle } = createShiftTabHarness({
+  it('does not cycle when the lazy creation fails on v2', async () => {
+    const { onShiftTab, ensureSession, handleModeCycle } = createShiftTabHarness({
       sessionless: true,
       engineV2: true,
     });
@@ -363,6 +362,6 @@ describe('EditorKeyboardController Shift-Tab plan toggle', () => {
     onShiftTab();
     await new Promise((resolve) => setImmediate(resolve));
 
-    expect(handlePlanToggle).not.toHaveBeenCalled();
+    expect(handleModeCycle).not.toHaveBeenCalled();
   });
 });

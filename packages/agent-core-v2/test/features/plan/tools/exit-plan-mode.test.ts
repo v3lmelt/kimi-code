@@ -34,6 +34,7 @@ function planService(): IAgentPlanService {
         content: '# Plan',
         path: '/tmp/kimi-plan.md',
       } satisfies NonNullable<PlanData>),
+    currentPlanFilePath: () => '/tmp/kimi-plan.md',
   };
 }
 

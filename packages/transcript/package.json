@@ -27,6 +27,7 @@
     "build": "tsdown",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "bench": "node --import tsx bench/apply.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {

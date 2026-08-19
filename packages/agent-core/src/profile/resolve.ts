@@ -2,6 +2,7 @@ import { renderPrompt } from '../utils/render-prompt';
 import {
   ADDITIONAL_DIRS_SECTION_PROSE,
   SKILLS_SECTION_PROSE,
+  TODO_LIST_SECTION_PROSE,
   WINDOWS_NOTES,
 } from './prompt-sections';
 import type {
@@ -176,6 +177,9 @@ function buildTemplateVars(
     KIMI_WINDOWS_NOTES: WINDOWS_NOTES,
     KIMI_ADDITIONAL_DIRS_SECTION_PROSE: ADDITIONAL_DIRS_SECTION_PROSE,
     KIMI_SKILLS_SECTION_PROSE: SKILLS_SECTION_PROSE,
+    // Tool-gated like KIMI_SKILLS: rendered only when the profile's tool set
+    // includes TodoList (agent / coder), hidden for read-only profiles.
+    KIMI_TODO_LIST_SECTION: tools.includes('TodoList') ? TODO_LIST_SECTION_PROSE : '',
     ROLE_ADDITIONAL:
       context.roleAdditional ?? promptVars['ROLE_ADDITIONAL'] ?? promptVars['roleAdditional'] ?? '',
   };

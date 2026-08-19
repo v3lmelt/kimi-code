@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { ToolCallComponent } from '#/tui/components/messages/tool-call';
 import { STATUS_BULLET } from '#/tui/constant/symbols';
+import { STREAMING_UI_FLUSH_MS } from '#/tui/constant/streaming';
 import { darkColors } from '#/tui/theme/colors';
 
 import { captureProcessWrite } from '../../../helpers/process';
@@ -989,7 +990,7 @@ describe('ToolCallComponent', () => {
     });
 
     let out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Explore Agent Queued (explore project xxx) · 0 tools · 0s');
+    expect(out).toContain('Explore Agent Queued (explore project xxx)');
     expect(out).not.toContain('Using Agent');
     expect(out).not.toContain('Used Agent');
 
@@ -1002,8 +1003,11 @@ describe('ToolCallComponent', () => {
       args: { path: 'apps/kimi-code/src/tui/utils/background-agent-status.ts' },
     });
 
+    // Flush the throttled subagent rebuild before asserting render output.
+    vi.advanceTimersByTime(STREAMING_UI_FLUSH_MS);
+
     out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Explore Agent Running (explore project xxx) · 1 tool · 10s');
+    expect(out).toContain('Explore Agent Running (explore project xxx)');
     expect(out).toContain('Using Read (apps/kimi-code/src/tui/utils/background-agent-status.ts)');
     // Thinking and text are mutually exclusive in the active window: the most
     // recently streamed (text) wins, so thinking is hidden entirely.
@@ -1025,7 +1029,7 @@ describe('ToolCallComponent', () => {
     vi.setSystemTime(30_000);
 
     out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Explore Agent Completed (explore project xxx) · 1 tool · 12s');
+    expect(out).toContain('Explore Agent Completed (explore project xxx)');
     expect(out).not.toContain('think3');
     expect(out).toContain('│ answer3');
     expect(out).not.toContain('Used Agent');
@@ -1033,7 +1037,7 @@ describe('ToolCallComponent', () => {
     expect(out).not.toContain('summary fallback');
   });
 
-  it('shows the bound model in the subagent header and group snapshot once reported', () => {
+  it('shows the bound model on the card and keeps it in the group snapshot', () => {
     vi.useFakeTimers();
     vi.setSystemTime(10_000);
     const component = new ToolCallComponent(
@@ -1051,14 +1055,106 @@ describe('ToolCallComponent', () => {
     });
 
     let out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Explore Agent Queued (explore project) · 0 tools');
+    expect(out).toContain('Explore Agent Queued (explore project)');
     expect(out).not.toContain('Kimi K2.5');
 
     component.updateSubagentMetrics({ modelDisplay: 'Kimi K2.5' });
 
+    // Model/effort updates render immediately — the user must see the bound
+    // model from spawn, not after the coalesced flush window.
     out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Explore Agent Queued (explore project) · Kimi K2.5 · 0 tools');
+    expect(out).toContain('Kimi K2.5');
     expect(component.getSubagentSnapshot().model).toBe('Kimi K2.5');
+  });
+
+  it('reports total usage tokens in the snapshot over context tokens', () => {
+    const component = new ToolCallComponent(
+      { id: 'call_agent_tokens', name: 'Agent', args: { description: 'explore project' } },
+      undefined,
+    );
+    component.onSubagentSpawned({
+      agentId: 'sub_tokens_1',
+      agentName: 'explore',
+      runInBackground: false,
+    });
+    // Context tokens arrive first; usage lands later with a different total.
+    component.updateSubagentMetrics({ contextTokens: 5_000 });
+    component.updateSubagentMetrics({
+      usage: { inputOther: 100, inputCacheRead: 50, inputCacheCreation: 20, output: 30 },
+    });
+    expect(component.getSubagentSnapshot().tokens).toBe(200);
+  });
+
+  it('falls back to context tokens when usage is not reported yet', () => {
+    const component = new ToolCallComponent(
+      { id: 'call_agent_tokens', name: 'Agent', args: { description: 'explore project' } },
+      undefined,
+    );
+    component.onSubagentSpawned({
+      agentId: 'sub_tokens_1',
+      agentName: 'explore',
+      runInBackground: false,
+    });
+    component.updateSubagentMetrics({ contextTokens: 5_000 });
+    expect(component.getSubagentSnapshot().tokens).toBe(5_000);
+  });
+
+  it('falls back to context tokens when usage totals zero', () => {
+    const component = new ToolCallComponent(
+      { id: 'call_agent_tokens', name: 'Agent', args: { description: 'explore project' } },
+      undefined,
+    );
+    component.onSubagentSpawned({
+      agentId: 'sub_tokens_1',
+      agentName: 'explore',
+      runInBackground: false,
+    });
+    component.updateSubagentMetrics({ contextTokens: 5_000 });
+    component.updateSubagentMetrics({
+      usage: { inputOther: 0, inputCacheRead: 0, inputCacheCreation: 0, output: 0 },
+    });
+    expect(component.getSubagentSnapshot().tokens).toBe(5_000);
+  });
+
+  it('does not show usage tokens in the completed header (snapshot still reports them)', () => {
+    const component = new ToolCallComponent(
+      { id: 'call_agent_tokens', name: 'Agent', args: { description: 'explore project' } },
+      undefined,
+    );
+    component.onSubagentSpawned({
+      agentId: 'sub_tokens_1',
+      agentName: 'explore',
+      runInBackground: false,
+    });
+    component.onSubagentCompleted({
+      resultSummary: 'done',
+      contextTokens: 5_000,
+      usage: { inputOther: 100, inputCacheRead: 50, inputCacheCreation: 20, output: 30 },
+    });
+    const out = strip(component.render(120).join('\n'));
+    expect(out).not.toContain('200 tok');
+    expect(out).not.toContain('5k tok');
+    expect(component.getSubagentSnapshot().tokens).toBe(200);
+  });
+
+  it('shows the total usage count in the done chip of a shared card', () => {
+    const component = new ToolCallComponent(
+      { id: 'call_workflow_tokens', name: 'Workflow', args: { description: 'fan out' } },
+      undefined,
+    );
+    component.onSubagentSpawned({
+      agentId: 'sub_tokens_1',
+      agentName: 'explore',
+      runInBackground: false,
+    });
+    component.onSubagentCompleted({
+      resultSummary: 'done',
+      contextTokens: 5_000,
+      usage: { inputOther: 100, inputCacheRead: 50, inputCacheCreation: 20, output: 30 },
+    });
+    const out = strip(component.render(120).join('\n'));
+    expect(out).toContain('✓ done · 200 tok');
+    expect(out).not.toContain('5k tok');
   });
 
   it('shows Backgrounded after a foreground subagent is detached, even after setResult', () => {
@@ -1133,8 +1229,11 @@ describe('ToolCallComponent', () => {
       args: { pattern: 'auth' },
     });
 
+    // Flush the throttled subagent rebuild before asserting render output.
+    vi.advanceTimersByTime(STREAMING_UI_FLUSH_MS);
+
     const out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Explore Agent Running (inspect tools) · 5 tools · 0s');
+    expect(out).toContain('Explore Agent Running (inspect tools)');
     // Only the current (most recent ongoing) tool appears in the summary line.
     expect(out).toContain('Using Grep (auth)');
     // No per-tool activity rows are rendered.
@@ -1180,6 +1279,9 @@ describe('ToolCallComponent', () => {
       is_error: false,
     });
 
+    // Flush the throttled subagent rebuild before asserting render output.
+    vi.advanceTimersByTime(STREAMING_UI_FLUSH_MS);
+
     const out = strip(component.render(120).join('\n'));
     // The updated/finished older tool must not surface in the summary.
     expect(out).not.toContain('file1-updated.ts');
@@ -1211,6 +1313,9 @@ describe('ToolCallComponent', () => {
       'text',
     );
 
+    // Flush the throttled subagent rebuild before asserting render output.
+    vi.advanceTimersByTime(STREAMING_UI_FLUSH_MS);
+
     const joined = strip(component.render(34).join('\n'));
     // The two-row window drops the head of the wrapped paragraph.
     expect(joined).not.toContain('output words that should');
@@ -1239,6 +1344,9 @@ describe('ToolCallComponent', () => {
     // only the last THINKING_PREVIEW_LINES (2) should remain visible.
     const segs = Array.from({ length: 30 }, (_, i) => `seg${String(i).padStart(2, '0')}`);
     component.appendSubagentText(segs.join(' '), 'thinking');
+
+    // Flush the throttled subagent rebuild before asserting render output.
+    vi.advanceTimersByTime(STREAMING_UI_FLUSH_MS);
 
     const lines = strip(component.render(40).join('\n')).split('\n');
     const thinkingRows = lines.filter((l) => /seg\d\d/.test(l));
@@ -1270,6 +1378,9 @@ describe('ToolCallComponent', () => {
     });
     const output = Array.from({ length: 10 }, (_, i) => `bash-line-${String(i)}`).join('\n');
     component.appendSubToolLiveOutput('sub_bash:cmd', output);
+
+    // Flush the throttled subagent rebuild before asserting render output.
+    vi.advanceTimersByTime(STREAMING_UI_FLUSH_MS);
 
     let out = strip(component.render(120).join('\n'));
     expect(out).toContain('Using Bash (ls -la)');
@@ -1323,6 +1434,9 @@ describe('ToolCallComponent', () => {
     const mcpOut = Array.from({ length: 5 }, (_, i) => `mcp-line-${String(i)}`).join('\n');
     component.appendSubToolLiveOutput('sub_mixed:mcp', mcpOut);
 
+    // Flush the throttled subagent rebuild before asserting render output.
+    vi.advanceTimersByTime(STREAMING_UI_FLUSH_MS);
+
     const out = strip(component.render(120).join('\n'));
     // Recognized tool output never appears.
     expect(out).not.toContain('recognized-read-body');
@@ -1354,7 +1468,7 @@ describe('ToolCallComponent', () => {
     component.onSubagentFailed({ error: 'subagent exceeded max_steps' });
 
     const out = strip(component.render(120).join('\n'));
-    expect(out).toContain('Explore Agent Failed (check failure) · 0 tools · 3s');
+    expect(out).toContain('Explore Agent Failed (check failure)');
     expect(out).toContain('│ subagent exceeded max_steps');
     expect(out).not.toContain('Using Agent');
     expect(out).not.toContain('Used Agent');
@@ -1864,5 +1978,42 @@ describe('ToolCallComponent', () => {
     } finally {
       stderr.restore();
     }
+  });
+
+  describe('subagent stream flushing', () => {
+    it('coalesces subagent stream deltas into one rebuild per flush window', () => {
+      vi.useFakeTimers();
+      const ui = {
+        terminal: { rows: 30 },
+        requestRender: vi.fn(),
+      } as unknown as TUI;
+      const component = new ToolCallComponent(
+        { id: 'call_sub_stream', name: 'Bash', args: { command: 'run' } },
+        undefined,
+        ui,
+      );
+      const rebuild = vi.spyOn(
+        component as unknown as { rebuildContent: () => void },
+        'rebuildContent',
+      );
+
+      component.appendSubagentText('alpha');
+      component.appendSubagentText('beta');
+
+      // Data accumulates immediately, but the expensive rebuild waits for the
+      // flush window — a burst of deltas rebuilds the card only once.
+      expect(rebuild).not.toHaveBeenCalled();
+      expect(ui.requestRender).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(STREAMING_UI_FLUSH_MS);
+      expect(rebuild).toHaveBeenCalledTimes(1);
+      expect(ui.requestRender).toHaveBeenCalledTimes(1);
+      expect(strip(component.render(100).join('\n'))).toContain('alphabeta');
+
+      // A later delta opens a fresh window and still flushes at its end.
+      component.appendSubagentText('gamma');
+      vi.advanceTimersByTime(STREAMING_UI_FLUSH_MS);
+      expect(rebuild).toHaveBeenCalledTimes(2);
+    });
   });
 });

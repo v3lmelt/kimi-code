@@ -39,9 +39,20 @@ function phaseFromStatus(status: BackgroundTaskStatus): BackgroundAgentStatusPha
   }
 }
 
+/**
+ * True for v2 `workflow` runs, which the v1 SDK `BackgroundTaskInfo.kind`
+ * union predates — compare against the widened runtime value. The workflow's
+ * own tool call card already renders the full subagent activity, so these
+ * runs are excluded from the standalone transcript entries.
+ */
+export function isWorkflowBackgroundTask(info: BackgroundTaskInfo): boolean {
+  return (info as { readonly kind?: string }).kind === 'workflow';
+}
+
 function subjectFor(info: BackgroundTaskInfo): string {
   if (info.kind === 'agent') return 'agent task';
   if (info.kind === 'question') return 'question task';
+  if (isWorkflowBackgroundTask(info)) return 'workflow task';
   return 'bash task';
 }
 

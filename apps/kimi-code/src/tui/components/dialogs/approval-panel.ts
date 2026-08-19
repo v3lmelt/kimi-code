@@ -437,8 +437,8 @@ export class ApprovalPanelComponent extends Container implements Focusable {
     if (this.feedbackInput.getValue().length === 0) {
       const placeholder =
         this.choiceAt(this.selectedIndex)?.response === 'rejected'
-          ? 'tell Kimi what to do differently'
-          : 'tell Kimi what to do next';
+          ? 'tell Hasu what to do differently'
+          : 'tell Hasu what to do next';
       return prefix + inlineInput.trimEnd() + currentTheme.fg('textDim', placeholder);
     }
     return prefix + inlineInput;

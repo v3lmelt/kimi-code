@@ -103,6 +103,32 @@ describe('formatTurnUsage', () => {
       formatTurnUsage('composing', { input: 0, output: 100, turnStartedAt: now - 2_000 }, now, 0, null),
     ).toBe(' (2s · ↓ 100 tokens)');
   });
+
+  it('overrides the output counter with a shared displayed value', () => {
+    const now = Date.now();
+    const usage = {
+      input: 500,
+      output: 40,
+      turnStartedAt: now - 2_000,
+      live: { input: 0, output: 60 },
+    };
+    // displayedOutput wins over both the settled output and the estimate.
+    expect(formatTurnUsage('composing', usage, now, 300, null, 150)).toBe(' (2s · ↓ 150 tokens)');
+  });
+
+  it('hides the output counter when the shared displayed value is zero', () => {
+    const now = Date.now();
+    expect(
+      formatTurnUsage(
+        'composing',
+        { input: 0, output: 0, turnStartedAt: now - 2_000 },
+        now,
+        300,
+        null,
+        0,
+      ),
+    ).toBe(' (2s)');
+  });
 });
 
 describe('estimateStreamedTokens', () => {

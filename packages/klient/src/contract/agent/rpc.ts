@@ -198,6 +198,13 @@ export const agentTaskInfoSchema = z.discriminatedUnion('kind', [
     toolCallId: z.string().optional(),
     ...taskInfoBaseFields,
   }),
+  z.object({
+    kind: z.literal('workflow'),
+    runId: z.string(),
+    workflowName: z.string(),
+    scriptSha256: z.string(),
+    ...taskInfoBaseFields,
+  }),
 ]);
 
 export const stopTaskPayloadSchema = z.object({

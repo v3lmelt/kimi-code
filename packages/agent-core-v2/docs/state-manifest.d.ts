@@ -23,7 +23,7 @@
 // references become '(circular)', and class instances collapse to a '(ClassName)'
 // marker — the wire shape of an entry is the JSON projection of the type here.
 //
-// Index (App: 0 keys · Workspace: 6 keys · Session: 18 keys · Agent: 70 keys)
+// Index (App: 0 keys · Workspace: 6 keys · Session: 18 keys · Agent: 74 keys)
 //   App
 //   Workspace
 //     workspaceDirs.ephemeralDirs          src/workspace/workspaceDirs/workspaceDirsService.ts
@@ -52,76 +52,80 @@
 //     workspaceContext.additionalDirs    src/session/workspaceContext/workspaceContextService.ts
 //     workspaceContext.workDir           src/session/workspaceContext/workspaceContextService.ts
 //   Agent
-//     activityView.background                         src/agent/activityView/activityViewService.ts
-//     activityView.current                            src/agent/activityView/activityViewService.ts
-//     activityView.lastTurn                           src/agent/activityView/activityViewService.ts
-//     activityView.lifecycle                          src/agent/activityView/activityViewService.ts
-//     activityView.turn                               src/agent/activityView/activityViewService.ts
-//     agentsMdReminder.cwd                            src/agent/agentsMdReminder/agentsMdReminderService.ts
-//     agentsMdReminder.known                          src/agent/agentsMdReminder/agentsMdReminderService.ts
-//     agentsMdReminder.seeded                         src/agent/agentsMdReminder/agentsMdReminderService.ts
-//     contextInjector.isNewTurn                       src/agent/contextInjector/contextInjectorService.ts
-//     contextProjector.lastRepairSignature            src/agent/contextProjector/contextProjectorService.ts
-//     dateChange.seed                                 src/agent/dateChange/dateChangeService.ts
-//     externalHooks.stopHookContinuationUsed          src/agent/externalHooks/externalHooksService.ts
-//     fullCompaction.activeTurnId                     src/agent/fullCompaction/fullCompactionService.ts
-//     fullCompaction.compactionCountInTurn            src/agent/fullCompaction/fullCompactionService.ts
-//     fullCompaction.consecutiveOverflowCompactions   src/agent/fullCompaction/fullCompactionService.ts
-//     fullCompaction.lastCompactedTokenCount          src/agent/fullCompaction/fullCompactionService.ts
-//     fullCompaction.observedMaxContextTokensByModel  src/agent/fullCompaction/fullCompactionService.ts
-//     goal.budgetGraceTurns                           src/agent/goal/goalService.ts
-//     goal.countedGoalTurns                           src/agent/goal/goalService.ts
-//     goal.exhaustedTurnBudgetGoals                   src/agent/goal/goalService.ts
-//     goal.goalDrivenTurns                            src/agent/goal/goalService.ts
-//     goal.goalOutcomeContinuationTurns               src/agent/goal/goalService.ts
-//     goal.goalOutcomeToolResultTurns                 src/agent/goal/goalService.ts
-//     goal.goalStarterTurns                           src/agent/goal/goalService.ts
-//     goal.goalTurnTargets                            src/agent/goal/goalService.ts
-//     goal.liveTurnId                                 src/agent/goal/goalService.ts
-//     goal.liveWallClockStartedAt                     src/agent/goal/goalService.ts
-//     goal.pendingContinuationGoals                   src/agent/goal/goalService.ts
-//     goal.resumeContinuation                         src/agent/goal/goalService.ts
-//     llmRequester.emittedThinkingEffortWarnings      src/agent/llmRequester/llmRequesterService.ts
-//     llmRequester.lastConfigLogSignature             src/agent/llmRequester/llmRequesterService.ts
-//     llmRequester.mediaDegradedTurns                 src/agent/llmRequester/llmRequesterService.ts
-//     llmRequester.mediaStrippedTurns                 src/agent/llmRequester/llmRequesterService.ts
-//     llmRequester.turnConfigs                        src/agent/llmRequester/llmRequesterService.ts
-//     loop.disposing                                  src/agent/loop/loopService.ts
-//     loop.lastRequestTraceId                         src/agent/loop/loopService.ts
-//     loop.nextReservedTurnId                         src/agent/loop/loopService.ts
-//     mcp.discoveryWritesReady                        src/agent/mcp/mcpService.ts
-//     mcp.mcpToolsByServer                            src/agent/mcp/mcpService.ts
-//     media.registeredKey                             src/agent/media/mediaToolsRegistrar.ts
-//     media.resolved                                  src/agent/media/videoResolverService.ts
-//     permissionMode.lastMode                         src/agent/permissionMode/injection/permissionModeInjection.ts
-//     plan.wasActive                                  src/features/plan/injection/planModeInjection.ts
-//     profile.activeToolNamesOverlay                  src/agent/profile/profileService.ts
-//     profile.agentsMdWarning                         src/agent/profile/profileService.ts
-//     profile.emittedPluginBudgetWarnings             src/agent/profile/profileService.ts
-//     profile.emittedThinkingEffortWarnings           src/agent/profile/profileService.ts
-//     profile.emittedToolPatternWarnings              src/agent/profile/profileService.ts
-//     prompt.launching                                src/agent/prompt/promptService.ts
-//     shellCommand.tasks                              src/agent/shellCommand/shellCommandService.ts
-//     stepRetry.failedAttempts                        src/agent/stepRetry/stepRetryService.ts
-//     stepRetry.lastFailedDriverId                    src/agent/stepRetry/stepRetryService.ts
-//     task.activeTaskReminderPending                  src/agent/task/taskService.ts
-//     task.deliveredNotificationKeys                  src/agent/task/taskService.ts
-//     task.ghosts                                     src/agent/task/taskService.ts
-//     task.scheduledNotificationKeys                  src/agent/task/taskService.ts
-//     toolDedupe.activeStep                           src/agent/toolDedupe/toolDedupeService.ts
-//     toolDedupe.activeTurnId                         src/agent/toolDedupe/toolDedupeService.ts
-//     toolDedupe.callKeyByCallId                      src/agent/toolDedupe/toolDedupeService.ts
-//     toolDedupe.consecutiveCount                     src/agent/toolDedupe/toolDedupeService.ts
-//     toolDedupe.consecutiveKey                       src/agent/toolDedupe/toolDedupeService.ts
-//     toolDedupe.originalCallIndex                    src/agent/toolDedupe/toolDedupeService.ts
-//     toolDedupe.stepCalls                            src/agent/toolDedupe/toolDedupeService.ts
-//     toolDedupe.syntheticCallIds                     src/agent/toolDedupe/toolDedupeService.ts
-//     toolExecutor.dupTypeTurnId                      src/agent/toolExecutor/toolExecutorService.ts
-//     toolExecutor.toolCallDupTypes                   src/agent/toolExecutor/toolExecutorService.ts
-//     toolSelect.needsBoundaryInjection               src/agent/toolSelect/toolSelectAnnouncementsService.ts
-//     toolSelect.pendingLoaded                        src/agent/toolSelect/toolSelectService.ts
-//     usage.currentTurn                               src/agent/usage/usageService.ts
-//     usage.currentTurnId                             src/agent/usage/usageService.ts
+//     activityView.background                           src/agent/activityView/activityViewService.ts
+//     activityView.current                              src/agent/activityView/activityViewService.ts
+//     activityView.lastTurn                             src/agent/activityView/activityViewService.ts
+//     activityView.lifecycle                            src/agent/activityView/activityViewService.ts
+//     activityView.turn                                 src/agent/activityView/activityViewService.ts
+//     agentsMdReminder.cwd                              src/agent/agentsMdReminder/agentsMdReminderService.ts
+//     agentsMdReminder.known                            src/agent/agentsMdReminder/agentsMdReminderService.ts
+//     agentsMdReminder.seeded                           src/agent/agentsMdReminder/agentsMdReminderService.ts
+//     contextInjector.isNewTurn                         src/agent/contextInjector/contextInjectorService.ts
+//     contextProjector.lastRepairSignature              src/agent/contextProjector/contextProjectorService.ts
+//     dateChange.seed                                   src/agent/dateChange/dateChangeService.ts
+//     externalHooks.stopHookContinuationUsed            src/agent/externalHooks/externalHooksService.ts
+//     fullCompaction.activeTurnId                       src/agent/fullCompaction/fullCompactionService.ts
+//     fullCompaction.autoCompactionTripped              src/agent/fullCompaction/fullCompactionService.ts
+//     fullCompaction.compactionCountInTurn              src/agent/fullCompaction/fullCompactionService.ts
+//     fullCompaction.consecutiveAutoCompactionFailures  src/agent/fullCompaction/fullCompactionService.ts
+//     fullCompaction.consecutiveOverflowCompactions     src/agent/fullCompaction/fullCompactionService.ts
+//     fullCompaction.lastCompactedTokenCount            src/agent/fullCompaction/fullCompactionService.ts
+//     fullCompaction.observedMaxContextTokensByModel    src/agent/fullCompaction/fullCompactionService.ts
+//     goal.budgetGraceTurns                             src/agent/goal/goalService.ts
+//     goal.countedGoalTurns                             src/agent/goal/goalService.ts
+//     goal.exhaustedTurnBudgetGoals                     src/agent/goal/goalService.ts
+//     goal.goalDrivenTurns                              src/agent/goal/goalService.ts
+//     goal.goalOutcomeContinuationTurns                 src/agent/goal/goalService.ts
+//     goal.goalOutcomeToolResultTurns                   src/agent/goal/goalService.ts
+//     goal.goalStarterTurns                             src/agent/goal/goalService.ts
+//     goal.goalTurnTargets                              src/agent/goal/goalService.ts
+//     goal.liveTurnId                                   src/agent/goal/goalService.ts
+//     goal.liveWallClockStartedAt                       src/agent/goal/goalService.ts
+//     goal.pendingContinuationGoals                     src/agent/goal/goalService.ts
+//     goal.resumeContinuation                           src/agent/goal/goalService.ts
+//     llmRequester.emittedThinkingEffortWarnings        src/agent/llmRequester/llmRequesterService.ts
+//     llmRequester.lastConfigLogSignature               src/agent/llmRequester/llmRequesterService.ts
+//     llmRequester.mediaDegradedTurns                   src/agent/llmRequester/llmRequesterService.ts
+//     llmRequester.mediaStrippedTurns                   src/agent/llmRequester/llmRequesterService.ts
+//     llmRequester.turnConfigs                          src/agent/llmRequester/llmRequesterService.ts
+//     loop.disposing                                    src/agent/loop/loopService.ts
+//     loop.lastRequestTraceId                           src/agent/loop/loopService.ts
+//     loop.nextReservedTurnId                           src/agent/loop/loopService.ts
+//     loop.truncationRecoveryUsed                       src/agent/loop/loopService.ts
+//     mcp.discoveryWritesReady                          src/agent/mcp/mcpService.ts
+//     mcp.mcpToolsByServer                              src/agent/mcp/mcpService.ts
+//     media.registeredKey                               src/agent/media/mediaToolsRegistrar.ts
+//     media.resolved                                    src/agent/media/videoResolverService.ts
+//     permissionMode.lastMode                           src/agent/permissionMode/injection/permissionModeInjection.ts
+//     plan.wasActive                                    src/features/plan/injection/planModeInjection.ts
+//     profile.activeToolNamesOverlay                    src/agent/profile/profileService.ts
+//     profile.agentsMdWarning                           src/agent/profile/profileService.ts
+//     profile.emittedPluginBudgetWarnings               src/agent/profile/profileService.ts
+//     profile.emittedThinkingEffortWarnings             src/agent/profile/profileService.ts
+//     profile.emittedToolPatternWarnings                src/agent/profile/profileService.ts
+//     prompt.launching                                  src/agent/prompt/promptService.ts
+//     readState.entries                                 src/agent/readState/readStateService.ts
+//     shellCommand.tasks                                src/agent/shellCommand/shellCommandService.ts
+//     stepRetry.failedAttempts                          src/agent/stepRetry/stepRetryService.ts
+//     stepRetry.lastFailedDriverId                      src/agent/stepRetry/stepRetryService.ts
+//     task.activeTaskReminderPending                    src/agent/task/taskService.ts
+//     task.deliveredNotificationKeys                    src/agent/task/taskService.ts
+//     task.ghosts                                       src/agent/task/taskService.ts
+//     task.scheduledNotificationKeys                    src/agent/task/taskService.ts
+//     toolDedupe.activeStep                             src/agent/toolDedupe/toolDedupeService.ts
+//     toolDedupe.activeTurnId                           src/agent/toolDedupe/toolDedupeService.ts
+//     toolDedupe.callKeyByCallId                        src/agent/toolDedupe/toolDedupeService.ts
+//     toolDedupe.consecutiveCount                       src/agent/toolDedupe/toolDedupeService.ts
+//     toolDedupe.consecutiveKey                         src/agent/toolDedupe/toolDedupeService.ts
+//     toolDedupe.originalCallIndex                      src/agent/toolDedupe/toolDedupeService.ts
+//     toolDedupe.stepCalls                              src/agent/toolDedupe/toolDedupeService.ts
+//     toolDedupe.syntheticCallIds                       src/agent/toolDedupe/toolDedupeService.ts
+//     toolExecutor.dupTypeTurnId                        src/agent/toolExecutor/toolExecutorService.ts
+//     toolExecutor.toolCallDupTypes                     src/agent/toolExecutor/toolExecutorService.ts
+//     toolSelect.needsBoundaryInjection                 src/agent/toolSelect/toolSelectAnnouncementsService.ts
+//     toolSelect.pendingLoaded                          src/agent/toolSelect/toolSelectService.ts
+//     usage.currentTurn                                 src/agent/usage/usageService.ts
+//     usage.currentTurnId                               src/agent/usage/usageService.ts
 
 /** App-scope keys registered into IAppStateService. */
 export interface AppStateSnapshot {
@@ -1026,7 +1030,9 @@ export interface AgentStateSnapshot {
   'externalHooks.stopHookContinuationUsed': boolean;
   // src/agent/fullCompaction/fullCompactionService.ts
   'fullCompaction.activeTurnId': number | undefined;
+  'fullCompaction.autoCompactionTripped': boolean;
   'fullCompaction.compactionCountInTurn': number;
+  'fullCompaction.consecutiveAutoCompactionFailures': number;
   'fullCompaction.consecutiveOverflowCompactions': number;
   'fullCompaction.lastCompactedTokenCount': number | null;
   'fullCompaction.observedMaxContextTokensByModel': Map<string, number>;
@@ -1091,6 +1097,7 @@ export interface AgentStateSnapshot {
   'loop.disposing': boolean;
   'loop.lastRequestTraceId': string | undefined;
   'loop.nextReservedTurnId': number | undefined;
+  'loop.truncationRecoveryUsed': number;
   // src/agent/mcp/mcpService.ts
   'mcp.discoveryWritesReady': boolean;
   'mcp.mcpToolsByServer': Map<string, string[]>;
@@ -1133,6 +1140,16 @@ export interface AgentStateSnapshot {
   'profile.emittedToolPatternWarnings': Set<string>;
   // src/agent/prompt/promptService.ts
   'prompt.launching': boolean;
+  // src/agent/readState/readStateService.ts
+  'readState.entries': Map<string, /* ReadStateEntry — packages/agent-core-v2/src/agent/readState/readState.ts */ {
+    readonly mtimeMs: number | undefined;
+    readonly totalLines: number;
+    readonly ranges: readonly /* ReadStateRange — packages/agent-core-v2/src/agent/readState/readState.ts */ {
+      readonly offset: number;
+      readonly lines: number;
+    }[];
+    readonly lastReadAt: number;
+  }>;
   // src/agent/shellCommand/shellCommandService.ts
   'shellCommand.tasks': Map<string, string>;
   // src/agent/stepRetry/stepRetryService.ts
@@ -1174,6 +1191,20 @@ export interface AgentStateSnapshot {
     readonly command: string;
     readonly pid: number;
     readonly exitCode: number | null;
+    readonly taskId: string;
+    readonly description: string;
+    readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';
+    readonly detached?: boolean;
+    readonly startedAt: number;
+    readonly endedAt: number | null;
+    readonly stopReason?: string;
+    readonly terminalNotificationSuppressed?: boolean;
+    readonly timeoutMs?: number;
+  } | /* WorkflowTaskInfo — packages/agent-core-v2/src/agent/tools/workflow/workflowTask.ts */ {
+    readonly kind: 'workflow';
+    readonly runId: `wf_${string}`;
+    readonly workflowName: string;
+    readonly scriptSha256: string;
     readonly taskId: string;
     readonly description: string;
     readonly status: /* AgentTaskStatus — packages/agent-core-v2/src/agent/task/types.ts */ 'completed' | 'failed' | 'running' | 'timed_out' | 'killed' | 'lost';

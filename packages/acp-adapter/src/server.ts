@@ -158,6 +158,8 @@ function providerHasNonOAuthCredentials(provider: ProviderConfig): boolean {
       return hasProviderValue(provider, 'OPENAI_API_KEY');
     case 'kimi':
       return hasProviderValue(provider, 'KIMI_API_KEY');
+    case 'opencode-go':
+      return hasProviderValue(provider, 'OPENCODE_GO_API_KEY');
     case 'google-genai':
       return hasProviderValue(provider, 'GOOGLE_API_KEY');
     case 'vertexai':
@@ -390,8 +392,14 @@ export class AcpServer implements Agent {
       // forwards via spread. See block comment above.
       mcpServers,
     });
-    const currentModelId = await this.resolveCurrentModelId();
-    const currentThinkingEffort = await this.resolveCurrentThinkingEffort(session);
+    // One harness config snapshot shared by the model-id resolver, the
+    // thinking-effort resolver, and the configOptions assembly — the
+    // snapshot used to be fetched 2-3 times per session/new.
+    const config = await this.resolveConfigSnapshot();
+    const [currentModelId, currentThinkingEffort] = await Promise.all([
+      this.resolveCurrentModelId(config),
+      this.resolveCurrentThinkingEffort(session, undefined, config),
+    ]);
     const acpSession = new AcpSession(
       this.conn,
       session,
@@ -419,6 +427,7 @@ export class AcpServer implements Agent {
       currentModelId,
       currentThinkingEffort,
       DEFAULT_MODE_ID,
+      config,
     );
     this.scheduleAvailableCommandsUpdate(session.id);
     return {
@@ -548,6 +557,11 @@ export class AcpServer implements Agent {
     const mcpServers = acpMcpServersToConfigs(params.mcpServers);
     const acpKaos = await this.maybeBuildAcpKaos(params.sessionId);
     const persistenceKaos = acpKaos === undefined ? undefined : await this.ensureInnerKaos();
+    // One harness config snapshot per request, shared by the model-id
+    // resolver, the thinking-effort resolver, and the configOptions
+    // assembly. Started before `resumeSession` (independent RPCs) so the
+    // two round-trips overlap.
+    const configPromise = this.resolveConfigSnapshot();
     let session: Session;
     try {
       session = await this.harness.resumeSession({
@@ -579,12 +593,13 @@ export class AcpServer implements Agent {
     // dropdown's highlight matches the model the resumed turn will
     // actually use — falling back to the harness-level default
     // resolution when the resume state lacks a `modelAlias`.
+    const config = await configPromise;
     const resumeState = session.getResumeState?.();
     const resumedModelAlias = resumeState?.agents?.['main']?.config?.modelAlias;
     const currentModelId =
       typeof resumedModelAlias === 'string' && resumedModelAlias.length > 0
         ? resumedModelAlias
-        : await this.resolveCurrentModelId();
+        : await this.resolveCurrentModelId(config);
     // The resumed thinking effort is read off the main-agent config and
     // carried through as-is — it is the engine-resolved value
     // (`'off'`, `'on'`, or a declared level), which the thinking picker
@@ -595,6 +610,7 @@ export class AcpServer implements Agent {
     const currentThinkingEffort = await this.resolveCurrentThinkingEffort(
       session,
       resumedThinkingEffort,
+      config,
     );
     const acpSession = new AcpSession(
       this.conn,
@@ -611,6 +627,7 @@ export class AcpServer implements Agent {
       currentModelId,
       currentThinkingEffort,
       DEFAULT_MODE_ID,
+      config,
     );
     return { session, acpSession, configOptions };
   }
@@ -774,12 +791,16 @@ export class AcpServer implements Agent {
       );
     }
     const value = (params as { value: unknown }).value;
+    // One config snapshot shared by the SDK toggle and the response's
+    // configOptions assembly below — the harness used to be queried twice
+    // per config change (once in the toggle, once in the response).
+    const config = await this.resolveConfigSnapshot();
     switch (params.configId) {
       case 'model':
-        await acpSession.setModel(String(value));
+        await acpSession.setModel(String(value), config);
         break;
       case 'mode':
-        await acpSession.setMode(String(value));
+        await acpSession.setMode(String(value), config);
         break;
       case 'thinking': {
         // The accepted values mirror the picker's advertised rows:
@@ -789,7 +810,7 @@ export class AcpServer implements Agent {
         // the level against the catalog and rejects unknown values with
         // `invalid_params` BEFORE any SDK call, so a stale or
         // hand-crafted value can never half-apply.
-        await acpSession.setThinking(String(value));
+        await acpSession.setThinking(String(value), config);
         break;
       }
       default:
@@ -804,6 +825,7 @@ export class AcpServer implements Agent {
         acpSession.currentModelId,
         acpSession.currentThinkingEffort,
         acpSession.currentModeId,
+        config,
       ),
     };
   }
@@ -866,6 +888,26 @@ export class AcpServer implements Agent {
   }
 
   /**
+   * One harness `getConfig` round-trip per session-setup request, shared by
+   * the model-id resolver, the thinking-effort resolver, and the
+   * configOptions assembly. Returns `undefined` when the harness lacks
+   * `getConfig` (partial test stubs) or it throws — the resolve* helpers
+   * treat that as "no signal" and fall back, mirroring the per-call
+   * fallbacks below.
+   */
+  private async resolveConfigSnapshot(): Promise<KimiConfig | undefined> {
+    if (typeof this.harness.getConfig !== 'function') return undefined;
+    try {
+      return await this.harness.getConfig();
+    } catch (error) {
+      log.warn('acp: harness.getConfig threw during session setup; falling back', {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return undefined;
+    }
+  }
+
+  /**
    * Compute the `currentValue` for the `model` config option when the
    * caller (either `newSession` or `loadSession`'s fallback path) does
    * not have a more specific signal. Prefers the harness's configured
@@ -874,6 +916,11 @@ export class AcpServer implements Agent {
    * options the client will render. Returns the empty string when the
    * harness has no models at all — a degenerate config the UI can still
    * render (an empty dropdown with an empty `currentValue`).
+   *
+   * `config` is an optional already-fetched harness config snapshot;
+   * when supplied, no `getConfig` round-trip happens (the caller shares
+   * one fetch across this resolver, the thinking-effort resolver, and
+   * the configOptions assembly).
    *
    * Tolerant to partial-stub harnesses (`getConfig` missing or
    * throwing) — adapter-level unit tests routinely construct minimal
@@ -884,7 +931,7 @@ export class AcpServer implements Agent {
    * Logged at `warn` when a fallback fires so a dev who forgot to set
    * `default_model = ...` sees a breadcrumb in the agent log.
    */
-  private async resolveCurrentModelId(): Promise<string> {
+  private async resolveCurrentModelId(config?: KimiConfig): Promise<string> {
     // Minimal-stub harnesses (no `getConfig`) skip the catalog entirely
     // and return the empty string silently. The old code path was the
     // same — `listAvailableModels` used to live behind a
@@ -893,8 +940,8 @@ export class AcpServer implements Agent {
     // stubs don't fire spurious "no models" warnings.
     if (typeof this.harness.getConfig !== 'function') return '';
     try {
-      const config = await this.harness.getConfig();
-      const declared = config.defaultModel;
+      const cfg = config ?? (await this.harness.getConfig());
+      const declared = cfg.defaultModel;
       if (typeof declared === 'string' && declared.length > 0) {
         return declared;
       }
@@ -905,7 +952,7 @@ export class AcpServer implements Agent {
       return '';
     }
     try {
-      const models = await listModelsFromHarness(this.harness);
+      const models = await listModelsFromHarness(this.harness, config);
       if (models.length === 0) {
         log.warn('acp: harness exposes no models; configOptions will ship an empty model picker');
         return '';
@@ -940,6 +987,7 @@ export class AcpServer implements Agent {
   private async resolveCurrentThinkingEffort(
     session: Session,
     resumedThinkingEffort?: unknown,
+    config?: KimiConfig,
   ): Promise<string> {
     const resumed = effortStringOrUndefined(resumedThinkingEffort);
     if (resumed !== undefined) return resumed;
@@ -955,21 +1003,24 @@ export class AcpServer implements Agent {
       }
     }
 
-    if (typeof this.harness.getConfig !== 'function') return 'off';
-    try {
-      const config = await this.harness.getConfig();
-      const thinking = (config as { thinking?: { enabled?: unknown; effort?: unknown } })
-        .thinking;
-      if (thinking?.enabled === false) return 'off';
-      const configured = effortStringOrUndefined(thinking?.effort);
-      if (configured !== undefined) return configured;
-      return thinking?.enabled === true ? 'on' : 'off';
-    } catch (err) {
-      log.warn('acp: harness.getConfig threw during thinking effort resolution; defaulting to off', {
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return 'off';
+    // `config` is the shared snapshot fetched by the caller — only fetch
+    // it here when the caller did not (standalone callers / old fallbacks).
+    if (config === undefined) {
+      if (typeof this.harness.getConfig !== 'function') return 'off';
+      try {
+        config = await this.harness.getConfig();
+      } catch (err) {
+        log.warn('acp: harness.getConfig threw during thinking effort resolution; defaulting to off', {
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return 'off';
+      }
     }
+    const thinking = (config as { thinking?: { enabled?: unknown; effort?: unknown } }).thinking;
+    if (thinking?.enabled === false) return 'off';
+    const configured = effortStringOrUndefined(thinking?.effort);
+    if (configured !== undefined) return configured;
+    return thinking?.enabled === true ? 'on' : 'off';
   }
 
   /**

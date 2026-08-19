@@ -1,6 +1,6 @@
 # Data locations
 
-Kimi Code CLI stores all runtime data — the config file, session history, login credentials, and diagnostic logs — under `~/.kimi-code/`. This page helps you understand where each type of data lives, what it is for, and how to clean up or relocate it when needed.
+Hasu CLI stores all runtime data — the config file, session history, login credentials, and diagnostic logs — under `~/.kimi-code/`. This page helps you understand where each type of data lives, what it is for, and how to clean up or relocate it when needed.
 
 ## Data root directory
 
@@ -16,11 +16,11 @@ If you need to move the data directory elsewhere (for example, to isolate config
 export KIMI_CODE_HOME="$HOME/.config/kimi-code"
 ```
 
-Once set, **all** Kimi Code data — config, sessions, logs, OAuth credentials, Kimi-specific user Skills, global `AGENTS.md`, and more — lands under the new path. For the full reference on `KIMI_CODE_HOME`, see [Environment variables](./env-vars.md).
+Once set, **all** Hasu data — config, sessions, logs, OAuth credentials, Hasu-specific user Skills, global `AGENTS.md`, and more — lands under the new path. For the full reference on `KIMI_CODE_HOME`, see [Environment variables](./env-vars.md).
 
 ::: tip Note
 
-**Generic `.agents` resources** stay under the real OS home so they can be shared across tools. For example, user-level generic Skills remain at `~/.agents/skills/`, while Kimi-specific user Skills move with `KIMI_CODE_HOME` as `$KIMI_CODE_HOME/skills/`.
+**Generic `.agents` resources** stay under the real OS home so they can be shared across tools. For example, user-level generic Skills remain at `~/.agents/skills/`, while Hasu-specific user Skills move with `KIMI_CODE_HOME` as `$KIMI_CODE_HOME/skills/`.
 :::
 
 ## Directory layout
@@ -29,9 +29,9 @@ Once set, **all** Kimi Code data — config, sessions, logs, OAuth credentials, 
 $KIMI_CODE_HOME  (default: ~/.kimi-code)
 ├── config.toml             # User configuration
 ├── tui.toml                # Terminal UI preferences (including auto-update toggle)
-├── AGENTS.md               # Global Kimi-specific agent instructions (optional)
+├── AGENTS.md               # Global Hasu-specific agent instructions (optional)
 ├── mcp.json                # User-level MCP server declarations (optional)
-├── skills/                 # Kimi-specific user-level Skills (optional)
+├── skills/                 # Hasu-specific user-level Skills (optional)
 ├── plugins/
 │   ├── installed.json      # Installed plugin records and enabled state
 │   └── managed/            # Plugin copies installed from zip/local paths
@@ -62,9 +62,9 @@ Each top-level file under the data root serves a specific purpose; most are mana
 
 - **`config.toml`**: the main runtime configuration file, storing user-level settings such as providers, models, and loop control. See [Configuration files](./config-files.md).
 - **`tui.toml`**: terminal UI client preferences, including `[upgrade].auto_install` (auto-update, on by default). You can disable it in `/settings` or by manually setting `auto_install = false`.
-- **`AGENTS.md`**: global Kimi-specific agent instructions. This file moves with `KIMI_CODE_HOME`; generic cross-tool instructions can still live under `~/.agents/AGENTS.md`.
+- **`AGENTS.md`**: global Hasu-specific agent instructions. This file moves with `KIMI_CODE_HOME`; generic cross-tool instructions can still live under `~/.agents/AGENTS.md`.
 - **`mcp.json`**: user-level MCP server declarations, merged with the project-local `.kimi-code/mcp.json` on startup. See [MCP](../customization/mcp.md).
-- **`skills/`**: Kimi-specific user-level Skills. This directory moves with `KIMI_CODE_HOME`; generic cross-tool Skills can still live under `~/.agents/skills/`. See [Agent Skills](../customization/skills.md).
+- **`skills/`**: Hasu-specific user-level Skills. This directory moves with `KIMI_CODE_HOME`; generic cross-tool Skills can still live under `~/.agents/skills/`. See [Agent Skills](../customization/skills.md).
 - **`plugins/installed.json`**: records installed plugins, each plugin's enabled state, and MCP server capability state changes made via `/plugins` or `/plugins mcp disable|enable`. Files installed from local paths or zip URLs are copied to `plugins/managed/<id>/`. See [Plugins](../customization/plugins.md).
 - **`credentials/`**: OAuth credential directory, with permissions `0o700` (directory) / `0o600` (files), readable and writable only by the current user. Managed provider credentials are stored as `credentials/<name>.json`; MCP server credentials are stored under `credentials/mcp/`. Credentials are written using an atomic flow (tmp → fsync → rename) to prevent corruption.
 
@@ -81,7 +81,7 @@ Inside each session directory:
 - **`agents/agent-0/` etc.**: sub-Agent instance directories, each containing their own `wire.jsonl`.
 - **`logs/kimi-code.log`**: diagnostic log for this session; only present when a diagnostic event occurs.
 - **`tasks/`**: background task persistence — `tasks/<task_id>.json` stores status/pid/exit code; `tasks/<task_id>/output.log` stores output.
-- **`cron/`**: scheduled task persistence; reloaded into the scheduler when the session is resumed with `kimi --session`. See [Scheduled tasks](../reference/tools.md#scheduled-tasks).
+- **`cron/`**: scheduled task persistence; reloaded into the scheduler when the session is resumed with `hasu --session`. See [Scheduled tasks](../reference/tools.md#scheduled-tasks).
 
 ## Built-in tool cache
 
@@ -92,7 +92,7 @@ The first time the `Grep` tool needs ripgrep, the CLI can automatically download
 - **`logs/kimi-code.log`** (global): records startup, login, export, and other cross-session events.
 - **`<sessionDir>/logs/kimi-code.log`** (session-level): records diagnostic events within a single session.
 
-When reporting a bug, prefer exporting the relevant session with `kimi export` (see [kimi command](../reference/kimi-command.md)); the session log is included in the export by default. Add `--no-include-global-log` if you do not want to share the global log.
+When reporting a bug, prefer exporting the relevant session with `hasu export` (see [hasu command](../reference/kimi-command.md)); the session log is included in the export by default. Add `--no-include-global-log` if you do not want to share the global log.
 
 The files under `updates/` (`latest.json`, `install.json`, `install.lock`, `rollout.log`) are maintained automatically by the auto-update mechanism and normally do not need manual editing. `rollout.log` records which staged-rollout case each update check hit, which helps explain when a device will receive a new release.
 
@@ -116,9 +116,9 @@ Deleting the data root directory (`~/.kimi-code/` or the path set by `KIMI_CODE_
 | Clear provider OAuth login state | Run `/logout`, or delete the corresponding `credentials/<name>.json` |
 | Clear MCP server OAuth login state | Delete `credentials/mcp/` (`/logout` does not clear MCP credentials) |
 | Remove user-level MCP declarations | Delete `$KIMI_CODE_HOME/mcp.json` (default `~/.kimi-code/mcp.json`) |
-| Clear global Kimi-specific agent instructions | Delete `$KIMI_CODE_HOME/AGENTS.md` (default `~/.kimi-code/AGENTS.md`) |
+| Clear global Hasu-specific agent instructions | Delete `$KIMI_CODE_HOME/AGENTS.md` (default `~/.kimi-code/AGENTS.md`) |
 | Clear plugin install records | Delete `$KIMI_CODE_HOME/plugins/` (local plugin source directories are not affected) |
-| Clear Kimi-specific user-level Skills | Delete `$KIMI_CODE_HOME/skills/` (default `~/.kimi-code/skills/`) |
+| Clear Hasu-specific user-level Skills | Delete `$KIMI_CODE_HOME/skills/` (default `~/.kimi-code/skills/`) |
 
 ## Next steps
 

@@ -26,6 +26,11 @@ const SWARM_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
   { value: 'off', description: 'Turn swarm mode off' },
 ];
 
+const ULTRACODE_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
+  { value: 'on', description: 'Turn ultracode mode on (xhigh effort)' },
+  { value: 'off', description: 'Turn ultracode mode off' },
+];
+
 const ADD_DIR_ARG_COMPLETIONS: readonly ArgCompletionSpec[] = [
   { value: 'list', description: 'Show configured additional workspace directories' },
 ];
@@ -47,6 +52,11 @@ export function goalArgumentCompletions(argumentPrefix: string): AutocompleteIte
 /** Argument autocompletion for the `/swarm` command (subcommands). */
 export function swarmArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
   return completeLeadingArg(SWARM_ARG_COMPLETIONS, argumentPrefix);
+}
+
+/** Argument autocompletion for the `/ultracode` command (subcommands). */
+export function ultracodeArgumentCompletions(argumentPrefix: string): AutocompleteItem[] | null {
+  return completeLeadingArg(ULTRACODE_ARG_COMPLETIONS, argumentPrefix);
 }
 
 /** Argument autocompletion for the `/add-dir` command. */
@@ -176,6 +186,23 @@ export const BUILTIN_SLASH_COMMANDS = [
     argumentHint: '[on|off] | <task>',
     completeArgs: swarmArgumentCompletions,
     availability: 'idle-only',
+  },
+  {
+    name: 'ultracode',
+    aliases: [],
+    description: 'Toggle ultracode mode (xhigh effort + subagent orchestration)',
+    priority: 100,
+    argumentHint: '[on|off]',
+    completeArgs: ultracodeArgumentCompletions,
+    availability: 'idle-only',
+  },
+  {
+    name: 'workflows',
+    aliases: ['wf'],
+    description: 'Show saved workflow run trees (ultracode orchestration runs)',
+    priority: 90,
+    argumentHint: '[runId]',
+    availability: 'always',
   },
   {
     name: 'model',
@@ -333,6 +360,13 @@ export const BUILTIN_SLASH_COMMANDS = [
     availability: 'always',
   },
   {
+    name: 'context',
+    aliases: [],
+    description: 'Show an estimated breakdown of the context window',
+    priority: 60,
+    availability: 'always',
+  },
+  {
     name: 'status',
     aliases: [],
     description: 'Show current session and runtime status',
@@ -342,7 +376,7 @@ export const BUILTIN_SLASH_COMMANDS = [
   {
     name: 'feedback',
     aliases: ['bug'],
-    description: 'Send feedback to make Kimi Code better',
+    description: 'Send feedback to make Hasu better',
     priority: 60,
     availability: 'always',
   },
@@ -396,13 +430,6 @@ export const BUILTIN_SLASH_COMMANDS = [
     aliases: [],
     description: 'Copy the last assistant message to the clipboard',
     priority: 40,
-  },
-  {
-    name: 'web',
-    aliases: [],
-    description: 'Open the current session in the Web UI by starting a new server',
-    priority: 40,
-    availability: 'always',
   },
   {
     name: 'exit',

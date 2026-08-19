@@ -57,12 +57,15 @@ export class GutterContainer extends Container {
       cache.width === width &&
       cache.childRefs.length === this.children.length;
 
-    // Fast path: every child's version matches the snapshot → reuse cached output.
+    // Fast path: every child's version AND identity matches the snapshot →
+    // reuse cached output. Identity matters: an in-place replacement can reuse
+    // the same version number, and only a ref check catches it.
     if (structOk) {
       let allMatch = true;
       for (let i = 0; i < this.children.length; i++) {
-        const v = this.children[i]!.version;
-        if (v === undefined || v !== cache.childVersions[i]) {
+        const child = this.children[i]!;
+        const v = child.version;
+        if (v === undefined || cache.childRefs[i] !== child || v !== cache.childVersions[i]) {
           allMatch = false;
           break;
         }

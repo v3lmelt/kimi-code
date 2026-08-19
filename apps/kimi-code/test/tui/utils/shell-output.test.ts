@@ -1,6 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatBashOutputForDisplay, sanitizeShellOutput } from '#/tui/utils/shell-output';
+import {
+  createShellOutputSanitizer,
+  formatBashOutputForDisplay,
+  sanitizeShellOutput,
+} from '#/tui/utils/shell-output';
 
 const ESC = '\u001B';
 const BEL = '\u0007';
@@ -77,6 +81,84 @@ describe('sanitizeShellOutput', () => {
     expect(result).not.toContain('\r');
     expect(result).toContain('VITE ready in 120ms');
     expect(result).toContain('Local: http://localhost:5173/');
+  });
+});
+
+describe('createShellOutputSanitizer', () => {
+  // A >8KB prefix of newline-terminated lines so the incremental overlap
+  // window (not the small-buffer full re-strip path) does the real work.
+  const bigPrefix =
+    Array.from({ length: 100 }, (_, i) => `line-${i}-${'x'.repeat(90)}`).join('\n') + '\n';
+
+  it('strips escape sequences split across chunk boundaries like a full pass', () => {
+    const s = createShellOutputSanitizer();
+    s.append(bigPrefix);
+    s.append(`${ESC}[3`);
+    s.append(`1mred${ESC}[0m`);
+    expect(s.value()).toBe(sanitizeShellOutput(bigPrefix + `${ESC}[31mred${ESC}[0m`));
+  });
+
+  it('strips OSC sequences split across chunk boundaries like a full pass', () => {
+    const s = createShellOutputSanitizer();
+    s.append(bigPrefix);
+    s.append(`${ESC}]0;ti`);
+    s.append(`tle${BEL}rest`);
+    expect(s.value()).toBe(sanitizeShellOutput(bigPrefix + `${ESC}]0;title${BEL}rest`));
+  });
+
+  it('matches the full-buffer sanitize across many small chunks', () => {
+    const text =
+      bigPrefix +
+      `${ESC}[?1049h${ESC}[31mred${ESC}[0m\r` +
+      `${ESC}]8;;https://example.com${ESC}\\click${ESC}]8;;${ESC}\\` +
+      `${ESC}c${ESC}7frame1\rframe2\rframe3\n` +
+      `tail-${'y'.repeat(50)}`;
+    const s = createShellOutputSanitizer();
+    for (let i = 0; i < text.length; i += 7) {
+      s.append(text.slice(i, i + 7));
+    }
+    expect(s.value()).toBe(sanitizeShellOutput(text));
+  });
+
+  it('matches the full-buffer sanitize for an unbroken giant line split mid-way', () => {
+    const text = `${'x'.repeat(9000)}${ESC}[31mred${ESC}[0m\r${'y'.repeat(100)}`;
+    const s = createShellOutputSanitizer();
+    s.append(text.slice(0, 8500));
+    s.append(text.slice(8500));
+    expect(s.value()).toBe(sanitizeShellOutput(text));
+  });
+
+  it('matches the full-buffer sanitize for a single chunk', () => {
+    const text = `${ESC}[31mred${ESC}[0m`;
+    const s = createShellOutputSanitizer();
+    s.append(text);
+    expect(s.value()).toBe(sanitizeShellOutput(text));
+  });
+
+  it('caps the buffer and rebuilds exactly', () => {
+    const s = createShellOutputSanitizer({ maxChars: 1024, keepChars: 256, overlapChars: 64 });
+    const chunks: string[] = [];
+    for (let i = 0; i < 20; i++) {
+      const chunk = `${ESC}[31mchunk-${i}-${'z'.repeat(40)}\r\n`;
+      chunks.push(chunk);
+      s.append(chunk);
+    }
+    // Mirror the cap logic: after the last cap the kept raw is 256 chars plus
+    // whatever was appended after it.
+    let expectedRaw = '';
+    for (const chunk of chunks) {
+      expectedRaw += chunk;
+      if (expectedRaw.length > 1024) expectedRaw = expectedRaw.slice(-256);
+    }
+    expect(s.value()).toBe(sanitizeShellOutput(expectedRaw));
+  });
+
+  it('ignores empty and non-string appends', () => {
+    const s = createShellOutputSanitizer();
+    s.append('');
+    s.append(undefined as unknown as string);
+    s.append(null as unknown as string);
+    expect(s.value()).toBe('');
   });
 });
 

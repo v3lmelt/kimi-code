@@ -445,10 +445,18 @@ export const questionTaskInfoSchema = taskInfoBaseSchema.extend({
   toolCallId: z.string().optional(),
 });
 
+export const workflowTaskInfoSchema = taskInfoBaseSchema.extend({
+  kind: z.literal('workflow'),
+  runId: z.string(),
+  workflowName: z.string(),
+  scriptSha256: z.string(),
+});
+
 export const taskInfoSchema = z.discriminatedUnion('kind', [
   processTaskInfoSchema,
   agentTaskInfoSchema,
   questionTaskInfoSchema,
+  workflowTaskInfoSchema,
 ]);
 
 export const compactionResultSchema = z.object({
@@ -814,7 +822,9 @@ export const toolResultEventSchema = z.object({
   type: z.literal('tool.result'),
   turnId: z.number(),
   toolCallId: z.string(),
-  output: z.unknown(),
+  output: z.string(),
+  uiPreview: z.string(),
+  truncated: z.boolean().optional(),
   isError: z.boolean().optional(),
   synthetic: z.boolean().optional(),
 }) satisfies z.ZodType<ToolResultEvent>;

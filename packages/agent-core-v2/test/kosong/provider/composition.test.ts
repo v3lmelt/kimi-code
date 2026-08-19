@@ -903,6 +903,56 @@ describe('reasoning dialect (behavior probes)', () => {
   });
 });
 
+describe('opencode-go drops assistant messages with neither content nor tool_calls', () => {
+  function openCodeGoProvider(): ChatProvider {
+    return registry.createChatProvider({
+      protocol: 'openai',
+      providerType: 'opencode-go',
+      modelName: 'kimi-k2.7-code',
+      apiKey: 'sk-probe',
+    });
+  }
+
+  it('drops a think-only assistant (the resume 400 case)', async () => {
+    const provider = openCodeGoProvider();
+    const body = await captureOpenAIBody(provider, undefined, THINK_HISTORY);
+
+    const messages = body['messages'] as Array<Record<string, unknown>>;
+    // The think-only assistant is dropped; only the user message survives.
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ role: 'user' });
+  });
+
+  it('keeps an assistant with real text content', async () => {
+    const provider = openCodeGoProvider();
+    const body = await captureOpenAIBody(provider, undefined, PROBE_HISTORY);
+
+    const messages = body['messages'] as Array<Record<string, unknown>>;
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({ role: 'user' });
+  });
+
+  it('keeps an assistant with tool calls even when content is thinking-only', async () => {
+    const provider = openCodeGoProvider();
+    const toolHistory: Message[] = [
+      {
+        role: 'assistant',
+        content: [{ type: 'think', think: 'deciding' }],
+        toolCalls: [{ type: 'function', id: 'call_1', name: 'Read', arguments: '{}' }],
+      },
+      { role: 'user', content: [{ type: 'text', text: 'Hi' }], toolCalls: [] },
+    ];
+    const body = await captureOpenAIBody(provider, undefined, toolHistory);
+
+    const messages = body['messages'] as Array<Record<string, unknown>>;
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toMatchObject({
+      role: 'assistant',
+      tool_calls: [{ type: 'function', id: 'call_1' }],
+    });
+  });
+});
+
 const CONTACT_SCHEMA = {
   type: 'object',
   properties: { name: { type: 'string' } },
@@ -1232,5 +1282,126 @@ describe('OpenAI reasoning_effort path (issue #1616)', () => {
 
     const explicit = await captureOpenAIBody(provider, { thinking: { effort: 'low' } });
     expect(explicit['reasoning_effort']).toBe('low');
+  });
+});
+
+describe('Anthropic incremental history conversion', () => {
+  // Growth script with sanitize-requiring tool ids and consecutive user
+  // messages at the merge boundary.
+  const makeTurn = (turn: number, history: Message[]): void => {
+    history.push({
+      role: 'assistant',
+      content: [{ type: 'text', text: `assistant ${turn}` }],
+      toolCalls: [
+        {
+          type: 'function',
+          id: `toolu_${turn}!bad#id`,
+          name: 'lookup',
+          arguments: JSON.stringify({ q: `q${turn}` }),
+        },
+      ],
+    });
+    history.push({
+      role: 'tool',
+      toolCallId: `toolu_${turn}!bad#id`,
+      content: [{ type: 'text', text: `result ${turn}` }],
+      toolCalls: [],
+    });
+  };
+
+  async function wireMessages(
+    provider: AnthropicChatProvider,
+    history: Message[],
+  ): Promise<unknown[]> {
+    let captured: unknown[] | undefined;
+    const client = sdkClient(provider) as { messages: { create: unknown } };
+    client.messages.create = vi.fn().mockImplementation((params: unknown) => {
+      captured = (params as Record<string, unknown>)['messages'] as unknown[];
+      return Promise.resolve(anthropicMessageResponse());
+    });
+    await drain(await provider.generate('sys', [], history));
+    if (captured === undefined) throw new Error('expected messages.create to be called');
+    return captured;
+  }
+
+  function freshProvider(): AnthropicChatProvider {
+    return new AnthropicChatProvider({
+      model: 'claude-opus-4-7',
+      apiKey: 'sk-probe',
+      stream: false,
+    });
+  }
+
+  it('produces wire-identical messages for a growing history (incremental vs full)', async () => {
+    const cached = freshProvider();
+    const history: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'hello' }], toolCalls: [] },
+    ];
+    for (let turn = 0; turn < 4; turn += 1) {
+      makeTurn(turn, history);
+      // a plain user message right after the tool result — merges across the
+      // cache boundary at the tail
+      history.push({
+        role: 'user',
+        content: [{ type: 'text', text: `follow-up ${turn}` }],
+        toolCalls: [],
+      });
+
+      const fromCache = await wireMessages(cached, history);
+      const fromFresh = await wireMessages(freshProvider(), history);
+      expect(fromCache).toEqual(fromFresh);
+    }
+  });
+
+  it('reverts to the full path when an earlier message is replaced', async () => {
+    const cached = freshProvider();
+    const history: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'hello' }], toolCalls: [] },
+    ];
+    makeTurn(0, history);
+    const baseline = await wireMessages(cached, history);
+    expect(baseline).toEqual(await wireMessages(freshProvider(), history));
+
+    // replace the second message: the prefix identity check must fail and
+    // fall back to a full re-conversion
+    const source = history[1]!;
+    const replaced: Message = {
+      ...source,
+      content: [{ type: 'text', text: 'rewritten' }],
+    };
+    const mutated = [...history];
+    mutated[1] = replaced;
+    const fromCache = await wireMessages(cached, mutated);
+    const fromFresh = await wireMessages(freshProvider(), mutated);
+    expect(fromCache).toEqual(fromFresh);
+  });
+
+  it('keeps cache_control only on the last block of the last message across incremental calls', async () => {
+    const cached = freshProvider();
+    const history: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'hello' }], toolCalls: [] },
+    ];
+    makeTurn(0, history);
+    const first = await wireMessages(cached, history);
+    const firstLast = first.at(-1) as {
+      content: Array<{ type: string; cache_control?: unknown }>;
+    };
+    expect(firstLast.content.at(-1)?.cache_control).toEqual({ type: 'ephemeral' });
+
+    // grow the history: the previously-injected block must not keep
+    // cache_control — only the new final block may carry it
+    makeTurn(1, history);
+    history.push({
+      role: 'user',
+      content: [{ type: 'text', text: 'end' }],
+      toolCalls: [],
+    });
+    const second = await wireMessages(cached, history);
+    const blocks = second.flatMap(
+      (m) => (m as { content: Array<{ type: string; cache_control?: unknown }> }).content,
+    );
+    const withCc = blocks.filter((block) => block.cache_control !== undefined);
+    expect(withCc).toHaveLength(1);
+    expect(withCc[0]).toBe(blocks.at(-1));
   });
 });

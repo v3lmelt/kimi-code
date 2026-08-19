@@ -234,6 +234,8 @@ function hasConfiguredApiKey(provider: ProviderConfig): boolean {
       return nonEmpty(provider.env?.['OPENAI_API_KEY']) !== undefined;
     case 'kimi':
       return nonEmpty(provider.env?.['KIMI_API_KEY']) !== undefined;
+    case 'opencode-go':
+      return nonEmpty(provider.env?.['OPENCODE_GO_API_KEY']) !== undefined;
     case 'google-genai':
       return nonEmpty(provider.env?.['GOOGLE_API_KEY']) !== undefined;
     case 'vertexai':

@@ -1,9 +1,129 @@
+import { spawn } from "node:child_process";
 import { Marked, type Token, Tokenizer, type Tokens } from "marked";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import { bumpVersion, type Component } from "../tui.ts";
 import { applyBackgroundToLine, visibleWidth, wrapTextWithAnsi } from "../utils.ts";
 
 const STRICT_STRIKETHROUGH_REGEX = /^(~~)(?=[^\s~])((?:\\.|[^\\])*?(?:\\.|[^\s~\\]))\1(?=[^~]|$)/;
+
+/**
+ * Non-breaking space used to bind a trailing "N." / "N)" to the preceding word
+ * so line wrapping cannot orphan the number onto its own line.
+ */
+const NON_BREAKING_SPACE = "\u00a0";
+
+/**
+ * Block-level token types rendered inside list items that should span the full
+ * content width instead of being indented under the list marker.
+ */
+const UNINDENTED_LIST_CHILD_TYPES = new Set(["code", "blockquote", "hr", "table"]);
+
+/**
+ * Base-language label for a fenced code block: strips dash-modifiers and
+ * trailing digits so "bash-shell" -> "bash" and "python3" -> "python".
+ */
+function baseLanguageLabel(lang: string): string {
+	const base = lang.trim().split("-")[0] ?? "";
+	return base.replace(/\d+$/, "");
+}
+
+/**
+ * Replace the space before a trailing "N." / "N)" at the end of a text segment
+ * with a non-breaking space, so the wrap algorithm keeps the number glued to
+ * the preceding word instead of splitting it onto the next line.
+ */
+function bindTrailingNumber(text: string): string {
+	return text.replace(/(\s)(\d+[.)])(\s*)$/, (_match, _space: string, number: string, tail: string) => {
+		return `${NON_BREAKING_SPACE}${number}${tail}`;
+	});
+}
+
+let cachedIssueRepo: { origin: string; repoPath: string } | undefined;
+/** Guards against starting the async git lookup more than once. */
+let issueRepoQueryStarted = false;
+
+/** Fallback forge used while the async lookup is still in flight. */
+const DEFAULT_ISSUE_REPO: { origin: string; repoPath: string } = {
+	origin: "https://github.com",
+	repoPath: "",
+};
+
+/** Cap the git subprocess lifetime so a hung git cannot pin the event loop. */
+const ISSUE_REPO_TIMEOUT_MS = 1500;
+
+/**
+ * Normalise a `git remote get-url` output into an origin host + repo path.
+ * Rewrites git@host:owner/repo.git, ssh://git@host/… and git:// URLs to
+ * https://host/owner/repo so the host + path can be read. Falls back to
+ * github.com when the remote is empty.
+ */
+function parseIssueRepo(remote: string): { origin: string; repoPath: string } {
+	const trimmed = remote.trim();
+	if (!trimmed) return DEFAULT_ISSUE_REPO;
+	const url = trimmed
+		.replace(/^git@([^:]+):/, "https://$1/")
+		.replace(/^ssh:\/\/git@([^/]+)\//, "https://$1/")
+		.replace(/^git:\/\/([^/]+)\//, "https://$1/")
+		.replace(/\.git$/, "");
+	const httpsUrl = /^https?:\/\//.test(url) ? url : `https://${url}`;
+	const match = /^https?:\/\/([^/]+)\/(.+)$/.exec(httpsUrl);
+	if (!match) return { origin: httpsUrl, repoPath: "" };
+	return { origin: `https://${match[1]}`, repoPath: match[2]!.replace(/\/+$/, "") };
+}
+
+/**
+ * Kick off an asynchronous `git config --get remote.origin.url` lookup so the
+ * first render never blocks the event loop on a subprocess. The result is
+ * cached; bare `#NN` references stay plain text until it settles (see
+ * {@link buildLinkifyTarget}).
+ */
+function resolveIssueRepo(): void {
+	const child = spawn("git", ["config", "--get", "remote.origin.url"], {
+		stdio: ["ignore", "pipe", "ignore"],
+	});
+	let stdout = "";
+	child.stdout?.setEncoding("utf8");
+	child.stdout?.on("data", (chunk: string) => {
+		stdout += chunk;
+	});
+	const settle = (remote: string): void => {
+		if (cachedIssueRepo !== undefined) return;
+		cachedIssueRepo = parseIssueRepo(remote);
+	};
+	child.on("error", () => settle(""));
+	child.on("close", () => settle(stdout));
+	// Bound the subprocess so a hung git cannot keep the app alive.
+	const timer = setTimeout(() => child.kill(), ISSUE_REPO_TIMEOUT_MS);
+	timer.unref?.();
+}
+
+/**
+ * Resolve the current repository's origin host + owner/repo path from the cwd's
+ * git remote so issue references can be linked to the right forge. The lookup
+ * is async (spawn) and cached, so renders never block on subprocess output;
+ * before it settles the default forge is returned.
+ */
+function getIssueRepo(): { origin: string; repoPath: string } {
+	if (!issueRepoQueryStarted) {
+		issueRepoQueryStarted = true;
+		resolveIssueRepo();
+	}
+	return cachedIssueRepo ?? DEFAULT_ISSUE_REPO;
+}
+
+/** True once the async git remote lookup has settled (successfully or not). */
+function isIssueRepoResolved(): boolean {
+	return cachedIssueRepo !== undefined;
+}
+
+/**
+ * Patterns for linkifying text tokens: bare URLs (marked already lexes the
+ * common ones into link tokens; this is a fallback for URLs it leaves inside
+ * text) plus GitHub-style issue references (owner/repo#NN and #NN) which marked
+ * does not autolink.
+ */
+const LINKIFY_PATTERN =
+	/https?:\/\/[^\s<>]+|www\.[^\s<>]+|[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+#\d+|#\d+/g;
 
 class StrictStrikethroughTokenizer extends Tokenizer {
 	override del(src: string): Tokens.Del | undefined {
@@ -93,6 +213,10 @@ export interface MarkdownTheme {
 	highlightCode?: (code: string, lang?: string) => string[];
 	/** Prefix applied to each rendered code block line (default: "  ") */
 	codeBlockIndent?: string;
+	/** Language-name label rendered above a fenced code block (dim/muted). */
+	codeLanguageLabel?: (text: string) => string;
+	/** Background applied to blockquote content to render a bordered box. */
+	quoteBg?: (text: string) => string;
 }
 
 export interface MarkdownOptions {
@@ -121,6 +245,16 @@ export class Markdown implements Component {
 	private cachedWidth?: number;
 	private cachedLines?: string[];
 
+	// Incremental (append-only streaming) render state: everything before
+	// cachedTailStart in cachedNormalizedText is fully closed block structure,
+	// so its rendered lines (cachedPrefixLines) are byte-identical for any
+	// suffix extension. Survives setText() but is cleared by invalidate() and
+	// rebuilt by the full render path.
+	private cachedNormalizedText?: string;
+	private cachedTailStart?: number;
+	private cachedLastTokenType?: string;
+	private cachedPrefixLines?: string[];
+
 	constructor(
 		text: string,
 		paddingX: number,
@@ -139,13 +273,24 @@ export class Markdown implements Component {
 
 	setText(text: string): void {
 		this.text = text;
-		this.invalidate();
+		// Clear only the render cache. The incremental state is kept: when the
+		// new text extends the previously rendered text, render() reuses the
+		// fully closed prefix instead of re-rendering the whole document.
+		// cachedWidth intentionally survives as "width of the last render",
+		// which the incremental fast path needs to validate its prefix lines.
+		this.cachedText = undefined;
+		this.cachedLines = undefined;
+		bumpVersion(this);
 	}
 
 	invalidate(): void {
 		this.cachedText = undefined;
 		this.cachedWidth = undefined;
 		this.cachedLines = undefined;
+		this.cachedNormalizedText = undefined;
+		this.cachedTailStart = undefined;
+		this.cachedLastTokenType = undefined;
+		this.cachedPrefixLines = undefined;
 		bumpVersion(this);
 	}
 
@@ -165,28 +310,200 @@ export class Markdown implements Component {
 			this.cachedText = this.text;
 			this.cachedWidth = width;
 			this.cachedLines = result;
+			this.cachedNormalizedText = this.text.replace(/\t/g, "   ");
+			this.cachedTailStart = 0;
+			this.cachedLastTokenType = undefined;
+			this.cachedPrefixLines = [];
 			return result;
 		}
 
 		// Replace tabs with 3 spaces for consistent rendering
 		const normalizedText = this.text.replace(/\t/g, "   ");
 
+		// Streaming fast path: when the new text extends the previously rendered
+		// text as a pure suffix, fully closed blocks cannot change, so their
+		// rendered lines are reused and only the tail (from the previous last
+		// token onward) is re-lexed / re-rendered / re-wrapped. Only valid at
+		// the width the prefix lines were built for (cachedWidth survives
+		// setText as "width of the last render").
+		if (
+			this.cachedWidth === width &&
+			this.cachedNormalizedText !== undefined &&
+			this.cachedPrefixLines !== undefined &&
+			this.cachedTailStart !== undefined &&
+			this.cachedLastTokenType !== undefined
+		) {
+			const incremental = this.renderIncrementalTail(normalizedText, width, contentWidth);
+			if (incremental !== undefined) {
+				return incremental;
+			}
+		}
+
 		// Parse markdown to HTML-like tokens
 		const tokens = markdownParser.lexer(normalizedText);
 		trimPartialClosingFences(tokens);
 
 		// Convert tokens to styled terminal output
-		const renderedLines: string[] = [];
+		const { renderedLines, tailLineStart, lastTokenStart, lastTokenType } = this.renderTokenStream(
+			tokens,
+			0,
+			contentWidth,
+		);
 
+		const prefixContentLines = this.wrapAndPadLines(renderedLines.slice(0, tailLineStart), contentWidth, width);
+		const tailContentLines = this.wrapAndPadLines(renderedLines.slice(tailLineStart), contentWidth, width);
+
+		const emptyLines = this.buildEmptyLines(width);
+
+		// Combine top padding, content, and bottom padding
+		const result = emptyLines.concat(prefixContentLines, tailContentLines, emptyLines);
+
+		// Update cache. The incremental state is only trustworthy when the token
+		// stream partitions the normalized text exactly; otherwise the computed
+		// boundary could land inside a token and poison the next append-only
+		// render, so it is simply not cached.
+		let consumed = 0;
+		for (const token of tokens) {
+			consumed += token.raw.length;
+		}
+		if (consumed === normalizedText.length || normalizedText.slice(consumed).trim() === "") {
+			this.cachedNormalizedText = normalizedText;
+			this.cachedTailStart = lastTokenStart;
+			this.cachedLastTokenType = lastTokenType;
+			this.cachedPrefixLines = prefixContentLines;
+		} else {
+			this.cachedNormalizedText = undefined;
+			this.cachedTailStart = undefined;
+			this.cachedLastTokenType = undefined;
+			this.cachedPrefixLines = undefined;
+		}
+		this.cachedText = this.text;
+		this.cachedWidth = width;
+		this.cachedLines = result;
+
+		return result.length > 0 ? result : [""];
+	}
+
+	/**
+	 * Render a token stream into raw (unwrapped) lines, recording where the LAST
+	 * token's rendered lines begin (tailLineStart), where the last token starts
+	 * in the source text (lastTokenStart, offset by textStart), and its type.
+	 * The boundary is used by renderIncrementalTail() to reuse everything before
+	 * the last token on the next append-only render.
+	 */
+	private renderTokenStream(
+		tokens: readonly Token[],
+		textStart: number,
+		width: number,
+	): {
+		renderedLines: string[];
+		tailLineStart: number;
+		lastTokenStart: number;
+		lastTokenType: string | undefined;
+	} {
+		const renderedLines: string[] = [];
+		let offset = textStart;
+		let tailLineStart = 0;
+		let lastTokenStart = textStart;
+		let lastTokenType: string | undefined;
 		for (let i = 0; i < tokens.length; i++) {
 			const token = tokens[i]!;
+			const isLast = i === tokens.length - 1;
+			lastTokenStart = offset;
+			lastTokenType = token.type;
+			offset += token.raw.length;
 			const nextToken = tokens[i + 1];
-			const tokenLines = this.renderToken(token, contentWidth, nextToken?.type);
+			const tokenLines = this.renderToken(token, width, nextToken?.type);
+			if (isLast) {
+				tailLineStart = renderedLines.length;
+			}
 			for (const tokenLine of tokenLines) {
 				renderedLines.push(tokenLine);
 			}
 		}
+		return { renderedLines, tailLineStart, lastTokenStart, lastTokenType };
+	}
 
+	/**
+	 * Streaming fast path: when the newly set text extends the previously
+	 * rendered text, re-lex / re-render / re-wrap only the tail starting at the
+	 * previous last token, and splice it onto the cached prefix lines. Returns
+	 * undefined so the caller falls back to the full render when the text is not
+	 * a pure append or the tail re-lex fails validation.
+	 */
+	private renderIncrementalTail(normalizedText: string, width: number, contentWidth: number): string[] | undefined {
+		const cachedNormalized = this.cachedNormalizedText;
+		if (
+			cachedNormalized === undefined ||
+			this.cachedPrefixLines === undefined ||
+			this.cachedLastTokenType === undefined ||
+			this.cachedTailStart === undefined ||
+			this.cachedTailStart > cachedNormalized.length ||
+			!normalizedText.startsWith(cachedNormalized)
+		) {
+			return undefined;
+		}
+
+		const tailText = normalizedText.slice(this.cachedTailStart);
+		if (tailText.length === 0) {
+			return undefined;
+		}
+
+		// Lexing starts at a block boundary (the previous last token), so the
+		// first tail token must be the same type as the previous last token. If
+		// the appended text restructured it (e.g. a paragraph growing into a
+		// setext heading), the prefix spacing could change — fall back to full.
+		const tailTokens = markdownParser.lexer(tailText);
+		if (tailTokens.length === 0 || tailTokens[0]!.type !== this.cachedLastTokenType) {
+			return undefined;
+		}
+
+		// Verify the re-lexed tokens partition the tail exactly; an unconsumed
+		// non-whitespace remainder means the cached boundary was not a real
+		// token boundary, and reusing the prefix would corrupt the output.
+		let consumed = 0;
+		for (const token of tailTokens) {
+			consumed += token.raw.length;
+		}
+		if (consumed !== tailText.length && tailText.slice(consumed).trim() !== "") {
+			return undefined;
+		}
+
+		trimPartialClosingFences(tailTokens);
+
+		const { renderedLines, tailLineStart, lastTokenStart, lastTokenType } = this.renderTokenStream(
+			tailTokens,
+			this.cachedTailStart,
+			contentWidth,
+		);
+
+		const prefixContentLines = this.cachedPrefixLines;
+		const tailContentLines = this.wrapAndPadLines(renderedLines, contentWidth, width);
+		const emptyLines = this.buildEmptyLines(width);
+
+		// Combine top padding, cached prefix, new tail, bottom padding
+		const result = emptyLines.concat(prefixContentLines, tailContentLines, emptyLines);
+
+		// Update cache: the prefix grows by every new tail token except the last.
+		this.cachedText = this.text;
+		this.cachedWidth = width;
+		this.cachedLines = result;
+		this.cachedNormalizedText = normalizedText;
+		this.cachedTailStart = lastTokenStart;
+		this.cachedLastTokenType = lastTokenType;
+		this.cachedPrefixLines = prefixContentLines.concat(
+			this.wrapAndPadLines(renderedLines.slice(0, tailLineStart), contentWidth, width),
+		);
+
+		return result.length > 0 ? result : [""];
+	}
+
+	/**
+	 * Wrap raw rendered lines to the content width, then add margins and
+	 * background (or right-pad to the full width). Deterministic per line,
+	 * which is what makes the incremental prefix reuse byte-identical.
+	 */
+	private wrapAndPadLines(renderedLines: string[], contentWidth: number, width: number): string[] {
 		// Wrap lines (NO padding, NO background yet)
 		const wrappedLines: string[] = [];
 		for (const line of renderedLines) {
@@ -223,23 +540,19 @@ export class Markdown implements Component {
 			}
 		}
 
-		// Add top/bottom padding (empty lines)
+		return contentLines;
+	}
+
+	/** Top/bottom padding (empty lines) for the given width. */
+	private buildEmptyLines(width: number): string[] {
+		const bgFn = this.defaultTextStyle?.bgColor;
 		const emptyLine = " ".repeat(Math.max(0, width));
 		const emptyLines: string[] = [];
 		for (let i = 0; i < this.paddingY; i++) {
 			const line = bgFn ? applyBackgroundToLine(emptyLine, width, bgFn) : emptyLine;
 			emptyLines.push(line);
 		}
-
-		// Combine top padding, content, and bottom padding
-		const result = emptyLines.concat(contentLines, emptyLines);
-
-		// Update cache
-		this.cachedText = this.text;
-		this.cachedWidth = width;
-		this.cachedLines = result;
-
-		return result.length > 0 ? result : [""];
+		return emptyLines;
 	}
 
 	/**
@@ -378,6 +691,9 @@ export class Markdown implements Component {
 
 			case "code": {
 				const indent = this.theme.codeBlockIndent ?? "  ";
+				if (token.lang && this.theme.codeLanguageLabel) {
+					lines.push(this.theme.codeLanguageLabel(baseLanguageLabel(token.lang)));
+				}
 				lines.push(this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`));
 				if (this.theme.highlightCode) {
 					const highlightedLines = this.theme.highlightCode(token.text, token.lang);
@@ -452,7 +768,7 @@ export class Markdown implements Component {
 					const styledLine = applyQuoteStyle(quoteLine);
 					const wrappedLines = wrapTextWithAnsi(styledLine, quoteContentWidth);
 					for (const wrappedLine of wrappedLines) {
-						lines.push(this.theme.quoteBorder("│ ") + wrappedLine);
+						lines.push(this.theme.quoteBorder("│ ") + this.applyQuoteBackground(wrappedLine, quoteContentWidth));
 					}
 				}
 				if (nextTokenType && nextTokenType !== "space") {
@@ -469,9 +785,12 @@ export class Markdown implements Component {
 				break;
 
 			case "html":
-				// Render HTML as plain text (escaped for terminal)
+				// Render HTML as literal text (escaped for the terminal) so tags are
+				// visible instead of being dropped.
 				if ("raw" in token && typeof token.raw === "string") {
 					lines.push(this.applyDefaultStyle(token.raw.trim()));
+				} else if ("text" in token && typeof token.text === "string") {
+					lines.push(this.applyDefaultStyle(token.text.trim()));
 				}
 				break;
 
@@ -490,7 +809,7 @@ export class Markdown implements Component {
 		return lines;
 	}
 
-	private renderInlineTokens(tokens: Token[], styleContext?: InlineStyleContext): string {
+	private renderInlineTokens(tokens: Token[], styleContext?: InlineStyleContext, skipLinkify = false): string {
 		let result = "";
 		const resolvedStyleContext = styleContext ?? this.getDefaultInlineStyleContext();
 		const { applyText, stylePrefix } = resolvedStyleContext;
@@ -508,25 +827,27 @@ export class Markdown implements Component {
 				case "text":
 					// Text tokens in list items can have nested tokens for inline formatting
 					if (token.tokens && token.tokens.length > 0) {
-						result += this.renderInlineTokens(token.tokens, resolvedStyleContext);
-					} else {
+						result += this.renderInlineTokens(token.tokens, resolvedStyleContext, skipLinkify);
+					} else if (skipLinkify) {
 						result += applyTextWithNewlines(token.text);
+					} else {
+						result += this.linkifyAndStyleText(token.text, resolvedStyleContext);
 					}
 					break;
 
 				case "paragraph":
 					// Paragraph tokens contain nested inline tokens
-					result += this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
+					result += this.renderInlineTokens(token.tokens || [], resolvedStyleContext, skipLinkify);
 					break;
 
 				case "strong": {
-					const boldContent = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
+					const boldContent = this.renderInlineTokens(token.tokens || [], resolvedStyleContext, skipLinkify);
 					result += this.theme.bold(boldContent) + stylePrefix;
 					break;
 				}
 
 				case "em": {
-					const italicContent = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
+					const italicContent = this.renderInlineTokens(token.tokens || [], resolvedStyleContext, skipLinkify);
 					result += this.theme.italic(italicContent) + stylePrefix;
 					break;
 				}
@@ -536,7 +857,9 @@ export class Markdown implements Component {
 					break;
 
 				case "link": {
-					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
+					// Do not linkify the inner text: it is already a link, so any bare
+					// URL inside must not get a second OSC 8 wrapper.
+					const linkText = this.renderInlineTokens(token.tokens || [], resolvedStyleContext, true);
 					const styledLink = this.theme.link(this.theme.underline(linkText));
 					if (getCapabilities().hyperlinks) {
 						// OSC 8: render as a clickable hyperlink. The URL is not printed inline,
@@ -562,17 +885,37 @@ export class Markdown implements Component {
 					break;
 
 				case "del": {
-					const delContent = this.renderInlineTokens(token.tokens || [], resolvedStyleContext);
+					const delContent = this.renderInlineTokens(token.tokens || [], resolvedStyleContext, skipLinkify);
 					result += this.theme.strikethrough(delContent) + stylePrefix;
 					break;
 				}
 
 				case "html":
-					// Render inline HTML as plain text
+					// Render inline HTML as literal text (escaped for the terminal)
 					if ("raw" in token && typeof token.raw === "string") {
 						result += applyTextWithNewlines(token.raw);
+					} else if ("text" in token && typeof token.text === "string") {
+						result += applyTextWithNewlines(token.text);
 					}
 					break;
+
+				case "image": {
+					// Markdown images cannot be shown inline here, so render the alt
+					// text when present, otherwise fall back to "(href title)".
+					const imageToken = token as Tokens.Image;
+					const href = imageToken.href ?? "";
+					const alt = imageToken.text ?? "";
+					const hasAlt = alt.length > 0;
+					const title = imageToken.title ?? "";
+					const label = hasAlt ? alt : `(${[href, title].filter(Boolean).join(" ")})`;
+					const styled = hasAlt ? applyTextWithNewlines(alt) : this.theme.linkUrl(label);
+					if (getCapabilities().hyperlinks && href) {
+						result += hyperlink(styled, href) + stylePrefix;
+					} else {
+						result += styled + stylePrefix;
+					}
+					break;
+				}
 
 				default:
 					// Handle any other inline token types as plain text
@@ -587,6 +930,124 @@ export class Markdown implements Component {
 		}
 
 		return result;
+	}
+
+	/**
+	 * Apply a dim background behind blockquote content so it renders as a
+	 * bordered box (left border + background). Falls back to plain text when the
+	 * theme does not provide a quote background.
+	 */
+	private applyQuoteBackground(line: string, width: number): string {
+		const bgFn = this.theme.quoteBg;
+		if (!bgFn) {
+			return line;
+		}
+		const visibleLen = visibleWidth(line);
+		const paddingNeeded = Math.max(0, width - visibleLen);
+		const padded = line + " ".repeat(paddingNeeded);
+
+		// Sample the theme's background codes so full SGR resets inside styled
+		// content (bold/code/links) re-apply the background instead of leaving a
+		// gap. Chalk normally closes attributes with targeted resets, but the
+		// quote renderer already anticipates \x1b[0m, so match that robustness.
+		const sample = bgFn("x");
+		const markerIndex = sample.indexOf("x");
+		const bgPrefix = markerIndex > 0 ? sample.slice(0, markerIndex) : "";
+		const bgSuffix = markerIndex >= 0 ? sample.slice(markerIndex + 1) : "";
+		if (!bgPrefix) {
+			return padded;
+		}
+		return `${bgPrefix}${padded.replace(/\x1b\[0m/g, `\x1b[0m${bgPrefix}`)}${bgSuffix}`;
+	}
+
+	/**
+	 * Style a plain inline text token, linkifying bare URLs and GitHub issue
+	 * references while binding trailing "N." / "N)" to the preceding word so the
+	 * wrap cannot split the number onto its own line.
+	 */
+	private linkifyAndStyleText(text: string, styleContext: InlineStyleContext): string {
+		const { applyText, stylePrefix } = styleContext;
+		return text
+			.split("\n")
+			.map((segment) => this.linkifySegment(bindTrailingNumber(segment), applyText, stylePrefix))
+			.join("\n");
+	}
+
+	/**
+	 * Scan a single text line for bare URLs and issue references, rendering each
+	 * match as a styled OSC 8 hyperlink when the terminal supports it.
+	 */
+	private linkifySegment(segment: string, applyText: (text: string) => string, stylePrefix: string): string {
+		if (!segment.includes("#") && !/https?:\/\/|www\./.test(segment)) {
+			return applyText(segment);
+		}
+
+		LINKIFY_PATTERN.lastIndex = 0;
+		let result = "";
+		let lastIndex = 0;
+		let match: RegExpExecArray | null;
+		while ((match = LINKIFY_PATTERN.exec(segment)) !== null) {
+			const raw = match[0]!;
+			const target = this.buildLinkifyTarget(raw, match.index > 0 ? segment[match.index - 1]! : "");
+			if (target === undefined) {
+				// False positive (e.g. "x#12" or a fragment of a longer path) - keep as text.
+				result += applyText(segment.slice(lastIndex, LINKIFY_PATTERN.lastIndex));
+				lastIndex = LINKIFY_PATTERN.lastIndex;
+				continue;
+			}
+			if (match.index > lastIndex) {
+				result += applyText(segment.slice(lastIndex, match.index));
+			}
+			const styled = this.theme.link(this.theme.underline(target.text));
+			if (getCapabilities().hyperlinks) {
+				result += hyperlink(styled, target.href) + stylePrefix;
+			} else {
+				result += styled + stylePrefix;
+			}
+			lastIndex = LINKIFY_PATTERN.lastIndex;
+		}
+		if (lastIndex < segment.length) {
+			result += applyText(segment.slice(lastIndex));
+		}
+		return result;
+	}
+
+	/**
+	 * Turn a bare-URL / issue-reference match into a styled text + link href
+	 * pair, or return undefined for false positives that should stay plain text.
+	 */
+	private buildLinkifyTarget(raw: string, prevChar: string): { text: string; href: string } | undefined {
+		if (raw.startsWith("http://") || raw.startsWith("https://") || raw.startsWith("www.")) {
+			const text = raw.replace(/[.,;:!?)]+$/, "");
+			const href = text.startsWith("www.") ? `http://${text}` : text;
+			return { text, href };
+		}
+
+		const hashIndex = raw.indexOf("#");
+		if (hashIndex < 0) {
+			return undefined;
+		}
+		const repoPart = raw.slice(0, hashIndex);
+		const number = raw.slice(hashIndex + 1);
+		const { origin, repoPath } = getIssueRepo();
+		if (repoPart.includes("/")) {
+			// owner/repo#NN - must not sit inside a longer path (prevChar "/" or alnum).
+			if (prevChar !== "" && /[A-Za-z0-9_.\-/]/.test(prevChar)) {
+				return undefined;
+			}
+			return { text: raw, href: `${origin}/${repoPart}/issues/${number}` };
+		}
+		// Bare #NN - must not follow an identifier character (avoid "x#12", "C#12").
+		if (prevChar !== "" && /[A-Za-z0-9_.-]/.test(prevChar)) {
+			return undefined;
+		}
+		// Bare #NN depends on the resolved repo path; render as plain text until
+		// the async git lookup settles so the first render never blocks on git.
+		if (!isIssueRepoResolved()) {
+			return undefined;
+		}
+		const base = repoPath ? `${origin}/${repoPath}/issues/${number}` : `${origin}/issues/${number}`;
+		return { text: raw, href: base };
 	}
 
 	private getOrderedListMarker(item: Tokens.ListItem): string | undefined {
@@ -618,7 +1079,7 @@ export class Markdown implements Component {
 				: this.options.preserveOrderedListMarkers
 					? (this.getUnorderedListMarker(item) ?? "- ")
 					: "- ";
-			const taskMarker = item.task ? `[${item.checked ? "x" : " "}] ` : "";
+			const taskMarker = item.task ? `${item.checked ? "☑" : "☐"} ` : "";
 			const marker = bullet + taskMarker;
 			const firstPrefix = indent + this.theme.listBullet(marker);
 			const continuationPrefix = indent + " ".repeat(visibleWidth(marker));
@@ -629,6 +1090,19 @@ export class Markdown implements Component {
 				if (itemToken.type === "list") {
 					lines.push(...this.renderList(itemToken as Tokens.List, depth + 1, width, styleContext));
 					renderedAnyLine = true;
+					continue;
+				}
+
+				// Block-level children (code/blockquote/hr/table) are not indented -
+				// they span the full content width like top-level blocks.
+				if (UNINDENTED_LIST_CHILD_TYPES.has(itemToken.type)) {
+					const itemLines = this.renderToken(itemToken, width, undefined, styleContext);
+					for (const line of itemLines) {
+						for (const wrappedLine of wrapTextWithAnsi(line, width)) {
+							lines.push(wrappedLine);
+							renderedAnyLine = true;
+						}
+					}
 					continue;
 				}
 

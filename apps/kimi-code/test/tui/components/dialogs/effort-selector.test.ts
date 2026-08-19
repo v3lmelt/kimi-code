@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { Container } from '@moonshot-ai/pi-tui';
+
 import { EffortSelectorComponent } from '#/tui/components/dialogs/effort-selector';
 
 const ANSI = /\[[0-9;]*m/g;
@@ -8,7 +10,7 @@ const ESC = String.fromCodePoint(27);
 const LEFT = `${ESC}[D`;
 const RIGHT = `${ESC}[C`;
 
-function text(component: EffortSelectorComponent, width = 120): string {
+function text(component: { render(width: number): string[] }, width = 120): string {
   return component.render(width).map(strip).join('\n');
 }
 
@@ -147,5 +149,27 @@ describe('EffortSelectorComponent', () => {
     // Word-wrapped: nothing dropped — the full warning survives across lines.
     const squashed = lines.join('').replaceAll(/\s+/g, '');
     expect(squashed).toContain(warning.replaceAll(/\s+/g, ''));
+  });
+
+  it('bumps render version so parent containers do not cache stale output', () => {
+    const picker = new EffortSelectorComponent({
+      efforts: ['off', 'low', 'high', 'max'],
+      currentValue: 'high',
+      onSelect: vi.fn(),
+      onCancel: vi.fn(),
+    });
+
+    const parent = new Container();
+    parent.addChild(picker);
+
+    const before = text(parent);
+    expect(before).toContain('[ High ]');
+    expect(before).not.toContain('[ Max ]');
+
+    picker.handleInput(RIGHT);
+
+    const after = text(parent);
+    expect(after).toContain('[ Max ]');
+    expect(after).not.toContain('[ High ]');
   });
 });

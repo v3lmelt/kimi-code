@@ -1,7 +1,7 @@
 import { visibleWidth } from '@moonshot-ai/pi-tui';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { buildUsageReportLines, UsagePanelComponent } from '#/tui/components/messages/usage-panel';
+import { buildGoUsageReportLines, buildUsageReportLines, UsagePanelComponent } from '#/tui/components/messages/usage-panel';
 import { currentTheme, darkColors, lightColors } from '#/tui/theme';
 
 afterEach(() => {
@@ -283,5 +283,79 @@ describe('UsagePanelComponent', () => {
     currentTheme.setPalette(lightColors);
     component.invalidate();
     expect(bodyOf()).toContain(lightColors.text);
+  });
+});
+
+describe('OpenCode Go usage report', () => {
+  it('appends an OpenCode Go usage section after the managed sections', () => {
+    const lines = buildUsageReportLines({
+      sessionUsage: { byModel: {} },
+      contextUsage: 0,
+      contextTokens: 0,
+      maxContextTokens: 0,
+      goUsage: {
+        summary: {
+          window: { duration: 5, unit: 'hour' },
+          used: 14,
+          limit: 100,
+          resetAt: new Date(Date.now() + 3600_000).toISOString(),
+        },
+        limits: [
+          {
+            window: { duration: 1, unit: 'week' },
+            used: 3,
+            limit: 100,
+            resetAt: new Date(Date.now() + 3600_000).toISOString(),
+          },
+        ],
+      },
+    }).map(strip);
+
+    expect(lines).toContain('OpenCode Go usage');
+    expect(lines.join('\n')).toContain('5h limit');
+    expect(lines.join('\n')).toContain('14% used');
+    expect(lines.join('\n')).toContain('Weekly limit');
+    expect(lines.join('\n')).toContain('3% used');
+    expect(lines).not.toContain('Plan usage');
+  });
+
+  it('omits the go section when neither goUsage nor goUsageError is present', () => {
+    const lines = buildUsageReportLines({
+      sessionUsage: { byModel: {} },
+      contextUsage: 0,
+      contextTokens: 0,
+      maxContextTokens: 0,
+    }).map(strip);
+
+    expect(lines).not.toContain('OpenCode Go usage');
+  });
+
+  it('maps rolling and weekly rows through buildGoUsageReportLines', () => {
+    const lines = buildGoUsageReportLines({
+      goUsage: {
+        summary: { window: { duration: 5, unit: 'hour' }, used: 44, limit: 100 },
+        limits: [{ window: { duration: 1, unit: 'week' }, used: 22, limit: 100 }],
+      },
+    }).map(strip);
+
+    expect(lines[0]).toBe('OpenCode Go usage');
+    expect(lines.join('\n')).toContain('5h limit');
+    expect(lines.join('\n')).toContain('44% used');
+    expect(lines.join('\n')).toContain('Weekly limit');
+    expect(lines.join('\n')).toContain('22% used');
+  });
+
+  it('shows the error line under the go title when the fetch failed', () => {
+    const lines = buildGoUsageReportLines({ goUsageError: 'boom' }).map(strip);
+
+    expect(lines[0]).toBe('OpenCode Go usage');
+    expect(lines.join('\n')).toContain('boom');
+  });
+
+  it('reports "No usage data available" when both windows are missing', () => {
+    const lines = buildGoUsageReportLines({ goUsage: { summary: null, limits: [] } }).map(strip);
+
+    expect(lines[0]).toBe('OpenCode Go usage');
+    expect(lines.join('\n')).toContain('No usage data available.');
   });
 });

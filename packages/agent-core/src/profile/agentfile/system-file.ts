@@ -67,11 +67,12 @@ export function systemMdProfile(
   builtinDefault: ResolvedAgentProfile,
 ): ResolvedAgentProfile {
   const skillActive = builtinDefault.tools.includes('Skill');
+  const todoActive = builtinDefault.tools.includes('TodoList');
   return {
     name: builtinDefault.name,
     description: builtinDefault.description,
     systemPrompt: (context) =>
-      renderAgentFileTemplate(definition.prompt, context, { skillActive }, (ctx) =>
+      renderAgentFileTemplate(definition.prompt, context, { skillActive, todoActive }, (ctx) =>
         builtinDefault.systemPrompt(ctx),
       ),
     tools: [...builtinDefault.tools],

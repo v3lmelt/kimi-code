@@ -1,6 +1,6 @@
 # Agent Skills
 
-Agent Skills are a lightweight mechanism for extending model capabilities in Kimi Code CLI. A Skill is a Markdown document with YAML frontmatter that describes a specialized area of knowledge or a workflow — for example, a project's code style guidelines, a PR review process, or a commit message format.
+Agent Skills are a lightweight mechanism for extending model capabilities in Hasu CLI. A Skill is a Markdown document with YAML frontmatter that describes a specialized area of knowledge or a workflow — for example, a project's code style guidelines, a PR review process, or a commit message format.
 
 Compared to pasting the same instructions into a prompt every time, Skills offer the advantage of keeping content in a file, enabling reuse across projects and teams, allowing instant loading via a slash command, and letting the model invoke them automatically when needed.
 
@@ -63,13 +63,13 @@ Positional arguments support single and double quoting, so in `/skill:commit "fi
 
 ## Skill Locations
 
-Kimi Code CLI scans four tiers by scope; more specific scopes take higher priority: **Project > User > Extra > Built-in**
+Hasu CLI scans four tiers by scope; more specific scopes take higher priority: **Project > User > Extra > Built-in**
 
 **User level** (applies to all projects):
 - `$KIMI_CODE_HOME/skills/` (default: `~/.kimi-code/skills/`)
 - `~/.agents/skills/`
 
-The Kimi-specific user Skill directory moves with `KIMI_CODE_HOME`, so isolated data roots also get isolated Kimi-specific Skills. The generic `~/.agents/skills/` directory stays under the real OS home so it can be shared across tools.
+The Hasu-specific user Skill directory moves with `KIMI_CODE_HOME`, so isolated data roots also get isolated Hasu-specific Skills. The generic `~/.agents/skills/` directory stays under the real OS home so it can be shared across tools.
 
 **Project level** (project root = the nearest directory containing `.git`, searching upward from the working directory):
 - `.kimi-code/skills/`
@@ -81,7 +81,7 @@ The Kimi-specific user Skill directory moves with `KIMI_CODE_HOME`, so isolated 
 extra_skill_dirs = ["~/team-skills", ".agents/team-skills"]
 ```
 
-**Built-in Skills** are distributed with the CLI and have the lowest priority. They provide out-of-the-box workflows for common tasks — for example, configuring MCP servers, customizing the TUI theme, and editing config files. See [Built-in skill commands](../reference/slash-commands.md#built-in-skill-commands) for the full list. Those describing Kimi Code itself can be turned off with the top-level [`builtin_product_skills`](../configuration/config-files.md#top-level-fields) field.
+**Built-in Skills** are distributed with the CLI and have the lowest priority. They provide out-of-the-box workflows for common tasks — for example, configuring MCP servers, customizing the TUI theme, and editing config files. See [Built-in skill commands](../reference/slash-commands.md#built-in-skill-commands) for the full list. Those describing Hasu itself can be turned off with the top-level [`builtin_product_skills`](../configuration/config-files.md#top-level-fields) field.
 
 ## Invoking a Skill
 

@@ -4,6 +4,7 @@ import { DEFAULT_AGENT_PROFILES, loadAgentProfilesFromSources } from '../../src/
 import {
   ADDITIONAL_DIRS_SECTION_PROSE,
   SKILLS_SECTION_PROSE,
+  TODO_LIST_SECTION_PROSE,
   WINDOWS_NOTES,
 } from '../../src/profile/prompt-sections';
 
@@ -123,11 +124,15 @@ describe('default agent profiles', () => {
     // {% if %} reconstruction of availability). This holds for the root `agent` too, not
     // just subagents. The cross-tool secret-file guard — built on the always-present
     // Read/Grep/Glob — stays shared.
+    //
+    // Exception: TodoList planning is a standing obligation, rendered through the
+    // tool-gated KIMI_TODO_LIST_SECTION variable (asserted in the dedicated test below),
+    // because the model must plan and track multi-step work even before its first
+    // TodoList call — a tool-description-only nudge is too late for that.
     for (const name of ['agent', 'coder', 'explore', 'plan']) {
       const prompt = DEFAULT_AGENT_PROFILES[name]?.systemPrompt(promptContext) ?? '';
       expect(prompt).not.toContain('Launch multiple explore agents concurrently'); // Agent → agent.md + explore whenToUse
       expect(prompt).not.toContain('long-running shell commands as background tasks'); // background → bash.md
-      expect(prompt).not.toContain('maintain a `TodoList`'); // TodoList → todo-list.md
       expect(prompt).not.toContain('prefer entering plan mode first'); // EnterPlanMode → enter-plan-mode.md
       expect(prompt).not.toContain('call `TaskList` to re-enumerate'); // compaction recovery → task-list.md
       // The dedicated-tool routing must name only universally-present tools (Read/Glob/Grep).
@@ -138,6 +143,26 @@ describe('default agent profiles', () => {
       expect(prompt).not.toContain('Keep `Bash` for genuine shell work');
       expect(prompt).toContain('`Glob` to find files by name'); // universal routing stays
       expect(prompt).toContain('refuse a fixed set of well-known secret files'); // shared guard stays
+    }
+  });
+
+  it('renders the TodoList planning obligation only for profiles with the TodoList tool', () => {
+    // TodoList planning is the one piece of optional-tool guidance kept in the shared
+    // prompt: a standing obligation gated on the tool being in the profile's tool set
+    // (KIMI_TODO_LIST_SECTION, shared prose from prompt-sections.ts). The root agent and
+    // coder have the tool, so the paragraph renders; explore/plan are read-only and must
+    // not see a TodoList instruction.
+    for (const name of ['agent', 'coder']) {
+      expect(DEFAULT_AGENT_PROFILES[name]?.tools).toContain('TodoList');
+      const prompt = DEFAULT_AGENT_PROFILES[name]?.systemPrompt(promptContext) ?? '';
+      expect(prompt).toContain(TODO_LIST_SECTION_PROSE);
+    }
+
+    for (const name of ['explore', 'plan']) {
+      const tools = DEFAULT_AGENT_PROFILES[name]?.tools ?? [];
+      expect(tools).not.toContain('TodoList');
+      const prompt = DEFAULT_AGENT_PROFILES[name]?.systemPrompt(promptContext) ?? '';
+      expect(prompt).not.toContain(TODO_LIST_SECTION_PROSE);
     }
   });
 

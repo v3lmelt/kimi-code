@@ -15,8 +15,15 @@ export interface IAgentPlanService {
   cancel(id?: string): void;
   clear(): Promise<void>;
   exit(id?: string): void;
-  recordRevision(): Promise<void>;
+  recordRevision(content?: string): Promise<void>;
   status(): Promise<PlanData>;
+  /**
+   * Synchronous, file-system-free read of the current plan file path. Returns
+   * `null` when plan mode is inactive. Hot-path callers that only need the
+   * path or the active flag must use this instead of `status()`, which reads
+   * the plan file from disk on every call.
+   */
+  currentPlanFilePath(): PlanFilePath;
 }
 
 export const IAgentPlanService =

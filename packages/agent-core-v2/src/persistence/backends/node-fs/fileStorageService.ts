@@ -22,7 +22,7 @@
  */
 
 import { createReadStream, mkdirSync } from 'node:fs';
-import { mkdir, open, readFile, readdir, unlink } from 'node:fs/promises';
+import { mkdir, open, readFile, readdir, stat, unlink } from 'node:fs/promises';
 import { FSWatcher } from 'chokidar';
 import { dirname, join, normalize } from 'pathe';
 
@@ -60,6 +60,16 @@ export class FileStorageService implements IFileSystemStorageService {
     const filePath = this.path(scope, key);
     try {
       return await readFile(filePath);
+    } catch (error) {
+      if (isEnoent(error)) return undefined;
+      throw toStorageIoError(error, { path: filePath, op: 'read' });
+    }
+  }
+
+  async size(scope: string, key: string): Promise<number | undefined> {
+    const filePath = this.path(scope, key);
+    try {
+      return (await stat(filePath)).size;
     } catch (error) {
       if (isEnoent(error)) return undefined;
       throw toStorageIoError(error, { path: filePath, op: 'read' });

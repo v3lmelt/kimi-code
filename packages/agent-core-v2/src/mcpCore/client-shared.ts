@@ -67,6 +67,7 @@ interface SdkListedTool {
   readonly name: string;
   readonly description?: string;
   readonly inputSchema: Record<string, unknown>;
+  readonly annotations?: { readonly readOnlyHint?: boolean };
 }
 
 export function toMcpToolDefinition(tool: SdkListedTool): MCPToolDefinition {
@@ -74,6 +75,7 @@ export function toMcpToolDefinition(tool: SdkListedTool): MCPToolDefinition {
     name: tool.name,
     description: tool.description ?? '',
     inputSchema: tool.inputSchema,
+    annotations: tool.annotations,
   };
 }
 

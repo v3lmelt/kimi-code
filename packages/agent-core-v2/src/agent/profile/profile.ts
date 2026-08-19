@@ -133,6 +133,7 @@ export interface IAgentProfileService {
   update(changed: ProfileUpdateData): void;
   applyBindingSnapshot(snapshot: ProfileBindingSnapshot): void;
   bind(input: BindAgentInput): Promise<void>;
+  syncMemoryScope(): Promise<void>;
   setModel(model: string): Promise<ProfileSetModelResult>;
   setThinking(level: string): void;
   republishStatus(): void;

@@ -109,6 +109,18 @@ describe('resolveThinkingEffortForModel', () => {
     expect(modelSupportsThinkingEffort('off', thinkingModel, true)).toBe(true);
     expect(modelSupportsThinkingEffort('extreme', thinkingModel, false)).toBe(true);
   });
+
+  it('clamps a configured effort to off for models without thinking capability', () => {
+    // A global `[thinking] effort = "high"` must not leak onto the wire for a
+    // non-reasoning model (e.g. opencode-go/hy3) regardless of validation
+    // strictness — third-party endpoints may reject the unexpected parameter.
+    const nonThinking = { capabilities: ['tool_use'] };
+    expect(resolveThinkingEffortForModel(undefined, { effort: 'high' }, nonThinking, false)).toBe('off');
+    expect(resolveThinkingEffortForModel(undefined, { effort: 'high' }, nonThinking, true)).toBe('off');
+    expect(resolveThinkingEffortForModel('high', undefined, nonThinking, false)).toBe('off');
+    expect(resolveThinkingEffortForModel('on', undefined, nonThinking, false)).toBe('on');
+    expect(resolveThinkingEffortForModel(undefined, { enabled: false }, nonThinking, false)).toBe('off');
+  });
 });
 
 describe('resolveForcedThinkingEffort', () => {

@@ -1,7 +1,7 @@
 /**
- * Terminal background detection.
+ * Terminal capability detection.
  *
- * Strategy, in priority order:
+ * Background detection strategy, in priority order:
  *   1. Reject — non-TTY, NO_COLOR, FORCE_COLOR=0, CI → safe `'dark'`.
  *   2. OSC 11 — write `ESC ] 11 ; ? BEL`, parse `ESC ] 11 ; rgb:RR/GG/BB BEL`,
  *      compute relative luminance. Capped at `timeoutMs` so unsupported
@@ -9,14 +9,35 @@
  *   3. COLORFGBG — VT100 / xterm fallback exposing `"fg;bg"`.
  *   4. Default — `'dark'`.
  *
+ * Truecolor detection (`supportsTruecolor`) is environment-only: an allowlist
+ * match on `TERM` / `TERM_PROGRAM` or an explicit `COLORTERM=24bit` flag.
+ *
  * Must run before pi-tui enters raw mode; once the framework owns stdin
  * the OSC reply gets eaten by the input loop.
  */
+
+import chalk from "chalk";
 
 import { OSC11_QUERY, TERMINAL_THEME_DETECT_TIMEOUT_MS } from "#/tui/constant/terminal";
 
 import type { ResolvedTheme } from "./colors";
 import { parseOsc11BackgroundTheme } from "./terminal-background";
+
+/**
+ * Terminals known to speak 24-bit colour, keyed by the terminal name as it
+ * appears in `TERM` / `TERM_PROGRAM` (e.g. `WezTerm`, `Ghostty`, `Alacritty`).
+ * The `xterm-*` aliases are the `TERM` values some terminals export.
+ */
+const TRUECOLOR_TERMINALS: ReadonlySet<string> = new Set([
+  "alacritty",
+  "contour",
+  "foot",
+  "ghostty",
+  "rio",
+  "wezterm",
+  "xterm-ghostty",
+  "xterm-kitty",
+]);
 
 export interface DetectOptions {
   readonly timeoutMs?: number;
@@ -118,4 +139,46 @@ export function parseColorFgBg(value: string | undefined): ResolvedTheme | null 
   // ANSI 0=black, 1=red, 2=green, 3=yellow, 4=blue, 5=magenta, 6=cyan, 8=bright black.
   const darkBgs = new Set([0, 1, 2, 3, 4, 5, 6, 8]);
   return darkBgs.has(bg) ? "dark" : "light";
+}
+
+/**
+ * Truecolor (24-bit colour) detection.
+ *
+ * Terminal capabilities are gathered from the environment rather than probed:
+ * `COLORTERM=truecolor|24bit` is the explicit flag, `TERM_PROGRAM` names the
+ * running terminal (WezTerm, Ghostty, ...), and `TERM` encodes the terminal
+ * family (xterm-kitty, foot-direct, ...). Unknown terminals return `false` so
+ * nothing regresses when a terminal is not recognised. `'dark'` fallbacks and
+ * non-interactive output (pipes, NO_COLOR, CI) never claim truecolor.
+ */
+export function supportsTruecolor(): boolean {
+  if (!isInteractiveTerminal()) return false;
+  if (isColorOptOut()) return false;
+
+  const term = (process.env["TERM"] ?? "").toLowerCase();
+  const termProgram = (process.env["TERM_PROGRAM"] ?? "").toLowerCase();
+  const colorTerm = (process.env["COLORTERM"] ?? "").toLowerCase();
+
+  // Explicit capability flag.
+  if (colorTerm === "truecolor" || colorTerm === "24bit") return true;
+
+  // TERM_PROGRAM names the running terminal.
+  if (TRUECOLOR_TERMINALS.has(termProgram)) return true;
+
+  // TERM matches exactly (xterm-kitty) or by dash-separated base (foot-direct).
+  if (TRUECOLOR_TERMINALS.has(term)) return true;
+  const termBase = term.split("-")[0];
+  if (termBase !== undefined && termBase !== "" && TRUECOLOR_TERMINALS.has(termBase)) return true;
+
+  return false;
+}
+
+/**
+ * Pin chalk to 24-bit colour mode when the terminal advertises truecolor
+ * support. Call once at TUI startup, before the first frame renders, so theme
+ * hex values render at full fidelity instead of chalk's default 256-colour
+ * downgrade. No-op on terminals that do not advertise truecolor.
+ */
+export function pinTruecolorChalkLevel(): void {
+  if (supportsTruecolor()) chalk.level = 3;
 }

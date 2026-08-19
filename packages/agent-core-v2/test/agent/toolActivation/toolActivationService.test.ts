@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { DisposableStore, toDisposable } from '#/_base/di/lifecycle';
 import { type CollectionView } from '#/_base/di/collection';
 import { SyncDescriptor } from '#/_base/di/descriptors';
-import { createDecorator } from '#/_base/di/instantiation';
+import {
+  createDecorator,
+  type ServiceIdentifier,
+  type ServicesAccessor,
+} from '#/_base/di/instantiation';
 import { Service } from '#/_base/di/service';
 import { LifecycleScope } from '#/app/scopes';
 import {
@@ -31,6 +35,7 @@ import {
 } from '#/agent/toolRegistry/toolContribution';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { AgentToolRegistryService } from '#/agent/toolRegistry/toolRegistryService';
+import { IAgentUltracodeService } from '#/agent/ultracode/ultracode';
 import { ISessionToolPolicyGate } from '#/session/sessionToolPolicyGate/sessionToolPolicyGate';
 import type { AgentTool, ToolExecution } from '#/tool/toolContract';
 import '#/agent/tools/agent-swarm/agentSwarmTool';
@@ -54,6 +59,7 @@ import '#/agent/tools/task/task-output/taskOutputTool';
 import '#/agent/tools/task/task-stop/taskStopTool';
 import '#/agent/tools/todo-list/todoListTool';
 import '#/agent/tools/web-search/webSearchTool';
+import '#/agent/tools/workflow/workflowTool';
 
 class StubTool implements AgentTool {
   declare readonly _serviceBrand: undefined;
@@ -136,6 +142,15 @@ describe('AgentToolActivationService', () => {
     disallowedTools?: readonly string[];
   } = {};
   const gateData: { disabledTools: readonly string[] } = { disabledTools: [] };
+  const ultracodeState: { isActive: boolean } = { isActive: false };
+  const ultracodeService = {
+    _serviceBrand: undefined,
+    get isActive() {
+      return ultracodeState.isActive;
+    },
+    enter: () => {},
+    exit: () => {},
+  } as unknown as IAgentUltracodeService;
 
   function createActivationHost() {
     disposables = new DisposableStore();
@@ -148,6 +163,7 @@ describe('AgentToolActivationService', () => {
         reg.definePartialInstance(IEventBus, {
           subscribe: () => toDisposable(() => {}),
         });
+        reg.defineInstance(IAgentUltracodeService, ultracodeService);
         reg.defineInstance(ISessionToolPolicyGate, {
           _serviceBrand: undefined,
           get disabledTools() {
@@ -172,6 +188,7 @@ describe('AgentToolActivationService', () => {
     alphaConstructions = 0;
     betaConstructions = 0;
     gammaConstructions = 0;
+    ultracodeState.isActive = false;
     _clearAgentToolContributionsForTests();
     delete profileData.activeToolNames;
     delete profileData.disallowedTools;
@@ -249,6 +266,24 @@ describe('AgentToolActivationService', () => {
 
     expect(ix.get(IAgentToolRegistryService).resolve('Gamma')).toBeUndefined();
     expect(gammaConstructions).toBe(0);
+  });
+
+  it('gates the Workflow tool contribution on ultracode being active', () => {
+    const workflow = savedContributions.find((c) => c.options.name === 'Workflow');
+    expect(workflow).toBeDefined();
+    const when = workflow!.options.when;
+    expect(when).toBeDefined();
+
+    const accessor = {
+      get: (id: ServiceIdentifier<unknown>) => {
+        if (id === IAgentUltracodeService) return ultracodeService;
+        throw new Error(`unknown service in when-predicate accessor: ${String(id)}`);
+      },
+    } as unknown as ServicesAccessor;
+
+    expect(when!(accessor)).toBe(false);
+    ultracodeState.isActive = true;
+    expect(when!(accessor)).toBe(true);
   });
 
   it('honors the workspace tool-policy veto before the profile', async () => {
@@ -412,7 +447,7 @@ describe('AgentToolActivationService', () => {
     });
 
     it('feeds every built-in contribution through the App-scope assembly unchanged', async () => {
-      expect(savedContributions).toHaveLength(21);
+      expect(savedContributions).toHaveLength(22);
       for (const contribution of savedContributions) {
         registerAgentToolService(contribution.id, contribution.ctor, contribution.options);
       }

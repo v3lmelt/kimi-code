@@ -1,11 +1,11 @@
 /**
- * Native `kimi acp` implementation.
+ * Native `hasu acp` implementation.
  *
  * Starts the Agent Client Protocol (ACP) server backed directly by the
  * DI × Scope agent engine (`agent-core-v2`) over stdio, so ACP-compatible
- * clients can drive a kimi-code session on the default engine.
+ * clients can drive a hasu session on the default engine.
  *
- * Wire-up mirrors `kimi acp` for the parts that are host-independent:
+ * Wire-up mirrors `hasu acp` for the parts that are host-independent:
  *  - `--login` pivots into the shared device-code login flow (the entry point
  *    ACP clients hit via the first-class `AuthMethodTerminal` path, re-invoking
  *    the agent binary with the advertised `args:['--login']`).
@@ -16,7 +16,7 @@
  *
  * `@moonshot-ai/acp-server` (and its `agent-core-v2` engine) is loaded via a
  * lazy dynamic import so parsing the CLI does not initialize the ACP engine —
- * mirroring the `kimi server run` v2 routing in `#/cli/sub/server/run.ts`.
+ * mirroring the `hasu server run` v2 routing in `#/cli/sub/server/run.ts`.
  */
 
 import type { Command } from 'commander';
@@ -30,7 +30,7 @@ import { runLoginFlow } from './login-flow';
 export function registerNativeAcpCommand(parent: Command): void {
   parent
     .command('acp')
-    .description('Run kimi-code as an Agent Client Protocol (ACP) server over stdio.')
+    .description('Run hasu as an Agent Client Protocol (ACP) server over stdio.')
     .option(
       '--login',
       'Run the device-code login flow then exit (entry point for ACP terminal-auth).',
@@ -57,7 +57,7 @@ export function registerNativeAcpCommand(parent: Command): void {
         const { runAcpServer } = await import('@moonshot-ai/acp-server');
         await runAcpServer({
           homeDir: getDataDir(),
-          agentInfo: { name: 'Kimi Code CLI', version: getVersion() },
+          agentInfo: { name: 'Hasu CLI', version: getVersion() },
           ...(terminalAuthEnv ? { terminalAuthEnv } : {}),
           ...(legacyCommand !== undefined && legacyCommand.length > 0
             ? { terminalAuthLegacyCommand: legacyCommand }

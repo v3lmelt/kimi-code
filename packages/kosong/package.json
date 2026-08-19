@@ -40,6 +40,8 @@
   "scripts": {
     "build": "tsdown",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "bench": "node --import tsx bench/bench.ts",
+    "bench:arguments-parse": "node --import tsx bench/arguments-parse.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {

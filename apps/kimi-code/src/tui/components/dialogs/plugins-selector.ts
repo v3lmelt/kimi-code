@@ -45,7 +45,7 @@ const WEB_BRIDGE_ENTRY: PluginMarketplaceEntry = {
   source: WEB_BRIDGE_URL,
   tier: 'official',
   homepage: WEB_BRIDGE_URL,
-  description: 'Control your real browser from Kimi Code — navigate, click, type, and screenshot',
+  description: 'Control your real browser from Hasu — navigate, click, type, and screenshot',
 };
 
 // Only the hardcoded pinned row should open the WebBridge install page. Match
@@ -102,10 +102,12 @@ export class PluginMcpSelectorComponent extends Container implements Focusable {
     }
     if (matchesKey(data, Key.up)) {
       this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+      this.bump();
       return;
     }
     if (matchesKey(data, Key.down)) {
       this.selectedIndex = Math.min(this.items.length - 1, this.selectedIndex + 1);
+      this.bump();
       return;
     }
     if (matchesKey(data, Key.enter) || matchesKey(data, Key.space) || printableChar(data) === ' ') {
@@ -235,7 +237,7 @@ export interface PluginInstallTrustConfirmOptions {
 /**
  * Confirmation shown before installing a third-party (unofficial) plugin.
  * Defaults to "Exit" so the user must explicitly switch to "Trust and install"
- * to proceed with a plugin that Kimi has not reviewed.
+ * to proceed with a plugin that Hasu has not reviewed.
  */
 export class PluginInstallTrustConfirmComponent extends ChoicePickerComponent {
   constructor(opts: PluginInstallTrustConfirmOptions) {
@@ -244,7 +246,7 @@ export class PluginInstallTrustConfirmComponent extends ChoicePickerComponent {
       hint: '↑↓ navigate · Enter/Space select · ←/Esc cancel',
       formatHint: mutedHintLine,
       notice:
-        '⚠️ This is a third-party plugin that Kimi has not reviewed. It can bundle MCP servers, ' +
+        '⚠️ This is a third-party plugin that Hasu has not reviewed. It can bundle MCP servers, ' +
         'skills, or files that run code and access your workspace. Install it only if you ' +
         'trust the source.',
       noticeTone: 'warning',
@@ -518,6 +520,7 @@ export class PluginsPanelComponent extends Container implements Focusable {
       this.activeTabIndex = (this.activeTabIndex + 1) % PLUGINS_PANEL_TABS.length;
       this.selectedIndex = 0;
       this.requestMarketplaceIfNeeded();
+      this.bump();
       return;
     }
     if (matchesKey(data, Key.shift('tab'))) {
@@ -525,6 +528,7 @@ export class PluginsPanelComponent extends Container implements Focusable {
         (this.activeTabIndex - 1 + PLUGINS_PANEL_TABS.length) % PLUGINS_PANEL_TABS.length;
       this.selectedIndex = 0;
       this.requestMarketplaceIfNeeded();
+      this.bump();
       return;
     }
     switch (this.activeTab.id) {
@@ -537,6 +541,9 @@ export class PluginsPanelComponent extends Container implements Focusable {
         return;
       case 'custom':
         this.customInput.handleInput(data);
+        // The custom-input line renders into this panel's hand-drawn output;
+        // bump so a parent container does not serve its cached lines.
+        this.bump();
         return;
     }
   }
@@ -545,10 +552,12 @@ export class PluginsPanelComponent extends Container implements Focusable {
     const plugins = this.opts.installed;
     if (matchesKey(data, Key.up)) {
       this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+      this.bump();
       return;
     }
     if (matchesKey(data, Key.down)) {
       this.selectedIndex = Math.min(plugins.length - 1, this.selectedIndex + 1);
+      this.bump();
       return;
     }
     const plugin = plugins[this.selectedIndex];
@@ -593,12 +602,14 @@ export class PluginsPanelComponent extends Container implements Focusable {
     const entries = this.activeTab.id === 'official' ? this.officialEntries : this.thirdPartyEntries;
     if (matchesKey(data, Key.up)) {
       this.selectedIndex = Math.max(0, this.selectedIndex - 1);
+      this.bump();
       return;
     }
     if (matchesKey(data, Key.down)) {
       // Clamp to 0 while the catalog is still loading (entries empty); otherwise
       // `entries.length - 1` is -1 and a later Enter reads `entries[-1]`.
       this.selectedIndex = entries.length === 0 ? 0 : Math.min(entries.length - 1, this.selectedIndex + 1);
+      this.bump();
       return;
     }
     if (matchesKey(data, Key.enter)) {

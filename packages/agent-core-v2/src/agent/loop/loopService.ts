@@ -52,8 +52,13 @@ import { OrderedHookSlot } from '#/hooks';
 
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
 import { isVacuousContentPart } from '#/agent/contextMemory/vacuousContent';
+import { isBudgetNearingExhaustion } from '#/agent/goal/goalService';
+import { IAgentProfileService } from '#/agent/profile/profile';
 import { IAgentStateService } from '#/agent/state/agentState';
+import { IAgentSystemReminderService } from '#/agent/systemReminder/systemReminder';
 import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
+import { IAgentTokenCountingService } from '#/agent/tokenCounting/tokenCounting';
+import { IAgentToolResultTruncationService } from '#/agent/toolResultTruncation/toolResultTruncation';
 import type {
   TurnEndedEvent as TurnEndedTelemetryEvent,
   TurnInterruptedEvent,
@@ -81,6 +86,7 @@ import {
   type TurnResult,
 } from './loop';
 import {
+  ContinuationStepRequest,
   type StepRequest,
   type TurnSeed,
 } from './stepRequest';
@@ -99,6 +105,28 @@ export const loopLastRequestTraceIdKey = defineState<string | undefined>(
   () => undefined as string | undefined,
 );
 export const loopDisposingKey = defineState<boolean>('loop.disposing', () => false);
+
+/** Cumulative truncation-recovery rounds consumed across turns, persisted to
+ *  guard against a runaway continue/escalate loop when a model is stuck. */
+export const loopTruncationRecoveryUsedKey = defineState<number>(
+  'loop.truncationRecoveryUsed',
+  () => 0,
+);
+
+const RESUME_DIRECTLY_REMINDER = [
+  'Resume directly — no apology, no recap, no preamble.',
+  'Pick up mid-thought from where the previous response was cut off at the output-token limit.',
+  'Finish the response that was truncated.',
+].join(' ');
+
+const CONTEXT_BUDGET_NUDGE = [
+  'Context is nearly full.',
+  'Converge on completing the current task in this turn.',
+  'Avoid starting new discretionary work or long tool calls.',
+].join(' ');
+
+const MAX_TRUNCATION_RECOVERY_ROUNDS = 3;
+const MAX_TRUNCATION_RECOVERY_TOTAL = 9;
 
 // NOTE: stays Disposable — its own 'config' collides with the Fiber
 export class AgentLoopService extends Disposable implements IAgentLoopService {
@@ -129,11 +157,17 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     @ITelemetryService private readonly telemetry: ITelemetryService,
     @IAgentTelemetryContextService private readonly telemetryContext: IAgentTelemetryContextService,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IAgentProfileService private readonly profile: IAgentProfileService,
+    @IAgentTokenCountingService private readonly tokenCounting: IAgentTokenCountingService,
+    @IAgentSystemReminderService private readonly reminders: IAgentSystemReminderService,
+    @IAgentToolResultTruncationService
+    private readonly resultTruncation: IAgentToolResultTruncationService,
   ) {
     super();
     this.states.register(loopNextReservedTurnIdKey);
     this.states.register(loopLastRequestTraceIdKey);
     this.states.register(loopDisposingKey);
+    this.states.register(loopTruncationRecoveryUsedKey);
   }
 
   private get nextReservedTurnId(): number | undefined {
@@ -613,7 +647,15 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
       while (true) {
         try {
           const begun = this.beginLoopStep(runtime);
-          if ('result' in begun) return begun.result;
+          if ('result' in begun) {
+            const ended = begun.result;
+            if (ended.type === 'completed' && ended.truncated) {
+              const recovered = await this.recoverTruncation(runtime, ended);
+              if (recovered !== undefined) return recovered;
+              continue;
+            }
+            return ended;
+          }
           runtime.current = begun.step;
           const result = await this.executeLoopStep(
             runtime.turnId,
@@ -622,9 +664,11 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
             begun.step.number,
             begun.step.uuid,
             options.onStarted,
+            runtime.maxOutputSize,
           );
           const completed = this.completeLoopStep(runtime, result);
           if (completed !== undefined) return completed;
+          this.nudgeContextBudget(runtime);
         } catch (error) {
           const disposition = await this.handleLoopStepError(runtime, error);
           if (disposition.type === 'return') return disposition.result;
@@ -633,6 +677,56 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     } finally {
       runtime.queue.abortTurnScoped();
     }
+  }
+
+  /** Turns a truncated terminal step into a bounded recovery chain instead of
+   *  silently ending: escalate the output budget once (2x), then inject a
+   *  `Resume directly` meta-instruction and run another round. Capped per turn
+   *  and across turns (persisted in `agentState`) to prevent runaway. */
+  private async recoverTruncation(
+    runtime: LoopRuntime,
+    ended: LoopRunResult,
+  ): Promise<LoopRunResult | undefined> {
+    if (this.states.get(loopTruncationRecoveryUsedKey) >= MAX_TRUNCATION_RECOVERY_TOTAL) {
+      return ended;
+    }
+    if (runtime.truncationRounds >= MAX_TRUNCATION_RECOVERY_ROUNDS) return ended;
+    const baseMaxOutputSize = this.profile.getMaxOutputSize();
+    if (baseMaxOutputSize === undefined || baseMaxOutputSize <= 0) return ended;
+    runtime.truncationRounds += 1;
+    this.states.set(loopTruncationRecoveryUsedKey, this.states.get(loopTruncationRecoveryUsedKey) + 1);
+    if (runtime.maxOutputSize === undefined) runtime.maxOutputSize = baseMaxOutputSize * 2;
+    this.reminders.appendSystemReminder(RESUME_DIRECTLY_REMINDER, {
+      kind: 'system_trigger',
+      name: 'resume_directly',
+    });
+    if (runtime.job !== undefined) {
+      this.enqueueStep(runtime.job, new ContinuationStepRequest({ kind: 'truncation_resume' }));
+    } else {
+      runtime.queue.enqueue(new ContinuationStepRequest({ kind: 'truncation_resume' }));
+    }
+    return undefined;
+  }
+
+  /** Budget-driven continuation nudge: once the context window is nearly full
+   *  (diminishing returns), remind the model to converge on this turn. Injected
+   *  through `systemReminder` so the request cache prefix stays untouched. */
+  private nudgeContextBudget(runtime: LoopRuntime): void {
+    if (runtime.budgetNudged) return;
+    const budget = this.contextBudget();
+    if (budget === undefined || !isBudgetNearingExhaustion(budget.used, budget.budget)) return;
+    runtime.budgetNudged = true;
+    this.reminders.appendSystemReminder(CONTEXT_BUDGET_NUDGE, {
+      kind: 'system_trigger',
+      name: 'context_budget_nudge',
+    });
+  }
+
+  private contextBudget(): { readonly used: number; readonly budget: number } | undefined {
+    const capability = this.profile.getModelCapabilities();
+    const budget = capability.max_input_tokens ?? capability.max_context_tokens;
+    if (budget === undefined || budget <= 0) return undefined;
+    return { used: this.tokenCounting.get().size, budget };
   }
 
   private createLoopRuntime(options: LoopRunOptions): LoopRuntime {
@@ -645,6 +739,9 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
       steps: 0,
       lastStopReason: undefined,
       current: undefined,
+      maxOutputSize: undefined,
+      truncationRounds: 0,
+      budgetNudged: false,
     };
   }
 
@@ -806,13 +903,17 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     currentStep: number,
     stepUuid: string,
     onStarted: ((step: number) => void) | undefined,
+    maxOutputSize: number | undefined,
   ): Promise<StepExecutionResult> {
     this.activeRequestTrace = undefined;
     await this.hooks.onWillBeginStep.run({ turnId, step: currentStep, signal });
     const markStepStarted = this.beginStep(turnId, signal, currentStep, stepUuid, onStarted);
     const streamParts = this.createStreamPartHandler(turnId, currentStep, markStepStarted);
     const request = this.llmRequester.start(
-      { source: { type: 'turn', turnId, step: currentStep } },
+      {
+        source: { type: 'turn', turnId, step: currentStep },
+        ...(maxOutputSize === undefined ? {} : { maxOutputSize }),
+      },
       streamParts.handle,
       signal,
     );
@@ -946,6 +1047,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
         toolCallId: toolResult.toolCallId,
         result: { output: result.output, isError: result.isError, note: result.note },
       });
+      this.resultTruncation.noteResultTime?.(toolResult.toolCallId);
       if (result.stopTurn === true) stopTurn = true;
     }
     finishReason = stopTurn ? 'completed' : 'tool_calls';
@@ -1173,6 +1275,12 @@ interface LoopRuntime {
   steps: number;
   lastStopReason: FinishReason | undefined;
   current: StepRuntime | undefined;
+  /** Escalated max output budget for the next request during truncation recovery. */
+  maxOutputSize: number | undefined;
+  /** Truncation-recovery rounds consumed in this run (per-turn cap). */
+  truncationRounds: number;
+  /** Whether the context-budget nudge was already injected this run. */
+  budgetNudged: boolean;
 }
 
 interface StepRuntime {

@@ -1,5 +1,5 @@
 /**
- * Kimi Code entry point.
+ * Hasu entry point.
  *
  * Parses CLI arguments via Commander.js, validates options, runs the
  * outer update preflight, then delegates to the requested UI runner.
@@ -46,7 +46,7 @@ import { runNativeAssetSmokeIfRequested } from './native/smoke';
  * Outcome of a CLI command run, reported back to the process entrypoint.
  *
  * `handleMainCommand` is a reusable, unit-tested handler — it must not terminate
- * the process itself. It reports here whether a headless (`kimi -p`) run
+ * the process itself. It reports here whether a headless (`hasu -p`) run
  * completed so the entrypoint (the only place that owns the process) can arm the
  * force-exit fallback.
  */
@@ -90,7 +90,7 @@ export async function handleMainCommand(
   return { headlessCompleted: false };
 }
 
-/** `kimi migrate`: launch the migration screen only, then exit. */
+/** `hasu migrate`: launch the migration screen only, then exit. */
 async function handleMigrateCommand(version: string): Promise<void> {
   await runShell(MIGRATE_CLI_OPTIONS, version, { migrateOnly: true });
 }
@@ -126,7 +126,7 @@ export async function handleUpgradeCommand(version: string): Promise<void> {
   process.exit(exitCode);
 }
 
-/** A neutral CLIOptions value — `kimi migrate` never opens a chat session. */
+/** A neutral CLIOptions value — `hasu migrate` never opens a chat session. */
 const MIGRATE_CLI_OPTIONS: CLIOptions = {
   session: undefined,
   continue: false,
@@ -141,6 +141,43 @@ const MIGRATE_CLI_OPTIONS: CLIOptions = {
   agentFiles: [],
 };
 
+/**
+ * Options that consume the following argv token as their value, so a token
+ * that happens to look like `--help`/`--version` is not one (e.g.
+ * `kimi -p --help` prompts with the text "--help").
+ */
+const VALUE_TAKING_OPTIONS = new Set([
+  '-p',
+  '--prompt',
+  '-m',
+  '--model',
+  '--output-format',
+  '--skills-dir',
+  '--agent',
+  '--agent-file',
+  '--add-dir',
+]);
+
+/**
+ * Best-effort Commander-equivalent detection of a bare `--version`/`-V`/
+ * `--help`/`-h` request. When such a flag is present, Commander prints
+ * version/help and exits before any command action runs, so the SEA worker
+ * installs in `main()` would be wasted work. Mirrors Commander's token
+ * consumption: values of the options above are skipped, `--` ends option
+ * parsing, and optional-value options (`-S`, `-r`) never consume an
+ * option-looking token. Missing a combined short flag (e.g. `-Vy`) only
+ * means the installs run needlessly — it never changes behavior.
+ */
+export function argvRequestsVersionOrHelp(argv: string[]): boolean {
+  for (let index = 1; index < argv.length; index += 1) {
+    const arg = argv[index]!;
+    if (arg === '--') break;
+    if (arg === '--version' || arg === '-V' || arg === '--help' || arg === '-h') return true;
+    if (VALUE_TAKING_OPTIONS.has(arg)) index += 1;
+  }
+  return false;
+}
+
 export function main(): void {
   process.title = PROCESS_NAME;
   installCrashHandlers();
@@ -151,25 +188,29 @@ export function main(): void {
   installNativeModuleHook();
   // Best-effort SEA worker installation. Diagnostics are trace-only and avoid
   // exposing the user's cache path; failure keeps MiniDb's bounded inline mode.
-  const workerInstall = installMinidbTextBuildWorker();
-  startupTrace(
-    workerInstall.status === 'installed'
-      ? `minidb-worker:installed basename=${workerInstall.basename} sha256=${workerInstall.assetSha256}`
-      : workerInstall.status === 'failed'
-        ? `minidb-worker:failed code=${workerInstall.errorCode} sha256=${workerInstall.assetSha256 ?? 'unknown'}`
-        : `minidb-worker:${workerInstall.status}`,
-  );
-  // Same pattern for the global-search worker: extracted from the SEA blob so
-  // the search index runs off the main thread; a failure leaves the search
-  // surface degraded (the `search_worker` flag restores the inline host).
-  const searchWorkerInstall = installKapSearchWorker();
-  startupTrace(
-    searchWorkerInstall.status === 'installed'
-      ? `search-worker:installed basename=${searchWorkerInstall.basename} sha256=${searchWorkerInstall.assetSha256}`
-      : searchWorkerInstall.status === 'failed'
-        ? `search-worker:failed code=${searchWorkerInstall.errorCode} sha256=${searchWorkerInstall.assetSha256 ?? 'unknown'}`
-        : `search-worker:${searchWorkerInstall.status}`,
-  );
+  // `--version`/`--help` are handled by Commander before any command action,
+  // so the extraction is skipped for those invocations.
+  if (!argvRequestsVersionOrHelp(process.argv)) {
+    const workerInstall = installMinidbTextBuildWorker();
+    startupTrace(
+      workerInstall.status === 'installed'
+        ? `minidb-worker:installed basename=${workerInstall.basename} sha256=${workerInstall.assetSha256}`
+        : workerInstall.status === 'failed'
+          ? `minidb-worker:failed code=${workerInstall.errorCode} sha256=${workerInstall.assetSha256 ?? 'unknown'}`
+          : `minidb-worker:${workerInstall.status}`,
+    );
+    // Same pattern for the global-search worker: extracted from the SEA blob so
+    // the search index runs off the main thread; a failure leaves the search
+    // surface degraded (the `search_worker` flag restores the inline host).
+    const searchWorkerInstall = installKapSearchWorker();
+    startupTrace(
+      searchWorkerInstall.status === 'installed'
+        ? `search-worker:installed basename=${searchWorkerInstall.basename} sha256=${searchWorkerInstall.assetSha256}`
+        : searchWorkerInstall.status === 'failed'
+          ? `search-worker:failed code=${searchWorkerInstall.errorCode} sha256=${searchWorkerInstall.assetSha256 ?? 'unknown'}`
+          : `search-worker:${searchWorkerInstall.status}`,
+    );
+  }
   if (runNativeAssetSmokeIfRequested()) return;
 
   // Start the background cleanup of stale native cache. Fire-and-forget; must not block startup or throw.
@@ -191,7 +232,7 @@ export function main(): void {
           // Only the process entrypoint disposes of the process. Print mode
           // relies on the event loop draining to exit; flush any buffered output
           // and then arm an unref'd fallback so a stray ref'd handle left over
-          // from the run can't wedge a completed `kimi -p` until an external
+          // from the run can't wedge a completed `hasu -p` until an external
           // timeout. A healthy run drains and exits before the fallback fires.
           if (outcome.headlessCompleted) {
             await finalizeHeadlessRun(
@@ -208,7 +249,7 @@ export function main(): void {
           // await, the failed run's `finally` cleanup has already torn down its
           // ref'd handles (sockets, timers, background tasks). If the event loop
           // drains during the await, Node exits on its own with the DEFAULT code
-          // 0 and `process.exit(1)` never runs — headless (`kimi -p`) failures
+          // 0 and `process.exit(1)` never runs — headless (`hasu -p`) failures
           // would then exit 0 nondeterministically. Setting `process.exitCode`
           // up front makes that drain-exit report failure too.
           process.exitCode = 1;

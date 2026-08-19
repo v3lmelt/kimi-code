@@ -3,10 +3,11 @@
  *
  * Owns the approval round-trip: publishes
  * `permission.approval.requested/resolved` through `eventBus`, awaits the
- * session approval broker (absent broker = auto-approve), records
- * session-scope approval rules through `permissionRules`, reports
- * `permission_approval_result` through `telemetry`, and folds ask
- * continuations back into authorize results. Bound at Agent scope.
+ * session approval broker (absent broker = fail-closed `unavailable` deny,
+ * never auto-approve), records session-scope approval rules through
+ * `permissionRules`, reports `permission_approval_result` through
+ * `telemetry`, and folds ask continuations back into authorize results. Bound
+ * at Agent scope.
  */
 
 import { IInstantiationService } from '#/_base/di/instantiation';
@@ -30,11 +31,11 @@ import type {
 } from '#/agent/toolExecutor/toolHooks';
 import { IEventBus } from '#/app/event/eventBus';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
-import { ISessionApprovalService } from '#/session/approval/approval';
+import { ISessionApprovalService, type ApprovalResponse as SessionApprovalResponse } from '#/session/approval/approval';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import type { ToolInputDisplay } from '#/tool/toolInputDisplay';
 
-import { IAgentToolApprovalService } from './toolApproval';
+import { IAgentToolApprovalService, type ToolApprovalResponse } from './toolApproval';
 
 export type PermissionApprovalRequestContext = ApprovalRequest & {
   readonly sessionId?: string;
@@ -46,6 +47,10 @@ export type PermissionApprovalRequestContext = ApprovalRequest & {
 export type PermissionApprovalResultContext = PermissionApprovalRequestContext &
   (
     | ApprovalResponse
+    | {
+        readonly decision: 'unavailable';
+        readonly feedback?: string;
+      }
     | {
         readonly decision: 'error';
         readonly error: string;
@@ -128,10 +133,13 @@ export class AgentToolApprovalService extends Service implements IAgentToolAppro
     } satisfies PermissionApprovalRequestContext;
     const startedAt = Date.now();
 
-    let response: ApprovalResponse;
+    let response: ToolApprovalResponse;
     const approvalService = this.tryApprovalService();
     if (approvalService === undefined) {
-      response = { decision: 'approved' };
+      // No approval channel exists. Fail closed: resolve to the explicit
+      // `unavailable` outcome (a deny unless a policy's resolveApproval
+      // explicitly opts into fail-open) instead of auto-approving.
+      response = { decision: 'unavailable' };
     } else {
       this.eventBus.publish({ type: 'permission.approval.requested', ...approvalContext });
       try {
@@ -186,7 +194,10 @@ export class AgentToolApprovalService extends Service implements IAgentToolAppro
       toolName: name,
       action,
       sessionApprovalRule,
-      result: response,
+      // `unavailable` is a local fail-closed widening of the broker's
+      // response union; the rules ledger treats any non-approved decision as
+      // a no-op, so the cast is safe.
+      result: response as SessionApprovalResponse,
     });
     this.telemetry.track2('permission_approval_result', {
       turn_id: context.turnId,
@@ -195,9 +206,15 @@ export class AgentToolApprovalService extends Service implements IAgentToolAppro
       tool_name: name,
       permission_mode: this.modeService.mode,
       result:
-        response.decision === 'approved' && response.scope === 'session'
-          ? 'approved_for_session'
-          : response.decision,
+        response.decision === 'unavailable'
+          ? // The telemetry result union has no `unavailable` member (the
+            // broker-facing union is narrower); report the fail-closed
+            // outcome as a rejection for analytics. The model-visible
+            // message still distinguishes "no approval channel".
+            'rejected'
+          : response.decision === 'approved' && response.scope === 'session'
+            ? 'approved_for_session'
+            : response.decision,
       approval_surface: display.kind,
       duration_ms: Date.now() - startedAt,
       session_cache_written: sessionApprovalRule !== undefined,
@@ -205,7 +222,10 @@ export class AgentToolApprovalService extends Service implements IAgentToolAppro
       trace_id: context.trace?.traceId,
     });
 
-    const resolved = result.resolveApproval?.(response);
+    // The `unavailable` decision is surfaced to the policy's ask continuation
+    // (typed against the base `ApprovalResponse`) so a policy can explicitly
+    // fail open; by default a non-`approved` decision denies below.
+    const resolved = result.resolveApproval?.(response as ApprovalResponse);
     if (resolved !== undefined) {
       return this.resolvePermissionResolution(resolved, context, origin);
     }
@@ -218,16 +238,18 @@ export class AgentToolApprovalService extends Service implements IAgentToolAppro
 
   formatApprovalRejectionMessage(
     toolName: string,
-    result: Pick<ApprovalResponse, 'decision' | 'feedback'>,
+    result: Pick<ToolApprovalResponse, 'decision' | 'feedback'>,
   ): string {
     const suffix =
       result.feedback !== undefined && result.feedback.length > 0
         ? ` Reason: ${result.feedback}`
         : '';
     const prefix =
-      result.decision === 'cancelled'
-        ? `Tool "${toolName}" was not run because the approval request was cancelled.`
-        : `Tool "${toolName}" was not run because the user rejected the approval request.`;
+      result.decision === 'unavailable'
+        ? `Tool "${toolName}" was not run because no approval channel is available to ask the user; the call was treated as denied.`
+        : result.decision === 'cancelled'
+          ? `Tool "${toolName}" was not run because the approval request was cancelled.`
+          : `Tool "${toolName}" was not run because the user rejected the approval request.`;
     if (this.usesWorkerRejectionGuidance()) {
       return `${prefix}${suffix} Try a different approach — don't retry the same call, don't attempt to bypass the restriction.`;
     }

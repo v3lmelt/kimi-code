@@ -1,7 +1,9 @@
 /**
  * Color interpolation helpers for animated UI (stall fade, tool flash,
- * thinking glow). Palette tokens are `#rrggbb` hex strings.
+ * thinking glow, ultracode ripple). Palette tokens are `#rrggbb` hex strings.
  */
+
+import chalk from 'chalk';
 
 interface RGB {
   r: number;
@@ -30,4 +32,35 @@ export function interpolateHexColor(hexA: string, hexB: string, t: number): stri
   const bl = Math.round(a.b + (b.b - a.b) * k);
   const toHex = (n: number): string => n.toString(16).padStart(2, '0');
   return `#${toHex(r)}${toHex(g)}${toHex(bl)}`;
+}
+
+/**
+ * Yellow ripple for the animated ultracode label. Each character of
+ * `text` is swept by a traveling cosine wave on a wall-clock loop (default 2s
+ * period), so a highlight band glides along the label as its color blends
+ * between `from` and `to` (the palette's `effortUltra` and a lighter yellow).
+ * Spaces are left untouched. Cheap by design — the label is ~9 characters.
+ */
+export function rippleText(
+  text: string,
+  from: string,
+  to: string,
+  wallClockMs: number,
+  bold = false,
+  periodMs = 2_000,
+): string {
+  const chars = Array.from(text);
+  const count = chars.length;
+  if (count === 0) return '';
+  const phase = (wallClockMs % periodMs) / periodMs; // 0..1 over the period
+  return chars
+    .map((char, position) => {
+      if (char === ' ') return char;
+      const at = count <= 1 ? 0 : position / (count - 1);
+      // Traveling cosine: 1 where the ripple currently sits, 0 half a period away.
+      const blend = 0.5 + 0.5 * Math.cos(2 * Math.PI * (at - phase));
+      const color = interpolateHexColor(from, to, blend);
+      return bold ? chalk.hex(color).bold(char) : chalk.hex(color)(char);
+    })
+    .join('');
 }

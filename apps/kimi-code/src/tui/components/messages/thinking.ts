@@ -12,14 +12,19 @@
 
 import { bumpVersion, Text, truncateToWidth, type Component, type TUI } from '@moonshot-ai/pi-tui';
 
-import { MESSAGE_INDENT, THINKING_PREVIEW_LINES } from '#/tui/constant/rendering';
+import { MESSAGE_INDENT, THINKING_LIVE_WINDOW_CHARS, THINKING_PREVIEW_LINES } from '#/tui/constant/rendering';
 import { STATUS_BULLET, THINKING_MARK } from '#/tui/constant/symbols';
 import { currentTheme } from '#/tui/theme';
 import { isRenderCacheEnabled } from '#/tui/utils/render-cache';
+import { windowTail } from '#/tui/utils/tail-window';
 
 export type ThinkingRenderMode = 'live' | 'finalized';
 
 export class ThinkingComponent implements Component {
+  // Versioned from construction. Every mutation (setText / setExpanded /
+  // setCollapse / finalize / theme invalidate) goes through markRenderDirty()
+  // -> bumpVersion(), so the transcript container can short-circuit idle blocks.
+  version = 0;
   private text: string;
   private showMarker: boolean;
   private mode: ThinkingRenderMode;
@@ -49,7 +54,19 @@ export class ThinkingComponent implements Component {
     this.showMarker = showMarker;
     this.mode = mode;
     this.collapse = collapse;
-    this.textComponent = new Text(this.styled(text), 0, 0);
+    this.textComponent = new Text(this.styled(this.displayText()), 0, 0);
+  }
+
+  /**
+   * Text fed to the underlying Text component. While live, only a bounded tail
+   * window is styled and wrapped so each flush costs O(window) instead of
+   * re-styling/re-wrapping the whole growing draft; the full text stays on the
+   * component and is restored by {@link finalize}. Finalized mode always wraps
+   * the full text.
+   */
+  private displayText(): string {
+    if (this.mode === 'finalized') return this.text;
+    return windowTail(this.text, THINKING_LIVE_WINDOW_CHARS);
   }
 
   private markRenderDirty(): void {
@@ -59,14 +76,14 @@ export class ThinkingComponent implements Component {
 
   invalidate(): void {
     this.markRenderDirty();
-    this.textComponent.setText(this.styled(this.text));
+    this.textComponent.setText(this.styled(this.displayText()));
   }
 
   setText(text: string): void {
     if (this.text === text) return;
     this.text = text;
     this.markRenderDirty();
-    this.textComponent.setText(this.styled(text));
+    this.textComponent.setText(this.styled(this.displayText()));
   }
 
   private styled(text: string): string {
@@ -75,6 +92,9 @@ export class ThinkingComponent implements Component {
 
   finalize(): void {
     this.mode = 'finalized';
+    // Live mode only styled/wrapped the tail window; restore the full text so
+    // the finalized preview and the expanded view wrap the complete content.
+    this.textComponent.setText(this.styled(this.displayText()));
     this.markRenderDirty();
   }
 

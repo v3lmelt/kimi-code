@@ -187,14 +187,16 @@ export class SessionLegacyService implements ISessionLegacyService {
       maxTokens = resolveDefaultModelContextTokens(agent) ?? 0;
     }
     const tokens = tokenCounting.statusSize();
-    const planData = await plan.status();
+    // `currentPlanFilePath()` is the sync, file-system-free active-flag read —
+    // `status()` would read the whole plan file from disk on every poll.
+    const planMode = plan.currentPlanFilePath() !== null;
 
     return {
       busy: this.readBusy(sessionId),
       model: model === '' ? undefined : model,
       thinking_level: model === '' ? '' : profile.getEffectiveThinkingLevel(),
       permission: permission.mode,
-      plan_mode: planData !== null,
+      plan_mode: planMode,
       swarm_mode: swarm.isActive,
       context_tokens: tokens,
       max_context_tokens: maxTokens > 0 ? maxTokens : undefined,

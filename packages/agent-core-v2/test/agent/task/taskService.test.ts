@@ -150,6 +150,7 @@ describe('AgentTaskService', () => {
     });
     ix.stub(IFileSystemStorageService, {
       read: async () => undefined,
+      size: async () => undefined,
       readStream: async function* () {},
       write: async () => {},
       writeStream: async () => {},
@@ -818,6 +819,7 @@ describe('AgentTaskService', () => {
     let persistedChars = 0;
     ix.stub(IFileSystemStorageService, {
       read: async () => undefined,
+      size: async () => undefined,
       readStream: async function* () {},
       write: async () => {},
       writeStream: async () => {},

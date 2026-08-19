@@ -33,6 +33,7 @@ import { Error2, ErrorCodes, toErrorMessage } from '#/errors';
 import { isAbortError } from '#/_base/utils/abort';
 
 import type { ExecutableTool, ExecutableToolContext, ExecutableToolResult } from '#/tool/toolContract';
+import { ToolAccesses } from '#/tool/toolContract';
 import { mcpResultToExecutableOutput } from '#/agent/mcp/output';
 import type { MCPClient, MCPToolResult } from '#/mcpCore/types';
 import {
@@ -63,6 +64,12 @@ export function createMcpTool(
     parameters: tool.parameters,
     resolveExecution: (args) => ({
       approvalRule: qualifiedName,
+      // A tool the server declared read-only maps to no resource accesses, so
+      // it never conflicts with anything and can run concurrently and enter
+      // read-only auto-approval. Without a readOnlyHint the default `all()`
+      // access is kept (conflicts with everything).
+      accesses:
+        tool.annotations?.readOnlyHint === true ? ToolAccesses.none() : ToolAccesses.all(),
       execute: async (context) => {
         if (options.isRemoved?.() === true) {
           return {

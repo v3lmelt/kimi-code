@@ -6,6 +6,14 @@ import { syncDir } from '../../utils/fs';
 import type { BlobStore } from './blobref';
 import { type AgentRecord, type AgentRecordPersistence } from './types';
 
+/**
+ * 自动落盘的合并窗口:窗口内到达的邻近记录合并为一批写入,避免
+ * LLM 流式输出期间每条记录都触发一次 open + fsync + close。
+ */
+const FLUSH_WINDOW_MS = 20;
+/** 积压条数阈值:超过后不等合并窗口,立即落盘。 */
+const FLUSH_BATCH_SIZE = 64;
+
 export interface FileSystemAgentRecordPersistenceOptions {
   readonly onError?: ((error: unknown) => void) | undefined;
   readonly blobStore?: BlobStore | undefined;
@@ -49,6 +57,12 @@ export class FileSystemAgentRecordPersistence implements AgentRecordPersistence 
   private readonly pendingRecords: AgentRecord[] = [];
   private shouldClear = false;
   private directorySynced = false;
+  /** 日志目录已确保存在:mkdir 结果按实例缓存,不再每批重复创建。 */
+  private directoryCreated = false;
+  /** 自动落盘的合并窗口定时器(窗口内到达的记录合并为一批)。 */
+  private flushTimer: ReturnType<typeof setTimeout> | undefined;
+  /** 合并窗口或立即落盘是否已排定。 */
+  private flushScheduled = false;
   private flushPromise: Promise<void> | undefined;
   private error: unknown;
 
@@ -111,12 +125,14 @@ export class FileSystemAgentRecordPersistence implements AgentRecordPersistence 
 
   async flush(): Promise<void> {
     this.throwIfError();
+    // 手动排空:取消挂起的合并窗口,立即写入,不等窗口到期。
+    this.cancelScheduledFlush();
     while (
       this.flushPromise !== undefined ||
       this.shouldClear ||
       this.pendingRecords.length > 0
     ) {
-      await this.ensureFlush();
+      await this.ensureFlush(false);
       this.throwIfError();
     }
   }
@@ -126,15 +142,50 @@ export class FileSystemAgentRecordPersistence implements AgentRecordPersistence 
   }
 
   private scheduleFlush(): void {
-    void this.ensureFlush().catch((error) => {
-      this.options.onError?.(error);
-    });
+    if (this.flushScheduled || this.flushPromise !== undefined) return;
+    this.flushScheduled = true;
+    if (this.shouldClear || this.pendingRecords.length >= FLUSH_BATCH_SIZE) {
+      // rewrite(shouldClear)与积压阈值:不等合并窗口,立即落盘。
+      this.flushScheduled = false;
+      void this.ensureFlush(true).catch((error) => {
+        this.options.onError?.(error);
+      });
+      return;
+    }
+    // 时间窗合并:窗口内到达的邻近记录只触发一批写入。
+    this.flushTimer = setTimeout(() => {
+      this.flushTimer = undefined;
+      this.flushScheduled = false;
+      if (
+        this.error === undefined &&
+        (this.shouldClear || this.pendingRecords.length > 0)
+      ) {
+        void this.ensureFlush(true).catch((error) => {
+          this.options.onError?.(error);
+        });
+      }
+    }, FLUSH_WINDOW_MS);
   }
 
-  private ensureFlush(): Promise<void> {
+  private cancelScheduledFlush(): void {
+    if (this.flushTimer !== undefined) {
+      clearTimeout(this.flushTimer);
+      this.flushTimer = undefined;
+    }
+    this.flushScheduled = false;
+  }
+
+  /**
+   * 排空全部待写记录。
+   *
+   * `coalesce=true`(自动 flush 链)时,批与批之间等待 `FLUSH_WINDOW_MS`
+   * 让邻近记录积累成批,避免流式写入期间每条记录都独立 fsync;手动
+   * flush() 传 `false`,保持立即排空的语义。
+   */
+  private ensureFlush(coalesce = false): Promise<void> {
     if (this.flushPromise !== undefined) return this.flushPromise;
 
-    const promise = this.drainPendingRecords()
+    const promise = this.drainPendingRecords(coalesce)
       .catch((error: unknown) => {
         this.error = error;
         // oxlint-disable-next-line typescript-eslint/only-throw-error
@@ -160,9 +211,13 @@ export class FileSystemAgentRecordPersistence implements AgentRecordPersistence 
     if (this.error !== undefined) throw this.error;
   }
 
-  private async drainPendingRecords(): Promise<void> {
+  private async drainPendingRecords(coalesce: boolean): Promise<void> {
     while (this.shouldClear || this.pendingRecords.length > 0) {
       await this.drainBatch();
+      // 批间合并窗口(仅自动 flush 链):等待期间新记录积累为下一批。
+      if (coalesce && this.pendingRecords.length > 0) {
+        await new Promise<void>((resolve) => setTimeout(resolve, FLUSH_WINDOW_MS));
+      }
     }
   }
 
@@ -179,7 +234,10 @@ export class FileSystemAgentRecordPersistence implements AgentRecordPersistence 
 
     const content = writable.map((e) => JSON.stringify(e) + '\n').join('');
     const directory = dirname(this.filePath);
-    await mkdir(directory, { recursive: true });
+    if (!this.directoryCreated) {
+      await mkdir(directory, { recursive: true });
+      this.directoryCreated = true;
+    }
 
     const fh = await open(this.filePath, shouldClear ? 'w' : 'a');
     try {

@@ -38,7 +38,9 @@ import { TOOL_SELECT_FLAG_ID } from './flag';
 import {
   IAgentToolSelectService,
   SELECT_TOOLS_TOOL_NAME,
+  toModelToolSchema,
   type LoadToolsResult,
+  type ModelToolSchema,
   type ShapedToolEntry,
 } from './toolSelect';
 
@@ -126,6 +128,12 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   shapeHistory(messages: readonly ContextMessage[]): readonly ContextMessage[] {
     if (this.enabled()) return this.shapeActiveHistory(messages);
     return stripDynamicToolContext(messages);
+  }
+
+  shapeToolsForModel(entries: readonly ToolInfo[]): readonly ModelToolSchema[] {
+    return this.shapeTools(entries)
+      .filter((entry) => entry.deferred !== true)
+      .map((entry) => toModelToolSchema(entry));
   }
 
   load(names: readonly string[]): LoadToolsResult {
@@ -290,11 +298,7 @@ export class AgentToolSelectService extends Service implements IAgentToolSelectS
   private schemaOf(name: string): Tool | undefined {
     const tool = this.toolRegistry.resolve(name);
     if (tool === undefined) return undefined;
-    return {
-      name: tool.name,
-      description: tool.description,
-      parameters: tool.parameters,
-    };
+    return toModelToolSchema(tool);
   }
 
   private activeEntries(entries: readonly ToolInfo[], disclosure: boolean): readonly ToolInfo[] {

@@ -25,6 +25,7 @@ import { IInstantiationService } from '#/_base/di/instantiation';
 import { Service } from '#/_base/di/service';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
+import { ILogService } from '#/_base/log/log';
 import { defineState } from '#/_base/state/stateRegistry';
 import { isPlainRecord } from '#/_base/utils/canonical-args';
 import { IAgentStateService } from '#/agent/state/agentState';
@@ -79,6 +80,38 @@ export const externalHooksStopHookContinuationUsedKey = defineState<boolean>(
   () => false,
 );
 
+/**
+ * Ceiling (ms) for the whole `UserPromptSubmit` trigger. Each configured hook
+ * command already carries its own per-command timeout (`hook.timeout` or the
+ * runner default), but a hook with a long per-command timeout can still hold the
+ * prompt-submit path open for seconds-to-minutes. This bounds the entire
+ * submit wait so a slow/misbehaving hook cannot stall input indefinitely.
+ */
+const HOOK_SUBMIT_TIMEOUT_MS = 30_000;
+
+/** Race a promise against a deadline; returns `undefined` when the deadline wins. */
+async function withSubmitTimeout<T>(
+  promise: Promise<T>,
+  timeoutMs: number,
+  onTimeout: () => void,
+): Promise<T | undefined> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race<T | undefined>([
+      promise,
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => {
+          timer = undefined;
+          onTimeout();
+          resolve(undefined);
+        }, timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
 export class AgentExternalHooksService extends Service implements IAgentExternalHooksService {
   declare readonly _serviceBrand: undefined;
 
@@ -90,6 +123,7 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
     @ISessionContext private readonly sessionContext: ISessionContext,
     @ISessionMetadata private readonly sessionMetadata: ISessionMetadata,
     @IAgentStateService private readonly states: IAgentStateService,
+    @ILogService private readonly log: ILogService,
   ) {
     super();
     this.states.register(externalHooksStopHookContinuationUsedKey);
@@ -355,15 +389,27 @@ export class AgentExternalHooksService extends Service implements IAgentExternal
   ): Promise<boolean> {
     if ((ctx.promptMessage.origin ?? USER_PROMPT_ORIGIN).kind !== 'user') return false;
 
-    const signal = new AbortController().signal;
+    const controller = new AbortController();
+    const signal = controller.signal;
     const input = ctx.promptMessage.content;
     signal.throwIfAborted();
-    const results = await this.runner.trigger('UserPromptSubmit', {
-      matcherValue: input,
-      signal,
-      sessionId: this.sessionContext.sessionId,
-      inputData: this.withSessionFacts({ prompt: input, isSteer: ctx.isSteer }),
-    });
+    const results = await withSubmitTimeout(
+      this.runner.trigger('UserPromptSubmit', {
+        matcherValue: input,
+        signal,
+        sessionId: this.sessionContext.sessionId,
+        inputData: this.withSessionFacts({ prompt: input, isSteer: ctx.isSteer }),
+      }),
+      HOOK_SUBMIT_TIMEOUT_MS,
+      () => {
+        controller.abort();
+        this.log.warn('UserPromptSubmit hook timed out; proceeding with prompt', {
+          timeoutMs: HOOK_SUBMIT_TIMEOUT_MS,
+          isSteer: ctx.isSteer,
+        });
+      },
+    );
+    if (results === undefined) return false;
     signal.throwIfAborted();
 
     const block = renderUserPromptHookBlockResult(results);

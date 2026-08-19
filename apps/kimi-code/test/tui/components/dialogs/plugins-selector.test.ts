@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 import chalk from 'chalk';
 import type { CapabilityStatus, PluginSummary } from '@moonshot-ai/kimi-code-sdk';
+import { Container } from '@moonshot-ai/pi-tui';
 
 import {
   PluginInstallTrustConfirmComponent,
@@ -987,7 +988,7 @@ describe('plugins selector dialogs', () => {
     expect(out).toContain('    Install this third-party plugin anyway.');
     // The warning explains why confirmation is required and uses the
     // design-system warning color rather than muted/default text.
-    expect(out.some((line) => line.includes('Kimi has not reviewed'))).toBe(true);
+    expect(out.some((line) => line.includes('Hasu has not reviewed'))).toBe(true);
     expect(out.some((line) => line.includes('trust the source'))).toBe(true);
     expect(raw).toContain(warningMark());
 
@@ -1013,5 +1014,29 @@ describe('plugins selector dialogs', () => {
     picker.handleInput('\r');
 
     expect(results).toEqual([{ kind: 'confirm' }]);
+  });
+
+  it('bumps render version so parent containers do not cache stale output', () => {
+    const { panel } = makePanel({
+      installed: [
+        superpowers,
+        {
+          ...superpowers,
+          id: 'another',
+          displayName: 'Another Plugin',
+        },
+      ],
+    });
+
+    const parent = new Container();
+    parent.addChild(panel);
+
+    const before = strip(parent.render(120).join('\n'));
+    expect(before).toContain('Superpowers');
+
+    panel.handleInput('\u001B[B'); // Down
+
+    const after = strip(parent.render(120).join('\n'));
+    expect(after).toContain('Another Plugin');
   });
 });

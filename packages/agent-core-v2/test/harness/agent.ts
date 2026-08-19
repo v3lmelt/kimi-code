@@ -893,6 +893,24 @@ class PersistenceAppendLogStore implements IAppendLogStore {
     }
   }
 
+  async readFrom<R>(_scope: string, _key: string, fromByte: number) {
+    // Byte offsets are meaningless in-memory; index by record position. The
+    // read is still routed through `read` so the harness's onRead/history
+    // bookkeeping behaves as it did for full reads.
+    const events: WireRecord[] = [];
+    for await (const event of this.read<WireRecord>(_scope, _key)) {
+      events.push(event);
+    }
+    if (fromByte > events.length) {
+      return { records: [], nextByte: fromByte, truncated: true };
+    }
+    return {
+      records: events.slice(fromByte) as R[],
+      nextByte: events.length,
+      truncated: false,
+    };
+  }
+
   rewrite<R>(_scope: string, _key: string, records: readonly R[]): Promise<void> {
     this.persistence.rewrite(records as readonly WireRecord[]);
     return Promise.resolve();

@@ -8,7 +8,9 @@
 # commented "# field: type" lines describe the remaining schema fields.
 # Values resolve as: default -> config.toml -> env overlay -> memory.
 
-# Index (25 sections · 3 overlay(s))
+# Index (31 sections · 3 overlay(s))
+#   agent                    src/agent/ultracode/configSection.ts
+#   agent_swarm_security     src/agent/swarm/securityConfig.ts
 #   background               src/agent/task/configSection.ts
 #   builtinProductSkills     src/app/skillCatalog/configSection.ts
 #   cron                     src/app/cron/configSection.ts
@@ -22,21 +24,58 @@
 #   image                    src/agent/media/configSection.ts
 #   loopControl              src/agent/loop/configSection.ts
 #   mcp                      src/app/mcpConfig/configSection.ts
+#   memory                   src/agent/memory/configSection.ts
 #   mergeAllAvailableSkills  src/app/skillCatalog/configSection.ts
 #   modelCatalog             src/app/kosongConfig/configSection.ts
 #   models                   src/app/kosongConfig/configSection.ts
 #   permission               src/agent/permissionRules/configSection.ts
 #   providers                src/app/kosongConfig/configSection.ts
+#   readState                src/agent/readState/configSection.ts
 #   secondaryModel           src/app/kosongConfig/configSection.ts
 #   services                 src/app/auth/configSection.ts
 #   subagent                 src/session/subagent/configSection.ts
 #   task                     src/agent/task/configSection.ts
 #   thinking                 src/app/kosongConfig/configSection.ts
 #   tokenCounting            src/agent/tokenCounting/configSection.ts
+#   toolExecutor             src/agent/toolExecutor/configSection.ts
 #   tools                    src/agent/toolPolicy/configSection.ts
+#   workflow                 src/agent/tools/workflow/configSection.ts
 #   (overlay) servicesCredentialEnvOverlay  src/app/auth/configSection.ts
 #   (overlay) kimiModelEnvOverlay  src/app/kosongConfig/envOverlay.ts
 #   (overlay) secondaryModelOverlay  src/app/kosongConfig/secondaryModelOverlay.ts
+
+# ##########################################################################
+# agent
+#   owner: src/agent/ultracode/configSection.ts
+#   scope: core
+# ##########################################################################
+
+[agent]
+workflow_keyword_trigger_enabled = true
+workflow_tool_enabled = true
+ultracode = false
+
+# ##########################################################################
+# agent_swarm_security
+#   owner: src/agent/swarm/securityConfig.ts
+#   scope: core
+#   hooks: stripEnv
+#   env:
+#     enabled <- KIMI_AGENT_SWARM_SECURITY_ENABLED (custom parse)
+#     fast_model <- KIMI_AGENT_SWARM_SECURITY_FAST_MODEL
+#     review_model <- KIMI_AGENT_SWARM_SECURITY_REVIEW_MODEL
+#     thinking_stage <- KIMI_AGENT_SWARM_SECURITY_THINKING_STAGE (custom parse)
+#     review_results <- KIMI_AGENT_SWARM_SECURITY_REVIEW_RESULTS (custom parse)
+#     timeout_ms <- KIMI_AGENT_SWARM_SECURITY_TIMEOUT_MS (custom parse)
+# ##########################################################################
+
+[agent_swarm_security]
+# enabled: boolean
+# fast_model: string
+# review_model: string
+# thinking_stage: boolean
+# review_results: boolean
+# timeout_ms: integer
 
 # ##########################################################################
 # background
@@ -211,6 +250,21 @@ extra_skill_dirs = []
 # tool_timeout_ms: integer
 
 # ##########################################################################
+# memory
+#   owner: src/agent/memory/configSection.ts
+#   scope: core
+# ##########################################################################
+
+[memory]
+# enabled: boolean
+# dir: string
+# auto_extract: boolean
+# max_bytes: integer
+# extract_min_interval_ms: integer
+# extract_min_turns: integer
+# compact_summary_max_chars: integer
+
+# ##########################################################################
 # mergeAllAvailableSkills (config.toml: merge_all_available_skills)
 #   owner: src/app/skillCatalog/configSection.ts
 #   scope: core
@@ -315,6 +369,15 @@ merge_all_available_skills = true
     # oauth_host: string
   # env: record<string, string>
   # source: record<string, any>
+
+# ##########################################################################
+# readState (config.toml: read_state)
+#   owner: src/agent/readState/configSection.ts
+#   scope: core
+# ##########################################################################
+
+[read_state]
+# enabled: boolean
 
 # ##########################################################################
 # secondaryModel (config.toml: secondary_model)
@@ -431,6 +494,15 @@ timeout_ms = 7200000
 strategy = "measured+estimated"
 
 # ##########################################################################
+# toolExecutor (config.toml: tool_executor)
+#   owner: src/agent/toolExecutor/configSection.ts
+#   scope: core
+# ##########################################################################
+
+[tool_executor]
+# max_parallel_tool_calls: integer
+
+# ##########################################################################
 # tools
 #   owner: src/agent/toolPolicy/configSection.ts
 #   scope: core
@@ -439,3 +511,12 @@ strategy = "measured+estimated"
 [tools]
 # enabled: string[]
 # disabled: string[]
+
+# ##########################################################################
+# workflow
+#   owner: src/agent/tools/workflow/configSection.ts
+#   scope: core
+# ##########################################################################
+
+[workflow]
+token_budget = 1000000

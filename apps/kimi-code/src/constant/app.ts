@@ -1,31 +1,24 @@
 import { ErrorCodes } from '@moonshot-ai/kimi-code-sdk';
 
-export const PRODUCT_NAME = 'Kimi Code';
-export const CLI_COMMAND_NAME = 'kimi';
-export const PROCESS_NAME = 'kimi-code';
+export const PRODUCT_NAME = 'Hasu';
+export const CLI_COMMAND_NAME = 'hasu';
+export const PROCESS_NAME = 'hasu';
 
 // Used in telemetry app names and HTTP User-Agent headers.
 export const CLI_USER_AGENT_PRODUCT = 'kimi-code-cli';
 export const CLI_UI_MODE = 'shell';
-// Telemetry ui_mode for the `kimi web` host. Same product
-// as the CLI (CLI_USER_AGENT_PRODUCT); the surface is distinguished by ui_mode.
-export const WEB_UI_MODE = 'web';
-// User-Agent suffix for the `kimi web` host: its requests go out as
-// `kimi-code-cli/<version> (web)` so upstream can tell web-UI traffic
-// apart from direct CLI runs without changing the product token or platform.
-export const WEB_USER_AGENT_SUFFIX = 'web';
 
 // Give telemetry a short flush window without making CLI exit feel stuck.
 export const CLI_SHUTDOWN_TIMEOUT_MS = 3000;
 
-// Upper bound on headless (`kimi -p`) shutdown. A wedged cleanup step (e.g. a
+// Upper bound on headless (`hasu -p`) shutdown. A wedged cleanup step (e.g. a
 // SessionEnd hook, an MCP shutdown, or a connection blackholed by a restrictive
 // firewall) must not keep a completed run alive indefinitely — once this elapses
 // we stop waiting on cleanup and let the run return.
 export const PROMPT_CLEANUP_TIMEOUT_MS = 8000;
 
 // Grace after a headless run has fully completed (turn done, cleanup attempted)
-// before force-exiting. `kimi -p` otherwise relies on the event loop draining to
+// before force-exiting. `hasu -p` otherwise relies on the event loop draining to
 // exit; a stray ref'd handle (socket/timer/child) left over from the run would
 // wedge it. The guard timer is unref'd, so a healthy run still exits naturally
 // well before this fires.

@@ -28,6 +28,10 @@ export interface ToolReference {
 export interface IAgentToolRegistryService {
   readonly _serviceBrand: undefined;
 
+  /** Monotonic counter bumped on every register / unregister. Consumers can
+   *  use it as a cheap content-change signal to invalidate derived caches. */
+  readonly revision: number;
+
   register(tool: ExecutableTool, options?: ToolRegistrationOptions): IDisposable;
   list(): readonly ToolInfo[];
   listReferences(): readonly ToolReference[];

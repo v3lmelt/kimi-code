@@ -1,3 +1,5 @@
+import { spawn } from 'node:child_process';
+
 import type { Terminal } from '@moonshot-ai/pi-tui';
 
 import { BEL, ESC, MAX_TERMINAL_NOTIFICATION_MESSAGE_LENGTH, ST } from '#/tui/constant/terminal';
@@ -32,6 +34,12 @@ export function notifyTerminalOnce(
     supportsOsc9: state.terminalState.supportsOsc9,
     insideTmux: state.terminalState.insideTmux,
   });
+  // Optional Windows desktop toast — an OS-level channel gated by the
+  // `system` flag in tui.toml ([notifications]). Shares the terminal
+  // notification's dedupe key and focus condition.
+  if (state.appState.notifications.system === true) {
+    emitSystemNotification(notification);
+  }
 }
 
 export function emitTerminalNotification(
@@ -46,6 +54,66 @@ export function emitTerminalNotification(
   for (const sequence of sequences) {
     terminal.write(sequence);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Windows desktop (toast) notifications
+// ---------------------------------------------------------------------------
+
+/**
+ * Windows PowerShell AppUserModelID used to post the toast. Showing a toast
+ * under this well-known AUMID needs no app registration or Start-Menu
+ * shortcut, and the notification surfaces in the Action Center under
+ * "Windows PowerShell".
+ */
+export const WINDOWS_TOAST_APP_ID =
+  '{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe';
+
+/**
+ * Build the self-contained PowerShell script that raises a WinRT toast.
+ * The title/body are embedded as XML text (escaped) inside the toast payload;
+ * the AUMID is embedded as a single-quoted literal (escaped). Pure string
+ * building so tests can assert on it without spawning a process.
+ */
+export function buildPowerShellToastScript(title: string, body: string): string {
+  const singleQuote = (value: string): string => `'${value.replaceAll("'", "''")}'`;
+  const xmlText = (value: string): string =>
+    value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
+  return [
+    '[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, ContentType = WindowsRuntime] | Out-Null',
+    '[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, ContentType = WindowsRuntime] | Out-Null',
+    '$xml = New-Object Windows.Data.Xml.Dom.XmlDocument',
+    `$xml.LoadXml("<toast><visual><binding template='ToastGeneric'><text>${xmlText(title)}</text><text>${xmlText(body)}</text></binding></visual></toast>")`,
+    '$toast = [Windows.UI.Notifications.ToastNotification]::new($xml)',
+    `[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier(${singleQuote(WINDOWS_TOAST_APP_ID)}).Show($toast)`,
+  ].join('\n');
+}
+
+/**
+ * Fire-and-forget a Windows desktop toast via `powershell.exe`. No-op on any
+ * non-Windows platform. Spawn errors are swallowed — a failed notification
+ * must never disrupt the TUI.
+ */
+export function emitSystemNotification(
+  notification: TerminalNotification,
+  platform: NodeJS.Platform = process.platform,
+): void {
+  if (platform !== 'win32') return;
+  const script = buildPowerShellToastScript(
+    sanitizeNotificationText(notification.title),
+    sanitizeNotificationText(notification.body ?? ''),
+  );
+  const child = spawn(
+    'powershell.exe',
+    ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command', script],
+    // `windowsHide` (CREATE_NO_WINDOW) suppresses the console window; the
+    // `-WindowStyle Hidden` switch is deliberately NOT used because it makes
+    // spawned powershell.exe exit with code -1 instead of running.
+    { windowsHide: true, stdio: 'ignore' },
+  );
+  child.on('error', () => {
+    // Best-effort: nothing useful to show the user about a failed toast.
+  });
 }
 
 export function formatNotification(notification: TerminalNotification): string {

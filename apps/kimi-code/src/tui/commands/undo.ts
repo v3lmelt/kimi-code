@@ -1,4 +1,4 @@
-import type { Component } from '@moonshot-ai/pi-tui';
+import type { Component, Container } from '@moonshot-ai/pi-tui';
 import type { ContextMessage } from '@moonshot-ai/kimi-code-sdk';
 import { isKimiError } from '@moonshot-ai/kimi-code-sdk';
 
@@ -105,12 +105,12 @@ async function undoByCount(host: SlashCommandHost, count: number): Promise<boole
   }
   host.noteContextCut?.();
 
-  const children = host.state.transcriptContainer.children;
+  const container = host.state.transcriptContainer;
+  const children = container.children;
   const lastUserComponentIndex = findUndoAnchorComponentIndex(children, count);
   if (lastUserComponentIndex !== undefined) {
-    // Structural removal only: the container's ref-checked render cache
-    // detects the child-list change; no tree-wide invalidate needed.
-    removeUndoContextComponents(children, lastUserComponentIndex);
+    // Structural removal via removeChild keeps PARENT/version state consistent.
+    removeUndoContextComponents(container, lastUserComponentIndex);
   }
 
   const preservedEntries = entries.slice(lastUserIndex).filter(
@@ -447,13 +447,14 @@ function findUndoAnchorComponentIndex(
 }
 
 function removeUndoContextComponents(
-  children: Component[],
+  container: Container,
   startIndex: number,
 ): void {
+  const children = container.children;
   for (let i = children.length - 1; i >= startIndex; i--) {
     const child = children[i];
     if (child !== undefined && isUndoContextComponent(child)) {
-      children.splice(i, 1);
+      container.removeChild(child);
     }
   }
 }

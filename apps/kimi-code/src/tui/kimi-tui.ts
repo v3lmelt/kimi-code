@@ -102,6 +102,8 @@ import { ActivityPaneComponent, type ActivityPaneMode } from './components/panes
 import { QueuePaneComponent } from './components/panes/queue-pane';
 import type { TuiConfig } from './config';
 import {
+  isManagedUsageProvider,
+  isOpenCodeGoProvider,
   LLM_NOT_SET_MESSAGE,
   MAIN_AGENT_ID,
   NO_ACTIVE_SESSION_MESSAGE,
@@ -126,7 +128,7 @@ import { registerReverseRPCHandlers } from './reverse-rpc/index';
 import { QuestionController } from './reverse-rpc/question/controller';
 import { createQuestionAskHandler } from './reverse-rpc/question/handler';
 import type { ApprovalPanelData, QuestionPanelData } from './reverse-rpc/types';
-import { currentTheme, getColorPalette, getBuiltInPalette, isBuiltInTheme } from './theme';
+import { currentTheme, getColorPalette, getBuiltInPalette, isBuiltInTheme, startThemeWatch, stopThemeWatch } from './theme';
 import type { ColorToken, ResolvedTheme, ThemeName } from './theme';
 import { createTUIState, type TUIState } from './tui-state';
 import {
@@ -150,6 +152,7 @@ import { ImageAttachmentStore, type ImageAttachment } from './utils/image-attach
 import { extractMediaAttachments, rewriteMediaPlaceholders } from './utils/image-placeholder';
 import type { ExtractionResult } from './utils/image-placeholder';
 import { installInputLatencyProbe } from './utils/input-latency';
+import { QuotaRunner, type QuotaRow } from './utils/quota-runner';
 import { startupTrace } from '#/utils/startup-trace';
 import { REPLAY_TURN_LIMIT } from './utils/message-replay';
 import { hasPatchChanges } from './utils/object-patch';
@@ -197,7 +200,7 @@ export interface KimiTUIStartupInput {
   readonly workDir: string;
   readonly startupNotice?: string;
   readonly migrationPlan?: MigrationPlan | null;
-  /** When true, run only the migration screen, then exit (the `kimi migrate` command). */
+  /** When true, run only the migration screen, then exit (the `hasu migrate` command). */
   readonly migrateOnly?: boolean;
   /** agent-core-v2 engine; enables the startup workspace-trust prompt. */
   readonly engineV2?: boolean;
@@ -207,7 +210,7 @@ type EffectiveActivityPaneMode = ActivityPaneMode | 'idle' | 'session';
 type LoadingTipKind = 'moon' | 'composing';
 
 function loadingTipKind(mode: EffectiveActivityPaneMode): LoadingTipKind | undefined {
-  if (mode === 'waiting' || mode === 'tool') return 'moon';
+  if (mode === 'waiting' || mode === 'tool' || mode === 'compacting') return 'moon';
   if (mode === 'composing') return 'composing';
   return undefined;
 }
@@ -235,6 +238,7 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     planMode: input.cliOptions.plan,
     inputMode: 'prompt',
     swarmMode: false,
+    ultracode: false,
     thinkingEffort: 'off',
     contextUsage: 0,
     contextTokens: 0,
@@ -258,6 +262,7 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     goal: null,
     mcpServersSummary: null,
     banner: undefined,
+    workflowRuns: [],
   };
 }
 
@@ -710,6 +715,7 @@ export class KimiTUI {
 
     // Mount only after init() succeeds; see mountFooter().
     this.mountFooter();
+    this.startQuotaRunner();
     this.renderWelcome();
     void this.loadBanner();
     this.setupAutocomplete();
@@ -880,7 +886,7 @@ export class KimiTUI {
               `${currentTheme.fg(
                 'warning',
                 `Session "${startup.sessionFlag}" was created under a different directory.\n` +
-                  `  cd "${target.workDir}" && kimi -r ${startup.sessionFlag}`,
+                  `  cd "${target.workDir}" && hasu -r ${startup.sessionFlag}`,
               )}\n\n`,
             );
             throw new Error(
@@ -1104,12 +1110,101 @@ export class KimiTUI {
     this.state.ui.addChild(footerWrap);
   }
 
+  /**
+   * Background quota polling for the footer's compact usage slot. The loader
+   * dispatches on the current model's provider at each poll, so switching
+   * between the kimi managed provider and opencode-go swaps the data source
+   * without recreating the runner. Disposed with the footer on shutdown.
+   */
+  private startQuotaRunner(): void {
+    const runner = new QuotaRunner(
+      async () => {
+        const { model, availableModels } = this.state.appState;
+        const provider = availableModels[model]?.provider;
+        if (isOpenCodeGoProvider(provider)) {
+          const res = await this.harness.auth.getGoUsage();
+          if (res.kind === 'error') return null;
+          const rows: QuotaRow[] = [];
+          const rolling = res.parsed.rolling;
+          if (rolling !== null) {
+            rows.push({
+              used: rolling.percent,
+              limit: 100,
+              resetAt: rolling.resetsAt,
+              duration: 5,
+              unit: 'hour',
+            });
+          }
+          const weekly = res.parsed.weekly;
+          if (weekly !== null) {
+            rows.push({
+              used: weekly.percent,
+              limit: 100,
+              resetAt: weekly.resetsAt,
+              duration: 1,
+              unit: 'week',
+            });
+          }
+          return rows.length > 0 ? { rows } : null;
+        }
+        if (isManagedUsageProvider(provider)) {
+          const res = await this.harness.auth.getManagedUsage(provider);
+          if (res.kind === 'error') return null;
+          const rows: QuotaRow[] = [];
+          const pushRow = (row: {
+            readonly used: number;
+            readonly limit: number;
+            readonly resetAt?: string;
+            readonly window?: { readonly duration: number; readonly unit: string };
+          }): void => {
+            const unit = row.window?.unit;
+            if (unit !== undefined && unit !== 'hour' && unit !== 'week') return;
+            rows.push({
+              used: row.used,
+              limit: row.limit,
+              resetAt: row.resetAt,
+              duration: row.window?.duration,
+              unit,
+            });
+          };
+          if (res.summary !== null) pushRow(res.summary);
+          for (const limit of res.limits) pushRow(limit);
+          return rows.length > 0 ? { rows } : null;
+        }
+        return null;
+      },
+      () => {
+        this.state.ui.requestRender();
+      },
+    );
+    this.state.footer.setQuotaRunner(runner);
+  }
+
   // =========================================================================
   // Input Dispatch
   // =========================================================================
 
-  handlePlanToggle(next: boolean): void {
-    void slashCommands.handlePlanCommand(this, next ? 'on' : 'off');
+  handleModeCycle(): void {
+    const { planMode, permissionMode } = this.state.appState;
+    const current: 'plan' | 'auto' | 'yolo' | 'manual' = planMode
+      ? 'plan'
+      : permissionMode === 'auto'
+        ? 'auto'
+        : permissionMode === 'yolo'
+          ? 'yolo'
+          : 'manual';
+    const next: 'plan' | 'auto' | 'yolo' | 'manual' =
+      current === 'manual' ? 'plan' : current === 'plan' ? 'auto' : current === 'auto' ? 'yolo' : 'manual';
+    this.track('shortcut_mode_switch', { to_mode: next === 'manual' ? 'agent' : next });
+    if (next === 'plan') {
+      void slashCommands.handlePlanCommand(this, 'on');
+    } else if (next === 'auto') {
+      void slashCommands.handleAutoCommand(this, 'on');
+    } else if (next === 'yolo') {
+      void slashCommands.handleYoloCommand(this, 'on');
+    } else {
+      void slashCommands.handleYoloCommand(this, 'off');
+    }
   }
 
   handleInputModeChange(mode: 'prompt' | 'bash'): void {
@@ -1854,6 +1949,13 @@ export class KimiTUI {
     await this.setSession(session);
     this.setAppState({ sessionId: session.id });
     try {
+      // A pre-session ultracode pick (the virtual 'ultracode' effort segment
+      // of the model/effort picker) enters the mode now that a session exists;
+      // the ultracode service maps it onto the model's supported effort
+      // (xhigh) instead of a literal 'ultracode' effort reaching the wire.
+      if (this.state.appState.lazySessionUltracode === true) {
+        await session.setUltracode(true, 'manual');
+      }
       await this.activateRuntime();
       await this.syncRuntimeState(session);
     } catch (error) {
@@ -1870,10 +1972,16 @@ export class KimiTUI {
     }
     this.sessionEventHandler.startSubscription();
     void this.showSessionWarnings(session);
-    // The session-only thinking override was consumed by this session; the
-    // runtime status now owns the displayed effort.
-    if (this.state.appState.lazySessionThinking !== undefined) {
-      this.setAppState({ lazySessionThinking: undefined });
+    // The session-only thinking override / ultracode intent was consumed by
+    // this session; the runtime status now owns the displayed effort/mode.
+    if (
+      this.state.appState.lazySessionThinking !== undefined ||
+      this.state.appState.lazySessionUltracode === true
+    ) {
+      this.setAppState({
+        lazySessionThinking: undefined,
+        lazySessionUltracode: undefined,
+      });
     }
     return session;
   }
@@ -1896,6 +2004,7 @@ export class KimiTUI {
       permissionMode: status.permission,
       planMode: status.planMode,
       swarmMode: status.swarmMode ?? false,
+      ultracode: status.ultracode ?? false,
       contextTokens: status.contextTokens,
       maxContextTokens: status.maxContextTokens,
       contextUsage: status.contextUsage,
@@ -2023,7 +2132,7 @@ export class KimiTUI {
     this.sessionEventHandler.resetRuntimeState();
     this.tasksBrowserController.close();
     this.btwPanelController.clear();
-    this.state.footer.setBackgroundCounts({ bashTasks: 0, agentTasks: 0 });
+    this.state.footer.setBackgroundCounts({ bashTasks: 0, agentTasks: 0, workflowTasks: 0 });
     this.streamingUI.setTodoList([]);
     this.streamingUI.setTurnId(undefined);
     this.setAppState({ mcpServersSummary: null });
@@ -2034,7 +2143,7 @@ export class KimiTUI {
 
   private async showResumeOtherWorkDirHint(session: SessionRow): Promise<void> {
     this.hideSessionPicker();
-    const command = `cd ${quoteShellArg(session.work_dir)} && kimi --resume ${quoteShellArg(session.id)}`;
+    const command = `cd ${quoteShellArg(session.work_dir)} && hasu --resume ${quoteShellArg(session.id)}`;
     const message = `Current session is in a different working directory.\n  To resume, run: ${command}`;
     try {
       await copyTextToClipboard(command);
@@ -2156,6 +2265,13 @@ export class KimiTUI {
     await this.setSession(session);
     this.setAppState({ sessionId: session.id });
     try {
+      // A pre-session ultracode pick (the virtual 'ultracode' effort segment
+      // of the model/effort picker) enters the mode now that a session exists;
+      // the ultracode service maps it onto the model's supported effort
+      // (xhigh) instead of a literal 'ultracode' effort reaching the wire.
+      if (this.state.appState.lazySessionUltracode === true) {
+        await session.setUltracode(true, 'manual');
+      }
       await this.activateRuntime();
       await this.syncRuntimeState(session);
     } catch (error) {
@@ -2175,6 +2291,17 @@ export class KimiTUI {
     this.showStatus(`Started a new session (${session.id}).`);
     void this.showSessionWarnings(session);
     void this.showConfigWarningsIfAny();
+    // A pending session-only thinking override / ultracode intent was consumed
+    // by this session; the runtime status now owns the displayed effort/mode.
+    if (
+      this.state.appState.lazySessionThinking !== undefined ||
+      this.state.appState.lazySessionUltracode === true
+    ) {
+      this.setAppState({
+        lazySessionThinking: undefined,
+        lazySessionUltracode: undefined,
+      });
+    }
   }
 
   /** Surface config.toml load warnings (degraded or kept-previous config) in the status bar. */
@@ -2703,7 +2830,7 @@ export class KimiTUI {
     openUrl(auth.verificationUriComplete);
     this.state.transcriptContainer.addChild(
       new DeviceCodeBoxComponent({
-        title: 'Sign in to Kimi Code',
+        title: 'Sign in to Hasu',
         url: auth.verificationUriComplete,
         code: auth.userCode,
         hint: 'Press Ctrl-C to cancel',
@@ -2742,7 +2869,10 @@ export class KimiTUI {
 
     if (
       activityModeKey === this.lastActivityMode &&
-      (effectiveMode === 'waiting' || effectiveMode === 'thinking' || effectiveMode === 'tool')
+      (effectiveMode === 'waiting' ||
+        effectiveMode === 'thinking' ||
+        effectiveMode === 'tool' ||
+        effectiveMode === 'compacting')
     ) {
       if (placeSpinnerInAgentSwarm) {
         this.syncAgentSwarmActivitySpinner(this.state.activitySpinner?.instance);
@@ -2818,6 +2948,23 @@ export class KimiTUI {
         );
         break;
       }
+      case 'compacting': {
+        const spinner = this.ensureActivitySpinner(
+          'moon',
+          'Compacting conversation…',
+          undefined,
+          'compacting',
+        );
+        this.syncAgentSwarmActivitySpinner(undefined);
+        this.state.activityContainer.addChild(
+          new ActivityPaneComponent({
+            mode: 'compacting',
+            spinner,
+            tip: this.currentLoadingTip?.tip,
+          }),
+        );
+        break;
+      }
       case 'idle':
       case 'session': {
         this.stopActivitySpinner();
@@ -2835,7 +2982,7 @@ export class KimiTUI {
   private resolveActivityPaneMode(): EffectiveActivityPaneMode {
     if (this.state.activeDialog === 'session-picker') return 'hidden';
     if (this.state.livePane.pendingApproval !== null) return 'hidden';
-    if (this.state.appState.isCompacting) return 'hidden';
+    if (this.state.appState.isCompacting) return 'compacting';
     if (this.state.livePane.pendingQuestion !== null) return 'hidden';
 
     const streamingPhase = this.state.appState.streamingPhase;
@@ -3031,6 +3178,25 @@ export class KimiTUI {
     // (which hold old ANSI colour codes) are cleared.
     this.state.transcriptContainer.invalidate();
     this.state.ui.requestRender(true);
+    this.watchThemeFile(themeName);
+  }
+
+  /**
+   * Hot-reload a custom theme file: watch ~/.kimi-code/themes/<name>.json and
+   * repaint on every save. Built-in themes stop any active watch.
+   */
+  private watchThemeFile(themeName: ThemeName): void {
+    if (isBuiltInTheme(themeName)) {
+      stopThemeWatch();
+      return;
+    }
+    startThemeWatch(themeName, (palette) => {
+      if (currentTheme.palette === palette) return;
+      currentTheme.setPalette(palette);
+      this.updateEditorBorderHighlight();
+      this.state.transcriptContainer.invalidate();
+      this.state.ui.requestRender(true);
+    });
   }
 
   refreshTerminalThemeTracking(): void {
@@ -3060,12 +3226,12 @@ export class KimiTUI {
   }
 
   private shouldShowTerminalProgress(effectiveMode: EffectiveActivityPaneMode): boolean {
-    if (this.state.appState.isCompacting) return true;
     return (
       effectiveMode === 'waiting' ||
       effectiveMode === 'thinking' ||
       effectiveMode === 'composing' ||
-      effectiveMode === 'tool'
+      effectiveMode === 'tool' ||
+      effectiveMode === 'compacting'
     );
   }
 
@@ -3106,6 +3272,8 @@ export class KimiTUI {
         hasActiveTools: this.state.livePane.mode === 'tool',
       }));
       instance.setThinkingStatusProvider(() => this.streamingUI.getThinkingStatus());
+      instance.setThinkingStartProvider(() => this.streamingUI.getThinkingStartedAtMs());
+      instance.setRetryStatusProvider(() => this.formatStepRetryStatus());
       instance.setStatusProvider(() =>
         formatTurnUsage(
           this.state.appState.streamingPhase,
@@ -3113,6 +3281,10 @@ export class KimiTUI {
           Date.now(),
           this.sessionEventHandler.getEstimatedOutputTokens(),
           this.streamingUI.getThinkingStatus(),
+          // Share the footer's smoothed main-agent counter so the spinner row
+          // and the footer show the same token total instead of drifting apart.
+          this.state.footer.getDisplayedMainTokens(),
+          this.toolCallTimerInfo(),
         ),
       );
     };
@@ -3137,6 +3309,27 @@ export class KimiTUI {
       this.state.activitySpinner.instance.stop();
       this.state.activitySpinner = null;
     }
+  }
+
+  /** Tool-call timer suffix, gated behind the `tool-timer` experimental flag. */
+  private toolCallTimerInfo(): { startedAtMs: number; endedAtMs: number | undefined } | undefined {
+    if (!isExperimentalFlagEnabled('tool-timer')) return undefined;
+    return this.streamingUI.getToolCallTimerInfo();
+  }
+
+  /** Retry / rate-limit status line for the spinner, or '' when not retrying. */
+  private formatStepRetryStatus(): string {
+    const retry = this.sessionEventHandler.getStepRetryStatus();
+    if (retry === undefined) return '';
+    const waitSeconds = Math.max(1, Math.round(retry.delayMs / 1000));
+    const attempt = `${retry.nextAttempt}/${retry.maxAttempts}`;
+    // Provider error names for rate limits include status text like
+    // `rate_limit_error` / `429` / `usage` — surface those as a usage limit
+    // rather than a generic retry.
+    if (/(rate.?limit|429|usage|throttl)/i.test(retry.errorName)) {
+      return ` Usage limit reached · retrying in ${waitSeconds}s · attempt ${attempt}`;
+    }
+    return ` Retrying in ${waitSeconds}s · attempt ${attempt}`;
   }
 
   // =========================================================================
@@ -3432,7 +3625,7 @@ export class KimiTUI {
   private showApprovalPanel(payload: ApprovalPanelData): void {
     this.patchLivePane({ pendingApproval: { data: payload } });
     notifyTerminalOnce(this.state, `approval:${payload.id}`, {
-      title: 'Kimi Code approval required',
+      title: 'Hasu approval required',
       body: payload.tool_name,
     });
     const panel = new ApprovalPanelComponent(
@@ -3499,7 +3692,7 @@ export class KimiTUI {
   private showQuestionDialog(payload: QuestionPanelData): void {
     this.patchLivePane({ pendingQuestion: { data: payload } });
     notifyTerminalOnce(this.state, `question:${payload.id}`, {
-      title: 'Kimi Code needs your answer',
+      title: 'Hasu needs your answer',
       body: payload.questions[0]?.question,
     });
     const dialog = new QuestionDialogComponent(

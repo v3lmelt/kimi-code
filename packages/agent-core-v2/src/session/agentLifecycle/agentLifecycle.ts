@@ -19,6 +19,10 @@
  *   drops the incomplete handle.
  * - `forkedFrom` is provenance only (a recorded value); business logic must
  *   not branch on it.
+ * - Subagent nesting depth is capped: `SUBAGENT_DEPTH_CAP` limits how deep a
+ *   subagent chain may go. Depth is computed from the persisted `depth` label
+ *   on the parent (`parentAgentId` label) and stamped on the child at creation;
+ *   the main agent and non-subagent creations carry no depth.
  */
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
@@ -28,6 +32,9 @@ import type { PermissionMode } from '#/agent/permissionPolicy/types';
 import type { BindAgentInput } from '#/agent/profile/profile';
 
 export const MAIN_AGENT_ID = 'main';
+
+/** Maximum subagent nesting depth; a depth-`SUBAGENT_DEPTH_CAP` agent may not spawn children. */
+export const SUBAGENT_DEPTH_CAP = 5;
 
 export interface CreateAgentOptions {
   readonly agentId?: string;

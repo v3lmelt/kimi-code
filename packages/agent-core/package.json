@@ -68,6 +68,8 @@
     "test": "vitest run",
     "test:baseline": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "bench:tokens": "node --import tsx bench/tokens.ts",
+    "bench:append-fsync": "node --import tsx bench/append-fsync.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {
@@ -114,6 +116,7 @@
     "@types/yauzl": "^2.10.3",
     "@types/yazl": "^2.4.6",
     "sinon": "^22.0.0",
+    "tsx": "^4.21.0",
     "yazl": "^3.3.1"
   }
 }

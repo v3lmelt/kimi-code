@@ -60,13 +60,20 @@ export interface TabbedModelSelectorOptions {
 interface ModelTab {
   readonly id: string;
   readonly label: string;
-  readonly selector: ModelSelectorComponent;
+  /** Models offered under this tab (identity shared with the All tab, never
+   * copied per tab so tab switches cannot duplicate rows). */
+  readonly models: Record<string, ModelAlias>;
 }
 
 export class TabbedModelSelectorComponent extends Container implements Focusable {
   focused = false;
   private readonly opts: TabbedModelSelectorOptions;
   private readonly tabs: readonly ModelTab[];
+  /** Selector for the active tab, rebuilt on each tab switch. The previous
+   *  selector is dropped — its per-alias effective-model memoization cannot
+   *  be shared across tabs — which keeps construction cost proportional to
+   *  the models a user actually sees instead of 1 + providers × the list. */
+  private activeSelector: ModelSelectorComponent;
   private activeIndex: number;
 
   constructor(opts: TabbedModelSelectorOptions) {
@@ -81,35 +88,32 @@ export class TabbedModelSelectorComponent extends Container implements Focusable
       ? this.tabs.findIndex((tab) => tab.id === opts.initialTabId)
       : -1;
     this.activeIndex = Math.max(initialTabIdx, 0);
+    this.activeSelector = makeSelector(opts, this.tabs[this.activeIndex]!.models);
     this.syncFocusToActive();
   }
 
   handleInput(data: string): void {
     if (this.tabs.length > 1) {
       if (matchesKey(data, Key.tab)) {
-        this.activeIndex = (this.activeIndex + 1) % this.tabs.length;
-        this.syncFocusToActive();
-        this.bump();
+        this.switchToTab((this.activeIndex + 1) % this.tabs.length);
         return;
       }
       if (matchesKey(data, Key.shift('tab'))) {
-        this.activeIndex = (this.activeIndex - 1 + this.tabs.length) % this.tabs.length;
-        this.syncFocusToActive();
-        this.bump();
+        this.switchToTab((this.activeIndex - 1 + this.tabs.length) % this.tabs.length);
         return;
       }
     }
-    this.tabs[this.activeIndex]?.selector.handleInput(data);
-    // The inner selectors are not registered as children (render() composes
-    // them manually), so their bump() never reaches this component — bump here
-    // or a parent container would keep serving its cached lines.
+    this.activeSelector.handleInput(data);
+    // The active selector is not registered as a child (render() composes it
+    // manually), so its bump() never reaches this component — bump here or a
+    // parent container would keep serving its cached lines.
     this.bump();
   }
 
   override render(width: number): string[] {
     const active = this.tabs[this.activeIndex];
     if (active === undefined) return [];
-    const inner = active.selector.render(width);
+    const inner = this.activeSelector.render(width);
     if (this.tabs.length <= 1) {
       return inner.map((line) => truncateToWidth(line, width));
     }
@@ -132,16 +136,19 @@ export class TabbedModelSelectorComponent extends Container implements Focusable
 
   override invalidate(): void {
     super.invalidate();
-    for (const tab of this.tabs) {
-      tab.selector.invalidate();
-    }
+    this.activeSelector.invalidate();
+  }
+
+  private switchToTab(index: number): void {
+    if (index === this.activeIndex) return;
+    this.activeIndex = index;
+    this.activeSelector = makeSelector(this.opts, this.tabs[index]!.models);
+    this.syncFocusToActive();
+    this.bump();
   }
 
   private syncFocusToActive(): void {
-    for (let i = 0; i < this.tabs.length; i++) {
-      const tab = this.tabs[i]!;
-      tab.selector.focused = this.focused && i === this.activeIndex;
-    }
+    this.activeSelector.focused = this.focused;
   }
 }
 
@@ -157,13 +164,7 @@ function buildTabs(opts: TabbedModelSelectorOptions): readonly ModelTab[] {
     }
   }
 
-  const tabs: ModelTab[] = [
-    {
-      id: ALL_TAB_ID,
-      label: ALL_TAB_LABEL,
-      selector: makeSelector(opts, opts.models),
-    },
-  ];
+  const tabs: ModelTab[] = [{ id: ALL_TAB_ID, label: ALL_TAB_LABEL, models: opts.models }];
   for (const providerId of providerIds) {
     const subset: Record<string, ModelAlias> = {};
     for (const [alias, model] of entries) {
@@ -172,7 +173,7 @@ function buildTabs(opts: TabbedModelSelectorOptions): readonly ModelTab[] {
     tabs.push({
       id: providerId,
       label: providerDisplayName(providerId),
-      selector: makeSelector(opts, subset),
+      models: subset,
     });
   }
   return tabs;

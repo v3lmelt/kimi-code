@@ -1,6 +1,6 @@
 /**
- * Shared device-code login flow used by both `kimi login` (top-level
- * subcommand) and `kimi acp --login` (the first-class ACP terminal-auth
+ * Shared device-code login flow used by both `hasu login` (top-level
+ * subcommand) and `hasu acp --login` (the first-class ACP terminal-auth
  * entry point). Exiting the process is part of the contract — callers
  * MUST treat the returned promise as `Promise<never>`.
  */

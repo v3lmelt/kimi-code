@@ -21,7 +21,7 @@ import { promises as fs } from 'node:fs';
 import { join } from 'pathe';
 
 import { AgentFileParseError, parseAgentFileText } from './parser';
-import { isDirectoryPath, isFilePath, isMissingPathError } from './paths';
+import { isMissingPathError } from './paths';
 import type {
   AgentFileDefinition,
   AgentFileDiscoveryResult,
@@ -93,11 +93,16 @@ export async function discoverAgentFiles(
       if (entry.startsWith('.') || entry === 'node_modules') continue;
       const entryPath = join(dirPath, entry);
       try {
-        if (await isDirectoryPath(entryPath)) {
+        // One realpath+stat per entry instead of two separate probes
+        // (`isDirectoryPath` + `isFilePath` both realpath/stat): the
+        // classification is identical, only the syscall count differs.
+        const resolved = await fs.realpath(entryPath);
+        const stats = await fs.stat(resolved);
+        if (stats.isDirectory()) {
           await walk(entryPath, root, depth + 1);
           continue;
         }
-        if (!entry.endsWith('.md') || !(await isFilePath(entryPath))) continue;
+        if (!entry.endsWith('.md') || !stats.isFile()) continue;
         await parseAndRegister(entryPath, root);
       } catch (error) {
         warnCapped(entryPath, `Skipping unreadable agent path ${entryPath}: ${errorMessage(error)}`, error);

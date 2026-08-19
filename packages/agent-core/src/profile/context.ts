@@ -1,6 +1,7 @@
+import { createHash } from 'node:crypto';
 import { dirname, join } from 'pathe';
 
-import type { Kaos } from '@moonshot-ai/kaos';
+import type { Kaos, StatResult } from '@moonshot-ai/kaos';
 
 import { normalizeAdditionalDirs } from '../config';
 import { listDirectory } from '../tools/support/list-directory';
@@ -160,26 +161,82 @@ interface AgentFile {
   readonly content: string;
 }
 
+/**
+ * Fingerprint of an AGENTS.md file captured from a single stat. LocalKaos
+ * exposes `stMtime` with sub-second precision, so alongside `stSize` it
+ * catches essentially every real modification at stat cost alone.
+ */
+interface FsVersion {
+  readonly stMtime: number;
+  readonly stSize: number;
+}
+
+interface CachedAgentFile {
+  readonly version: FsVersion;
+  /** SHA-1 of the trimmed content — confirms whether a version change really changed bytes. */
+  readonly digest: string;
+  readonly content: string;
+}
+
+/**
+ * Process-scoped cache keyed by normalized path (no cross-process
+ * persistence). A file is only re-read when the FsVersion fingerprint
+ * changed; a fingerprint change whose SHA-1 digest still matches (e.g.
+ * `touch`) reuses the previous text.
+ */
+const agentsMdFileCache = new Map<string, CachedAgentFile>();
+
+function fsVersionMatches(a: FsVersion, b: FsVersion): boolean {
+  return a.stMtime === b.stMtime && a.stSize === b.stSize;
+}
+
 async function readAgentFile(kaos: Kaos, path: string): Promise<AgentFile | undefined> {
-  if (!(await isFile(kaos, path))) return undefined;
+  const key = kaos.normpath(path);
+
+  let stat: StatResult;
+  try {
+    stat = await kaos.stat(path);
+  } catch {
+    agentsMdFileCache.delete(key);
+    return undefined;
+  }
+  if ((stat.stMode & S_IFMT) !== S_IFREG) {
+    agentsMdFileCache.delete(key);
+    return undefined;
+  }
+
+  const version: FsVersion = { stMtime: stat.stMtime, stSize: stat.stSize };
+  const cached = agentsMdFileCache.get(key);
+  if (cached !== undefined && fsVersionMatches(cached.version, version)) {
+    return { path, content: cached.content };
+  }
+
   const content = (await kaos.readText(path, { errors: 'ignore' })).trim();
-  if (content.length === 0) return undefined;
+  if (content.length === 0) {
+    agentsMdFileCache.delete(key);
+    return undefined;
+  }
+
+  const digest = sha1(content);
+  if (cached !== undefined && cached.digest === digest) {
+    // Fingerprint changed but the bytes did not: reuse the cached text and
+    // refresh the fingerprint so the next call skips the read entirely.
+    agentsMdFileCache.set(key, { version, digest, content: cached.content });
+    return { path, content: cached.content };
+  }
+
+  agentsMdFileCache.set(key, { version, digest, content });
   return { path, content };
+}
+
+function sha1(text: string): string {
+  return createHash('sha1').update(text, 'utf8').digest('hex');
 }
 
 async function pathExists(kaos: Kaos, path: string): Promise<boolean> {
   try {
     await kaos.stat(path);
     return true;
-  } catch {
-    return false;
-  }
-}
-
-async function isFile(kaos: Kaos, path: string): Promise<boolean> {
-  try {
-    const stat = await kaos.stat(path);
-    return (stat.stMode & S_IFMT) === S_IFREG;
   } catch {
     return false;
   }

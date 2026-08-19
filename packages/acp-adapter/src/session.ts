@@ -17,6 +17,7 @@ import {
   type BackgroundTaskInfo,
   type ContextMessage,
   type Event,
+  type KimiConfig,
   type KimiHarness,
   type McpServerInfo,
   type PromptPart,
@@ -351,7 +352,7 @@ export class AcpSession {
    * Unknown model errors bubble up from the SDK as-is; the caller in
    * `AcpServer.unstable_setSessionModel` decides how to translate them.
    */
-  async setModel(modelId: ModelId): Promise<void> {
+  async setModel(modelId: ModelId, config?: KimiConfig): Promise<void> {
     const suffix = ',thinking';
     const hasSuffix = modelId.endsWith(suffix);
     const baseKey = hasSuffix ? modelId.slice(0, -suffix.length) : modelId;
@@ -359,8 +360,13 @@ export class AcpSession {
     // Update BEFORE resolving the on-effort so a merged `,thinking`
     // switch picks the NEW model's default level, not the old one's.
     this.currentModelIdInternal = baseKey;
+    // One harness config snapshot shared by the on-effort resolution and
+    // the `config_option_update` refresh below — the catalog fetch used to
+    // happen twice per switch. `config` may be a snapshot the caller
+    // (AcpServer) already fetched for its own response assembly.
+    const snapshot = config ?? (await this.loadConfigSnapshot());
     if (hasSuffix && typeof this.session.setThinking === 'function') {
-      const onEffort = await this.thinkingOnEffort();
+      const onEffort = await this.thinkingOnEffort(snapshot);
       await this.session.setThinking(onEffort);
       this.currentThinkingEffortInternal =
         (await this.readEffectiveThinkingEffort()) ?? onEffort;
@@ -368,7 +374,7 @@ export class AcpSession {
       this.currentThinkingEffortInternal =
         (await this.readEffectiveThinkingEffort()) ?? this.currentThinkingEffortInternal;
     }
-    await this.emitConfigOptionUpdate();
+    await this.emitConfigOptionUpdate(snapshot);
   }
 
   /**
@@ -404,14 +410,15 @@ export class AcpSession {
    * came in through the funnel and the response itself already
    * carries a fresh snapshot.
    */
-  async setThinking(effort: string): Promise<void> {
-    const resolved = await this.resolveEffortForCurrentModel(effort);
+  async setThinking(effort: string, config?: KimiConfig): Promise<void> {
+    const snapshot = config ?? (await this.loadConfigSnapshot());
+    const resolved = await this.resolveEffortForCurrentModel(effort, snapshot);
     if (typeof this.session.setThinking === 'function') {
       await this.session.setThinking(resolved);
     }
     this.currentThinkingEffortInternal =
       (await this.readEffectiveThinkingEffort()) ?? resolved;
-    await this.emitConfigOptionUpdate();
+    await this.emitConfigOptionUpdate(snapshot);
   }
 
   /**
@@ -420,9 +427,12 @@ export class AcpSession {
    * string to forward to the SDK. See {@link setThinking} for the
    * acceptance rules.
    */
-  private async resolveEffortForCurrentModel(effort: string): Promise<string> {
+  private async resolveEffortForCurrentModel(
+    effort: string,
+    config?: KimiConfig,
+  ): Promise<string> {
     if (!this.harness) return effort;
-    const models = await listModelsFromHarness(this.harness);
+    const models = await listModelsFromHarness(this.harness, config);
     const entry = models.find((m) => m.id === this.currentModelIdInternal);
     if (effort === 'on') return entry?.defaultThinkingEffort ?? 'on';
     if (effort === 'off') return 'off';
@@ -461,9 +471,9 @@ export class AcpSession {
    * enforced downstream by agent-core's resolve, so this adapter no
    * longer clamps an explicit off request here.
    */
-  private async thinkingOnEffort(): Promise<string> {
+  private async thinkingOnEffort(config?: KimiConfig): Promise<string> {
     if (!this.harness) return 'on';
-    const models = await listModelsFromHarness(this.harness);
+    const models = await listModelsFromHarness(this.harness, config);
     return models.find((m) => m.id === this.currentModelIdInternal)?.defaultThinkingEffort ?? 'on';
   }
 
@@ -503,7 +513,7 @@ export class AcpSession {
    *    the `config_option_update` notification is suppressed (the client
    *    will see the rejection and can re-query state).
    */
-  async setMode(modeId: SessionModeId): Promise<void> {
+  async setMode(modeId: SessionModeId, config?: KimiConfig): Promise<void> {
     if (!isAcpModeId(modeId)) {
       throw RequestError.invalidParams({ modeId }, `Unknown sessionModeId: ${modeId}`);
     }
@@ -511,7 +521,24 @@ export class AcpSession {
     await this.session.setPlanMode(plan);
     await this.session.setPermission(permission);
     this.currentModeIdInternal = modeId;
-    await this.emitConfigOptionUpdate();
+    await this.emitConfigOptionUpdate(config);
+  }
+
+  /**
+   * One harness `getConfig` snapshot per request, shared by the effort
+   * resolution and the `config_option_update` refresh. Returns `undefined`
+   * when the harness is absent (adapter-level unit tests), lacks
+   * `getConfig`, or it throws — the callers fall back to their existing
+   * empty-catalog / default-effort paths.
+   */
+  private async loadConfigSnapshot(): Promise<KimiConfig | undefined> {
+    if (!this.harness) return undefined;
+    if (typeof this.harness.getConfig !== 'function') return undefined;
+    try {
+      return await this.harness.getConfig();
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -531,8 +558,12 @@ export class AcpSession {
    * policy as {@link emitAvailableCommandsUpdate}: pushing a session
    * update is a streaming concern, not load-bearing for the SDK call
    * that triggered it.
+   *
+   * `config` is an optional already-fetched harness config snapshot,
+   * shared from the caller's own fetch so the harness is queried at
+   * most once per request.
    */
-  private async emitConfigOptionUpdate(): Promise<void> {
+  private async emitConfigOptionUpdate(config?: KimiConfig): Promise<void> {
     if (!this.harness) return;
     try {
       const snapshot = await buildSessionConfigOptions(
@@ -540,6 +571,7 @@ export class AcpSession {
         this.currentModelIdInternal,
         this.currentThinkingEffortInternal,
         this.currentModeIdInternal,
+        config,
       );
       await this.conn.sessionUpdate(configOptionUpdateNotification(this.id, snapshot));
     } catch (err) {

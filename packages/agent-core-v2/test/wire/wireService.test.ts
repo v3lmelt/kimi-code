@@ -242,6 +242,7 @@ describe('WireService', () => {
         expect(streamed.getModel(CounterModel)).toEqual({ value: 2 });
         yield { type: 'store.counter.add', by: 3 } as R;
       },
+      readFrom: async () => ({ records: [], nextByte: 0, truncated: false }),
       rewrite: async () => {},
       flush: async () => {},
       close: async () => {},

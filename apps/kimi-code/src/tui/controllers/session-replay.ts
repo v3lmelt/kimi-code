@@ -660,9 +660,8 @@ export class SessionReplayRenderer {
       (child) => child instanceof ToolCallComponent && child.toolCallView.id === toolCallId,
     );
     if (childIndex >= 0) {
-      // Structural removal only: the container's ref-checked render cache
-      // detects the child-list change; no tree-wide invalidate needed.
-      children.splice(childIndex, 1);
+      // Structural removal via removeChild keeps PARENT/version state consistent.
+      state.transcriptContainer.removeChild(children[childIndex]!);
     }
   }
 

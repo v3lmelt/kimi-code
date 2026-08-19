@@ -10,6 +10,7 @@ import { type ApprovalHandler, type Event, type QuestionHandler } from '#/events
 import type { SDKRpcClientBase } from '#/rpc';
 import type {
   AddAdditionalDirOptions,
+  UltracodeTrigger,
   AddAdditionalDirResult,
   AgentCommandInfo,
   BackgroundTaskInfo,
@@ -303,6 +304,21 @@ export class Session {
       await this.rpc.setSwarmMode({ sessionId: this.id, enabled: true, trigger });
     } else {
       await this.rpc.setSwarmMode({ sessionId: this.id, enabled: false });
+    }
+  }
+
+  async setUltracode(enabled: boolean, trigger: UltracodeTrigger): Promise<void> {
+    this.ensureOpen();
+    if (typeof enabled !== 'boolean') {
+      throw new KimiError(
+        ErrorCodes.REQUEST_INVALID,
+        'Session ultracode mode must be a boolean',
+      );
+    }
+    if (enabled) {
+      await this.rpc.setUltracode({ sessionId: this.id, enabled: true, trigger });
+    } else {
+      await this.rpc.setUltracode({ sessionId: this.id, enabled: false });
     }
   }
 

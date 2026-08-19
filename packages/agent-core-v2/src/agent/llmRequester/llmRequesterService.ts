@@ -34,6 +34,7 @@ import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/_base/state/stateRegistry';
 import { IAgentContextMemoryService } from '#/agent/contextMemory/contextMemory';
+import type { ContextMessage } from '#/agent/contextMemory/types';
 import {
   IAgentContextProjectorService,
   type MediaStripSnapshot,
@@ -43,8 +44,12 @@ import { IAgentProfileService, type ProfileModelContext } from '#/agent/profile/
 import { IAgentStateService } from '#/agent/state/agentState';
 import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import { IAgentToolSelectService } from '#/agent/toolSelect/toolSelect';
+import { TOOLS_SECTION, type ToolsConfig } from '#/agent/toolPolicy/configSection';
+import { ISessionToolPolicy } from '#/session/sessionToolPolicy/sessionToolPolicy';
+import { ISessionToolPolicyGate } from '#/session/sessionToolPolicyGate/sessionToolPolicyGate';
 import { IAgentVideoResolverService } from '#/agent/media/videoResolver';
 import { IAgentUsageService } from '#/agent/usage/usage';
+import { IAgentToolResultTruncationService } from '#/agent/toolResultTruncation/toolResultTruncation';
 import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
 import {
@@ -55,7 +60,7 @@ import {
   isRecoverableRequestStructureError,
   isRetryableGenerateError,
 } from '#/kosong/contract/errors';
-import { type Message } from '#/kosong/contract/message';
+import { createUserMessage, type Message } from '#/kosong/contract/message';
 import { type ThinkingEffort } from '#/kosong/contract/provider';
 import { type Tool } from '#/kosong/contract/tool';
 import { emptyUsage, inputTotal, type TokenUsage } from '#/kosong/contract/usage';
@@ -133,6 +138,13 @@ interface LLMRequestLogInput {
   readonly tools: readonly Tool[];
   readonly messages: readonly Message[];
   readonly fields?: AgentLLMRequestLogFields;
+  /** Precomputed request-scoped signature pieces, computed once in `run()` and
+   *  shared by `logRequest` / `recordRequest` so the tool table is serialized
+   *  and hashed at most once per request. Absent when a caller builds the
+   *  input directly — both consumers fall back to computing them. */
+  readonly wireTools?: readonly Tool[];
+  readonly toolSignature?: readonly LlmRequestToolSchema[];
+  readonly toolsHash?: string;
 }
 
 interface TurnRequestConfig {
@@ -182,12 +194,36 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     @IWireService private readonly wire: IWireService,
     @IEventBus private readonly eventBus: IEventBus,
     @IAgentStateService private readonly states: IAgentStateService,
+    @IAgentToolResultTruncationService
+    private readonly resultTruncation: IAgentToolResultTruncationService | undefined,
+    @ISessionToolPolicy private readonly sessionToolPolicy: ISessionToolPolicy,
+    @ISessionToolPolicyGate private readonly toolPolicyGate: ISessionToolPolicyGate,
   ) {
     this.states.register(llmRequesterLastConfigLogSignatureKey);
     this.states.register(llmRequesterTurnConfigsKey);
     this.states.register(llmRequesterMediaDegradedTurnsKey);
     this.states.register(llmRequesterMediaStrippedTurnsKey);
     this.states.register(llmRequesterEmittedThinkingEffortWarningsKey);
+  }
+
+  /** Content-addressed sha256 cache for the system prompt and tools-signature
+   *  strings. Map keys use value equality, so a content change produces a new
+   *  key and naturally misses; equal content (shared cached prompt string) hits
+   *  and skips the O(n) hashing. Bounded so a long-lived session never grows
+   *  an unbounded set of large keys. */
+  private readonly fingerprintCache = new Map<string, string>();
+  private static readonly FINGERPRINT_CACHE_MAX = 64;
+
+  private cachedFingerprint(content: string): string {
+    const cached = this.fingerprintCache.get(content);
+    if (cached !== undefined) return cached;
+    const hash = fingerprint(content);
+    if (this.fingerprintCache.size >= AgentLLMRequesterService.FINGERPRINT_CACHE_MAX) {
+      const oldest = this.fingerprintCache.keys().next().value;
+      if (oldest !== undefined) this.fingerprintCache.delete(oldest);
+    }
+    this.fingerprintCache.set(content, hash);
+    return hash;
   }
 
   private get lastConfigLogSignature(): string | undefined {
@@ -331,6 +367,12 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     onRequestTrace: (traceId: string | undefined) => void,
   ): Promise<AgentLLMRequestFinish> {
     const shaped = this.toolSelect.shapeHistory(request.messages);
+    // Transient total_tokens reminder: appended after shaping so it never enters
+    // context history (wire replay and post-compaction tails stay clean) while
+    // still riding the outbound request at the tail. Appending here — rather
+    // than to `request.messages` in resolveRequest — keeps the token-counting
+    // measured anchor aligned with the wire context.
+    const requestMessages = this.appendTotalTokensReminder(shaped, request.source);
     let mediaStripSnapshot = this.mediaStripSnapshotForTurn(request.source);
     const requestInput = (projection: RequestProjection) => {
       return {
@@ -338,26 +380,27 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         tools: request.tools,
         messages:
           projection === 'strict'
-            ? this.projector.projectStrict(shaped)
+            ? this.projector.projectStrict(requestMessages)
             : projection === 'media-degraded'
-              ? this.projector.projectMediaDegraded(shaped)
+              ? this.projector.projectMediaDegraded(requestMessages)
               : projection === 'media-stripped'
                 ? this.projector.projectMediaStripped(
-                    shaped,
+                    requestMessages,
                     (mediaStripSnapshot ??=
                       this.projector.captureMediaStripSnapshot(shaped)),
                   )
-                : this.projector.project(shaped),
+                : this.projector.project(requestMessages),
       };
     };
 
     const run = async (projection: RequestProjection): Promise<AgentLLMRequestFinish> => {
       onRequestTrace(undefined);
       const projected = requestInput(projection);
+      const budgeted = await this.prepareRequestMessages(projected.messages);
       const input = {
         ...projected,
         messages: await this.videoResolver.resolve(
-          projected.messages,
+          budgeted,
           request.requester,
           signal,
         ),
@@ -367,6 +410,9 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
           ? request.logFields
           : { ...request.logFields, projection };
       this.warnAboutAnthropicThinkingEffort(request);
+      const wireTools = providerVisibleTools(input.tools);
+      const toolSignatureArray = toolSignature(wireTools);
+      const toolsHash = this.cachedFingerprint(JSON.stringify(toolSignatureArray));
       const logInput: LLMRequestLogInput = {
         protocol: request.model.protocol,
         providerType: request.model.providerType,
@@ -378,6 +424,9 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         tools: input.tools,
         messages: input.messages,
         fields,
+        wireTools,
+        toolSignature: toolSignatureArray,
+        toolsHash,
       };
       this.logRequest(logInput);
       this.recordRequest(logInput);
@@ -611,9 +660,72 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     };
   }
 
+  /** Appends a transient `<total_tokens>` reminder as the final user message of
+   *  a turn request so the model can self-converge before the context window
+   *  fills. The reminder is computed fresh and never persisted into context
+   *  history — it rides only on the outbound request, keeping wire replay,
+   *  post-compaction tails, and the request cache prefix clean. It fires once
+   *  per turn on the first turn-typed request (mirroring the original
+   *  `isNewTurn` gating in `contextInjector`), so later steps of the same turn
+   *  are not re-prefixed. Operation requests (compaction, memory extraction)
+   *  pass explicit `overrides.messages` and a non-turn source, and are
+   *  excluded. */
+  private readonly totalTokensInjectedTurns = new Set<number>();
+
+  private appendTotalTokensReminder(
+    messages: readonly ContextMessage[],
+    source: AgentLLMRequestSource | undefined,
+  ): readonly ContextMessage[] {
+    if (source?.type !== 'turn') return messages;
+    const { turnId } = source;
+    if (this.totalTokensInjectedTurns.has(turnId)) return messages;
+    this.totalTokensInjectedTurns.add(turnId);
+    for (const id of this.totalTokensInjectedTurns) {
+      if (id < turnId) this.totalTokensInjectedTurns.delete(id);
+    }
+    const remaining = this.totalTokensRemaining();
+    if (remaining === undefined) return messages;
+    return [
+      ...messages,
+      createUserMessage(
+        `<system-reminder>\n<total_tokens>${remaining} tokens left</total_tokens>\n</system-reminder>`,
+      ),
+    ];
+  }
+
+  /** Tokens left until the model's input window fills, from the latest measured
+   *  context size. Undefined when the profile has no input-window budget, no
+   *  measured reading exists, the window is already exhausted, or the profile/
+   *  token-counting services are unavailable in the current scope (test stubs)
+   *  — the reminder is then simply skipped. */
+  private totalTokensRemaining(): number | undefined {
+    try {
+      const capability = this.profile.getModelCapabilities();
+      const maxInputTokens = capability.max_input_tokens ?? capability.max_context_tokens;
+      if (maxInputTokens === undefined || maxInputTokens <= 0) return undefined;
+      const used = this.tokenCounting.get().measured;
+      if (used <= 0) return undefined;
+      const remaining = maxInputTokens - used;
+      return remaining > 0 ? remaining : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
   private resolveTurnConfig(source: AgentLLMRequestSource | undefined): TurnRequestConfig | undefined {
     if (source?.type !== 'turn') return undefined;
     return this.getOrCreateTurnConfig(source.turnId);
+  }
+
+  /** Request-level tool-result budget pass: clears stale (time-based) whitelisted
+   *  tool results, then persists the oldest oversized results to storage when
+   *  their combined text exceeds the aggregate budget. No-op when the truncation
+   *  service is unavailable (test scopes). */
+  private async prepareRequestMessages(messages: readonly Message[]): Promise<readonly Message[]> {
+    const truncation = this.resultTruncation;
+    if (truncation === undefined) return messages;
+    const cleared = truncation.clearStaleToolResults?.(messages) ?? messages;
+    return truncation.applyToolResultBudget?.(cleared) ?? Promise.resolve(cleared);
   }
 
   private getOrCreateTurnConfig(turnId: number): TurnRequestConfig {
@@ -634,7 +746,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
 
   private logRequest(input: LLMRequestLogInput): void {
     const logFields: AgentLLMRequestLogFields = input.fields ?? {};
-    const wireTools = providerVisibleTools(input.tools);
+    const wireTools = input.wireTools ?? providerVisibleTools(input.tools);
     const config = {
       provider: input.protocol,
       model: input.modelName,
@@ -645,8 +757,9 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     };
     const signature = JSON.stringify({
       ...config,
-      systemPromptHash: fingerprint(input.systemPrompt),
-      toolsHash: fingerprint(JSON.stringify(toolSignature(wireTools))),
+      systemPromptHash: this.cachedFingerprint(input.systemPrompt),
+      toolsHash:
+        input.toolsHash ?? this.cachedFingerprint(JSON.stringify(toolSignature(wireTools))),
     });
     if (signature !== this.lastConfigLogSignature) {
       this.lastConfigLogSignature = signature;
@@ -661,14 +774,14 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
 
   private recordRequest(input: LLMRequestLogInput): void {
     const fields = input.fields ?? {};
-    const wireTools = providerVisibleTools(input.tools);
-    const tools = toolSignature(wireTools);
-    const toolsHash = fingerprint(JSON.stringify(tools));
+    const wireTools = input.wireTools ?? providerVisibleTools(input.tools);
+    const tools = input.toolSignature ?? toolSignature(wireTools);
+    const toolsHash = input.toolsHash ?? this.cachedFingerprint(JSON.stringify(tools));
     if (!this.wire.getModel(LlmRequestTraceModel).seenToolsHashes.includes(toolsHash)) {
       this.wire.dispatch(llmToolsSnapshot({ hash: toolsHash, tools }));
     }
 
-    const systemPromptHash = fingerprint(input.systemPrompt);
+    const systemPromptHash = this.cachedFingerprint(input.systemPrompt);
     const overrides = this.config.get<ModelOverrides>('modelOverrides');
     const thinkingConfig = this.config.get<ThinkingConfig>(THINKING_SECTION);
     const modelConfig =
@@ -725,8 +838,34 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
     this.log.info('llm response', payload);
   }
 
+  private defaultToolsCache: { readonly key: string; readonly tools: readonly Tool[] } | undefined;
+
+  /** Cache key for `defaultTools()`. Returns `undefined` (no caching) when tool
+   *  disclosure is enabled: the shaped table then depends on the context-driven
+   *  loaded-tool ledger, which is not captured by the key. With disclosure off
+   *  the shaped table is a pure function of the registry content and the tool
+   *  policy inputs below — every input of `isToolActive` is folded into the
+   *  key, so a policy change (profile switch, session tool disable, global
+   *  config, workspace veto) invalidates like a registry change does. */
+  private defaultToolsCacheKey(): string | undefined {
+    if (this.toolSelect.enabled()) return undefined;
+    const profile = this.profile.data();
+    const globalTools = this.config.get<ToolsConfig>(TOOLS_SECTION);
+    return [
+      this.tools.revision,
+      JSON.stringify(profile.activeToolNames ?? null),
+      JSON.stringify(profile.disallowedTools),
+      JSON.stringify(globalTools),
+      JSON.stringify(this.sessionToolPolicy.disabledTools()),
+      JSON.stringify(this.toolPolicyGate.disabledTools),
+    ].join('|');
+  }
+
   private defaultTools(): readonly Tool[] {
-    return this.toolSelect
+    const key = this.defaultToolsCacheKey();
+    const cached = this.defaultToolsCache;
+    if (key !== undefined && cached !== undefined && cached.key === key) return cached.tools;
+    const tools = this.toolSelect
       .shapeTools(this.tools.list())
       .map((tool) => ({
         name: tool.name,
@@ -734,6 +873,8 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         parameters: tool.parameters ?? EMPTY_TOOL_PARAMETERS,
         deferred: tool.deferred,
       }));
+    this.defaultToolsCache = key === undefined ? undefined : { key, tools };
+    return tools;
   }
 }
 
@@ -770,12 +911,12 @@ function requestKindForTelemetry(source: AgentLLMRequestSource | undefined): str
   return undefined;
 }
 
-function providerVisibleTools(tools: readonly Tool[]): readonly Tool[] {
+export function providerVisibleTools(tools: readonly Tool[]): readonly Tool[] {
   if (!tools.some((tool) => tool.deferred === true)) return tools;
   return tools.filter((tool) => tool.deferred !== true);
 }
 
-function toolSignature(tools: readonly Tool[]): readonly LlmRequestToolSchema[] {
+export function toolSignature(tools: readonly Tool[]): readonly LlmRequestToolSchema[] {
   return tools.map(({ name, description, parameters }) => ({ name, description, parameters }));
 }
 

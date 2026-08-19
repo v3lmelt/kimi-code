@@ -37,6 +37,7 @@ export interface MCPToolDefinition {
   name: string;
   description: string;
   inputSchema: unknown;
+  annotations?: { readonly readOnlyHint?: boolean };
 }
 
 export interface MCPClient {

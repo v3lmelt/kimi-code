@@ -1,13 +1,14 @@
 /**
  * Cached git branch + working-tree status for the footer/statusline.
  *
- * Branch name refreshes every 5s, porcelain status every 15s. Branch
- * and status reads stay synchronous with short timeouts. Pull request
- * lookup uses an async cache so a slow `gh pr view` never blocks
- * footer rendering.
+ * All git reads run asynchronously off the render path (execFile) so a slow
+ * `git status` or `gh pr view` can never block footer rendering. `getStatus()`
+ * stays synchronous: it returns the last cached snapshot and, when a TTL has
+ * expired, schedules a background refresh that invalidates the footer via
+ * `onChange`. Branch refreshes every 5s, porcelain status every 15s.
  */
 
-import { execFile, spawnSync } from 'node:child_process';
+import { execFile } from 'node:child_process';
 
 const BRANCH_TTL_MS = 5_000;
 const STATUS_TTL_MS = 15_000;
@@ -42,6 +43,8 @@ export interface GitStatusCacheOptions {
 interface BranchState {
   value: string | null;
   fetchedAt: number;
+  /** True while a background branch read is in flight. */
+  pending: boolean;
 }
 
 interface StatusState {
@@ -51,6 +54,8 @@ interface StatusState {
   diffAdded: number;
   diffDeleted: number;
   fetchedAt: number;
+  /** True while a background status read is in flight. */
+  pending: boolean;
 }
 
 interface PullRequestState {
@@ -67,8 +72,10 @@ export function createGitStatusCache(
   workDir: string,
   options: GitStatusCacheOptions = {},
 ): GitStatusCache {
-  const isRepo = detectGitRepo(workDir);
-  let branch: BranchState = { value: null, fetchedAt: 0 };
+  // `null` while repo detection is still in flight.
+  let isRepo: boolean | null = null;
+  let repoDetectPending = false;
+  let branch: BranchState = { value: null, fetchedAt: 0, pending: false };
   let status: StatusState = {
     dirty: false,
     ahead: 0,
@@ -76,6 +83,7 @@ export function createGitStatusCache(
     diffAdded: 0,
     diffDeleted: 0,
     fetchedAt: 0,
+    pending: false,
   };
   let pullRequest: PullRequestState = {
     value: null,
@@ -86,17 +94,25 @@ export function createGitStatusCache(
   };
 
   return {
+    // Synchronous snapshot read: never spawns git on the caller's stack.
+    // Expired entries return the last cached values and schedule a background
+    // refresh; `onChange` invalidates the footer once fresh data lands, so the
+    // caller (footer render) re-renders without ever blocking.
     getStatus: () => {
-      if (!isRepo) return null;
+      if (isRepo === false) return null;
+      if (isRepo === null) {
+        void refreshRepoDetection();
+        return null;
+      }
 
       const now = Date.now();
       if (now - branch.fetchedAt >= BRANCH_TTL_MS) {
-        branch = { value: readBranch(workDir), fetchedAt: now };
+        void refreshBranch();
       }
       if (branch.value === null) return null;
 
       if (now - status.fetchedAt >= STATUS_TTL_MS) {
-        status = { ...readStatus(workDir), fetchedAt: now };
+        void refreshStatus();
       }
       refreshPullRequestIfNeeded(branch.value, now);
 
@@ -111,6 +127,43 @@ export function createGitStatusCache(
       };
     },
   };
+
+  function refreshRepoDetection(): void {
+    if (repoDetectPending) return;
+    repoDetectPending = true;
+    void readIsRepo(workDir).then((detected) => {
+      repoDetectPending = false;
+      if (isRepo === detected) return;
+      isRepo = detected;
+      if (!isRepo) return;
+      // Repo confirmed: warm branch/status snapshots off the render path.
+      refreshBranch();
+      refreshStatus();
+      options.onChange?.();
+    });
+  }
+
+  function refreshBranch(): void {
+    if (branch.pending) return;
+    branch = { ...branch, pending: true };
+    void readBranch(workDir).then((value) => {
+      if (!branch.pending) return;
+      const previous = branch.value;
+      branch = { value, fetchedAt: Date.now(), pending: false };
+      if (previous !== value) options.onChange?.();
+    });
+  }
+
+  function refreshStatus(): void {
+    if (status.pending) return;
+    status = { ...status, pending: true };
+    void readStatus(workDir).then((next) => {
+      if (!status.pending) return;
+      const previous = status;
+      status = { ...next, fetchedAt: Date.now(), pending: false };
+      if (statusChanged(previous, status)) options.onChange?.();
+    });
+  }
 
   function refreshPullRequestIfNeeded(branchName: string, now: number): void {
     if (pullRequest.pendingBranch === branchName) return;
@@ -143,97 +196,107 @@ export function createGitStatusCache(
   }
 }
 
-function detectGitRepo(workDir: string): boolean {
-  try {
-    const result = spawnSync('git', ['-C', workDir, 'rev-parse', '--is-inside-work-tree'], {
-      encoding: 'utf8',
-      timeout: SPAWN_TIMEOUT_MS,
-    });
-    return result.status === 0 && result.stdout.trim() === 'true';
-  } catch {
-    return false;
-  }
+function statusChanged(a: StatusState, b: StatusState): boolean {
+  return (
+    a.dirty !== b.dirty ||
+    a.ahead !== b.ahead ||
+    a.behind !== b.behind ||
+    a.diffAdded !== b.diffAdded ||
+    a.diffDeleted !== b.diffDeleted
+  );
 }
 
-function readBranch(workDir: string): string | null {
-  try {
-    const result = spawnSync('git', ['-C', workDir, 'branch', '--show-current'], {
-      encoding: 'utf8',
-      timeout: SPAWN_TIMEOUT_MS,
-    });
-    if (result.status !== 0) return null;
-    const name = result.stdout.trim();
-    return name.length > 0 ? name : null;
-  } catch {
-    return null;
-  }
+/**
+ * Runs `git` via execFile so reads never block the caller's stack. Resolves
+ * `null` on spawn failure, timeout, or non-zero exit so callers can fall back
+ * to their default state.
+ */
+function execGit(workDir: string, args: readonly string[]): Promise<string | null> {
+  return new Promise((resolve) => {
+    try {
+      execFile(
+        'git',
+        ['-C', workDir, ...args],
+        {
+          encoding: 'utf8',
+          timeout: SPAWN_TIMEOUT_MS,
+          maxBuffer: 4 * 1024 * 1024,
+        },
+        (error, stdout) => {
+          if (error !== null) {
+            resolve(null);
+            return;
+          }
+          resolve(stdout);
+        },
+      );
+    } catch {
+      resolve(null);
+    }
+  });
 }
 
-function readStatus(workDir: string): {
+async function readIsRepo(workDir: string): Promise<boolean> {
+  const stdout = await execGit(workDir, ['rev-parse', '--is-inside-work-tree']);
+  return stdout !== null && stdout.trim() === 'true';
+}
+
+async function readBranch(workDir: string): Promise<string | null> {
+  const stdout = await execGit(workDir, ['branch', '--show-current']);
+  if (stdout === null) return null;
+  const name = stdout.trim();
+  return name.length > 0 ? name : null;
+}
+
+async function readStatus(workDir: string): Promise<{
   dirty: boolean;
   ahead: number;
   behind: number;
   diffAdded: number;
   diffDeleted: number;
-} {
-  try {
-    const result = spawnSync('git', ['-C', workDir, 'status', '--porcelain', '-b'], {
-      encoding: 'utf8',
-      timeout: SPAWN_TIMEOUT_MS,
-      maxBuffer: 4 * 1024 * 1024,
-    });
-    if (result.status !== 0) {
-      return { dirty: false, ahead: 0, behind: 0, diffAdded: 0, diffDeleted: 0 };
-    }
-
-    let dirty = false;
-    let ahead = 0;
-    let behind = 0;
-    for (const line of result.stdout.split('\n')) {
-      if (line.startsWith('## ')) {
-        const m = AHEAD_BEHIND_RE.exec(line);
-        if (m) {
-          ahead = Number.parseInt(m[1] ?? '0', 10) || 0;
-          behind = Number.parseInt(m[2] ?? '0', 10) || 0;
-        }
-      } else if (line.trim().length > 0) {
-        dirty = true;
-      }
-    }
-    const diff = dirty ? readDiffStats(workDir) : { added: 0, deleted: 0 };
-    return {
-      dirty,
-      ahead,
-      behind,
-      diffAdded: diff.added,
-      diffDeleted: diff.deleted,
-    };
-  } catch {
+}> {
+  const stdout = await execGit(workDir, ['status', '--porcelain', '-b']);
+  if (stdout === null) {
     return { dirty: false, ahead: 0, behind: 0, diffAdded: 0, diffDeleted: 0 };
   }
+
+  let dirty = false;
+  let ahead = 0;
+  let behind = 0;
+  for (const line of stdout.split('\n')) {
+    if (line.startsWith('## ')) {
+      const m = AHEAD_BEHIND_RE.exec(line);
+      if (m) {
+        ahead = Number.parseInt(m[1] ?? '0', 10) || 0;
+        behind = Number.parseInt(m[2] ?? '0', 10) || 0;
+      }
+    } else if (line.trim().length > 0) {
+      dirty = true;
+    }
+  }
+  const diff = dirty ? await readDiffStats(workDir) : { added: 0, deleted: 0 };
+  return {
+    dirty,
+    ahead,
+    behind,
+    diffAdded: diff.added,
+    diffDeleted: diff.deleted,
+  };
 }
 
-function readDiffStats(workDir: string): { added: number; deleted: number } {
-  try {
-    const result = spawnSync('git', ['-C', workDir, 'diff', '--numstat', 'HEAD', '--'], {
-      encoding: 'utf8',
-      timeout: SPAWN_TIMEOUT_MS,
-      maxBuffer: 4 * 1024 * 1024,
-    });
-    if (result.status !== 0) return { added: 0, deleted: 0 };
+async function readDiffStats(workDir: string): Promise<{ added: number; deleted: number }> {
+  const stdout = await execGit(workDir, ['diff', '--numstat', 'HEAD', '--']);
+  if (stdout === null) return { added: 0, deleted: 0 };
 
-    let added = 0;
-    let deleted = 0;
-    for (const line of result.stdout.split('\n')) {
-      if (!line) continue;
-      const [addedText, deletedText] = line.split('\t');
-      added += parseDiffNumstatCount(addedText);
-      deleted += parseDiffNumstatCount(deletedText);
-    }
-    return { added, deleted };
-  } catch {
-    return { added: 0, deleted: 0 };
+  let added = 0;
+  let deleted = 0;
+  for (const line of stdout.split('\n')) {
+    if (!line) continue;
+    const [addedText, deletedText] = line.split('\t');
+    added += parseDiffNumstatCount(addedText);
+    deleted += parseDiffNumstatCount(deletedText);
   }
+  return { added, deleted };
 }
 
 function parseDiffNumstatCount(value: string | undefined): number {

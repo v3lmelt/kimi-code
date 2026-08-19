@@ -354,6 +354,100 @@ describe('AgentSwarmProgressComponent', () => {
     expect(gridLine).not.toContain('Aborted');
   });
 
+  it('exposes member snapshots with phase, item text and start time', () => {
+    vi.useFakeTimers({ now: 1_000 });
+    const component = createComponent();
+    component.updateArgs({ items: ['task A', 'task B'] });
+    component.markInputComplete();
+    component.registerSubagent({ agentId: 'agent-1' });
+    component.markStarted('agent-1');
+
+    const snapshots = component.getMemberSnapshots();
+    expect(snapshots).toHaveLength(2);
+    expect(snapshots[0]).toMatchObject({
+      id: '001',
+      phase: 'running',
+      itemText: 'task A',
+      startedAtMs: 1_000,
+      tokens: 0,
+    });
+    expect(snapshots[1]).toMatchObject({
+      id: '002',
+      phase: 'queued',
+      itemText: 'task B',
+      startedAtMs: undefined,
+      tokens: 0,
+    });
+  });
+
+  it('records member token usage, preferring cumulative usage over context tokens', () => {
+    const component = createComponent();
+    component.markInputComplete();
+    component.registerSubagent({ agentId: 'agent-1' });
+    component.markStarted('agent-1');
+
+    component.recordMemberUsage('agent-1', {
+      inputOther: 100,
+      inputCacheRead: 50,
+      inputCacheCreation: 0,
+      output: 400,
+    });
+    expect(component.getMemberSnapshots()[0]!.tokens).toBe(550);
+
+    // Cumulative usage wins over the context-token fallback, and the
+    // counter never decreases.
+    component.recordMemberUsage(
+      'agent-1',
+      { inputOther: 0, inputCacheRead: 0, inputCacheCreation: 0, output: 100 },
+      1_234,
+    );
+    expect(component.getMemberSnapshots()[0]!.tokens).toBe(550);
+    component.recordMemberUsage(
+      'agent-1',
+      { inputOther: 0, inputCacheRead: 0, inputCacheCreation: 0, output: 700 },
+      1_234,
+    );
+    expect(component.getMemberSnapshots()[0]!.tokens).toBe(700);
+  });
+
+  it('never decreases a member token count below its previous value', () => {
+    const component = createComponent();
+    component.markInputComplete();
+    component.registerSubagent({ agentId: 'agent-1' });
+    component.markStarted('agent-1');
+
+    // Context tokens fallback while usage is unreported (window estimate).
+    component.recordMemberUsage('agent-1', undefined, 1_234);
+    expect(component.getMemberSnapshots()[0]!.tokens).toBe(1_234);
+    // The first cumulative usage can be smaller than the window estimate
+    // (e.g. after compaction) — the counter must not jump backwards.
+    component.recordMemberUsage('agent-1', {
+      inputOther: 0,
+      inputCacheRead: 0,
+      inputCacheCreation: 0,
+      output: 100,
+    });
+    expect(component.getMemberSnapshots()[0]!.tokens).toBe(1_234);
+    // Usage grows past the fallback, the counter follows.
+    component.recordMemberUsage('agent-1', {
+      inputOther: 500,
+      inputCacheRead: 0,
+      inputCacheCreation: 0,
+      output: 900,
+    });
+    expect(component.getMemberSnapshots()[0]!.tokens).toBe(1_400);
+  });
+
+  it('ignores recordMemberUsage for unknown members', () => {
+    const component = createComponent();
+    component.markInputComplete();
+    component.registerSubagent({ agentId: 'agent-1' });
+    expect(() => {
+      component.recordMemberUsage('ghost', undefined, 100);
+    }).not.toThrow();
+    expect(component.getMemberSnapshots()[0]!.tokens).toBe(0);
+  });
+
   it('advances from queued when a subagent tool call starts and marks terminal states', () => {
     const component = createComponent();
 
@@ -999,5 +1093,74 @@ describe('AgentSwarmProgressEstimator', () => {
     expect(second.displayTicks).toBeGreaterThan(4);
     expect(second.displayTicks).toBeLessThan(second.targetTicks ?? 0);
     expect(second.boosted).toBe(true);
+  });
+});
+
+describe('AgentSwarmProgressComponent viewport visibility', () => {
+  const FRAME_MS = 120;
+
+  /** One completed member (seeds the estimator prior) plus one running member,
+   *  so the progress bar stays in catch-up (`hasPendingCatchup`) and the
+   *  120ms loop keeps driving renders — matching a real live swarm. */
+  function makeAnimatedComponent(
+    requestRender: () => void,
+  ): { component: AgentSwarmProgressComponent; nextFrame: () => string } {
+    let frame = 0;
+    const component = createComponent({ requestRender });
+    component.setActivitySpinnerText(() => `spin-${String(frame++).padStart(2, '0')}`);
+    component.registerSubagent({ agentId: 'agent-0' });
+    component.markStarted('agent-0');
+    vi.advanceTimersByTime(1_000); // real duration so the prior rate is sane
+    component.markCompleted('agent-0');
+    component.registerSubagent({ agentId: 'agent-1' });
+    component.markStarted('agent-1');
+    vi.advanceTimersByTime(500);
+    // One render pass seeds the catch-up target for the running member.
+    component.render(100);
+    return { component, nextFrame: () => `spin-${String(frame).padStart(2, '0')}` };
+  }
+
+  it('stops the 120ms render loop while hidden and resumes it when visible again', () => {
+    vi.useFakeTimers();
+    const requestRender = vi.fn();
+    const { component } = makeAnimatedComponent(requestRender);
+
+    vi.advanceTimersByTime(FRAME_MS * 3);
+    expect(requestRender.mock.calls.length).toBeGreaterThanOrEqual(3);
+
+    component.setViewportVisible(false);
+    requestRender.mockClear();
+    vi.advanceTimersByTime(FRAME_MS * 4);
+    expect(requestRender).not.toHaveBeenCalled();
+
+    component.setViewportVisible(true);
+    vi.advanceTimersByTime(FRAME_MS * 2);
+    expect(requestRender.mock.calls.length).toBeGreaterThanOrEqual(2);
+  });
+
+  it('freezes the rendered frame while hidden (no wall-clock drift)', () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const { component } = makeAnimatedComponent(() => {});
+
+    component.setViewportVisible(false);
+    const frozen = renderLines(component);
+    vi.advanceTimersByTime(FRAME_MS * 20);
+    expect(renderLines(component)).toEqual(frozen);
+  });
+
+  it('keeps animating while visible and restores motion after re-showing', () => {
+    vi.useFakeTimers({ now: 10_000 });
+    const { component, nextFrame } = makeAnimatedComponent(() => {});
+
+    component.setViewportVisible(false);
+    const frozen = renderLines(component);
+
+    component.setViewportVisible(true);
+    const first = renderLines(component);
+    // The spinner provider advances per call, so a live render differs from
+    // the frozen frame and from the next live render.
+    expect(first.join('\n')).not.toBe(frozen.join('\n'));
+    expect(renderLines(component).join('\n')).not.toBe(first.join('\n'));
+    expect(nextFrame()).not.toBeUndefined();
   });
 });

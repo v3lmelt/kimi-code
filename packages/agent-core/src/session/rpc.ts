@@ -14,6 +14,7 @@ import type {
   DetachBackgroundPayload,
   EmptyPayload,
   EnterSwarmPayload,
+  EnterUltracodePayload,
   GetBackgroundOutputPayload,
   GetBackgroundPayload,
   ImportContextPayload,
@@ -191,6 +192,18 @@ export class SessionAPIImpl implements PromisableMethods<SessionAPI> {
 
   async getSwarmMode({ agentId, ...payload }: AgentScopedPayload<EmptyPayload>) {
     return (await this.getAgent(agentId)).getSwarmMode(payload);
+  }
+
+  async enterUltracode({ agentId, ...payload }: AgentScopedPayload<EnterUltracodePayload>) {
+    return (await this.getAgent(agentId)).enterUltracode(payload);
+  }
+
+  async exitUltracode({ agentId, ...payload }: AgentScopedPayload<EmptyPayload>) {
+    return (await this.getAgent(agentId)).exitUltracode(payload);
+  }
+
+  async getUltracode({ agentId, ...payload }: AgentScopedPayload<EmptyPayload>) {
+    return (await this.getAgent(agentId)).getUltracode(payload);
   }
 
   async beginCompaction({ agentId, ...payload }: AgentScopedPayload<BeginCompactionPayload>) {

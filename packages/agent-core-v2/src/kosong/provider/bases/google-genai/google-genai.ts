@@ -37,6 +37,8 @@ import type { TokenUsage } from '#/kosong/contract/usage';
 
 import { mergeConsecutiveUserMessages } from '../merge-user-messages';
 import { requireProviderApiKey, resolveAuthBackedClient } from '../request-auth';
+import { parseToolCallArguments } from '../tool-arguments';
+import { stripSystemPromptBoundary } from '#/kosong/provider/systemPromptBoundary';
 
 function normalizeGoogleGenAIFinishReason(raw: unknown): {
   finishReason: FinishReason | null;
@@ -263,17 +265,7 @@ function messageToGoogleGenAI(message: Message): GoogleContent {
   for (const toolCall of message.toolCalls) {
     let args: Record<string, unknown> = {};
     if (toolCall.arguments) {
-      try {
-        const parsed: unknown = JSON.parse(toolCall.arguments);
-        if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-          args = parsed as Record<string, unknown>;
-        } else {
-          throw new ChatProviderError('Tool call arguments must be a JSON object.');
-        }
-      } catch (error) {
-        if (error instanceof ChatProviderError) throw error;
-        throw new ChatProviderError('Tool call arguments must be valid JSON.');
-      }
+      args = parseToolCallArguments(toolCall.arguments);
     }
 
     const functionCallPart: GooglePart = {
@@ -761,7 +753,7 @@ export class GoogleGenAIChatProvider implements ChatProvider {
 
     const config: Record<string, unknown> = {
       ...kwargs,
-      systemInstruction: systemPrompt,
+      systemInstruction: stripSystemPromptBoundary(systemPrompt),
       ...(tools.length > 0 ? { tools: tools.map((t) => toolToGoogleGenAI(t)) } : {}),
     };
     applyResponseFormat(config, options?.responseFormat);
@@ -860,6 +852,7 @@ export class GoogleGenAIChatProvider implements ChatProvider {
         if (this._vertexai) return this._buildClient(this._apiKey);
         return this._buildClient(requireProviderApiKey('GoogleGenAIChatProvider', a, this._apiKey));
       },
+      this,
     );
   }
 }

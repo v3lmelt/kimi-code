@@ -221,6 +221,9 @@ export class QuestionDialogComponent extends Container implements Focusable {
     this.otherInput.handleInput(data);
     this.syncOtherDraft(questionIdx);
     this.reviewMessage = undefined;
+    // The draft text renders into the panel, so the parent cache must not
+    // serve the stale line for the previous draft.
+    this.bump();
   }
 
   private handleSubmitInput(data: string): void {
@@ -228,11 +231,13 @@ export class QuestionDialogComponent extends Container implements Focusable {
       this.submitActionIdx =
         (this.submitActionIdx - 1 + SUBMIT_ACTIONS.length) % SUBMIT_ACTIONS.length;
       this.reviewMessage = undefined;
+      this.bump();
       return;
     }
     if (matchesKey(data, Key.down)) {
       this.submitActionIdx = (this.submitActionIdx + 1) % SUBMIT_ACTIONS.length;
       this.reviewMessage = undefined;
+      this.bump();
       return;
     }
 
@@ -275,6 +280,9 @@ export class QuestionDialogComponent extends Container implements Focusable {
     this.editingOther = false;
     this.reviewMessage = undefined;
     if (this.isSubmitTab()) this.submitActionIdx = 0;
+    // Version-cache: render output depends on the tab state, so a bare
+    // mutation would let a parent container serve its cached lines.
+    this.bump();
   }
 
   private moveQuestionCursor(delta: number): void {
@@ -286,6 +294,7 @@ export class QuestionDialogComponent extends Container implements Focusable {
 
     this.cursors[questionIdx] = (this.currentCursor() + delta + total) % total;
     this.reviewMessage = undefined;
+    this.bump();
   }
 
   private activateQuestionOption(optionIdx: number, method: QuestionSubmissionMethod): void {
@@ -311,6 +320,7 @@ export class QuestionDialogComponent extends Container implements Focusable {
       else set.add(optionIdx);
       this.lastAnswerMethod = method;
       this.updateAnswer(questionIdx);
+      this.bump();
       return;
     }
 
@@ -326,6 +336,7 @@ export class QuestionDialogComponent extends Container implements Focusable {
     this.editingOther = true;
     this.otherInput.setValue(this.otherDraftValue(questionIdx));
     this.reviewMessage = undefined;
+    this.bump();
   }
 
   private commitOtherInput(rawValue: string | undefined, method: QuestionSubmissionMethod): void {
@@ -352,6 +363,7 @@ export class QuestionDialogComponent extends Container implements Focusable {
     this.updateAnswer(questionIdx);
     this.editingOther = false;
     this.reviewMessage = undefined;
+    this.bump();
 
     if (!question.multi_select) this.advanceAfterSingleSelect(questionIdx);
   }
@@ -361,6 +373,7 @@ export class QuestionDialogComponent extends Container implements Focusable {
     this.currentTab = next ?? this.submitTabIndex();
     this.reviewMessage = undefined;
     if (this.isSubmitTab()) this.submitActionIdx = 0;
+    this.bump();
   }
 
   private findNextUnansweredAfter(fromIdx: number): number | null {

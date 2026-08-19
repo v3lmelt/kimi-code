@@ -42,6 +42,89 @@ export function sanitizeShellOutput(text: string): string {
   }
 }
 
+// Live-buffer budget for the running shell view (moved here with the
+// sanitizer so the raw/clean buffers share one cap policy).
+const MAX_COMBINED_CHARS = 256 * 1024;
+const KEEP_COMBINED_CHARS = 64 * 1024;
+// Re-sanitize window: every append re-strips only this much of the previous
+// buffer plus the new chunk, instead of the whole accumulated buffer. Generous
+// enough to cover any realistic CSI/OSC sequence that straddles a chunk
+// boundary (colours, OSC titles, hyperlinks are all far shorter).
+const SANITIZE_OVERLAP_CHARS = 8 * 1024;
+
+export interface ShellOutputSanitizerOptions {
+  maxChars?: number;
+  keepChars?: number;
+  overlapChars?: number;
+}
+
+/**
+ * Incremental shell-output sanitizer. Feeds raw chunks in; `value()` always
+ * returns what `sanitizeShellOutput` of everything appended so far would
+ * return, except for escape sequences longer than the overlap window (which
+ * degrade to partial strips in the already-cleaned prefix — the running view
+ * only ever shows the sanitized tail, and `finish()` re-sanitizes the final
+ * streams fully).
+ */
+export interface ShellOutputSanitizer {
+  append(text: string): void;
+  value(): string;
+}
+
+export function createShellOutputSanitizer(
+  options: ShellOutputSanitizerOptions = {},
+): ShellOutputSanitizer {
+  const maxChars = options.maxChars ?? MAX_COMBINED_CHARS;
+  const keepChars = options.keepChars ?? KEEP_COMBINED_CHARS;
+  const overlapChars = options.overlapChars ?? SANITIZE_OVERLAP_CHARS;
+
+  let raw = '';
+  let clean = '';
+
+  return {
+    append(text: string): void {
+      if (typeof text !== 'string' || text.length === 0) return;
+      const prevEnd = raw.length;
+      raw += text;
+      if (raw.length > maxChars) {
+        // Cap hit — the raw head is dropped, so rebuild the sanitized buffer
+        // from the kept tail (rare: once per ~192KB of output).
+        raw = raw.slice(-keepChars);
+        clean = sanitizeShellOutput(raw);
+        return;
+      }
+      // Re-sanitize only the tail window: the new chunk plus an overlap of the
+      // previous buffer, aligned to a line boundary so the cleaned prefix can
+      // be spliced with the re-stripped tail. A sequence that starts inside
+      // the overlap and ends in the new chunk is stripped exactly as a
+      // full-buffer pass would.
+      let winStart = Math.max(0, prevEnd - overlapChars);
+      const newline = raw.lastIndexOf('\n', winStart - 1);
+      if (newline >= 0) {
+        winStart = newline + 1;
+      } else if (winStart > 0) {
+        // The whole overlap is one unbroken line (spinner redraws, huge JSON
+        // lines): a mid-line window would split it, so fall back to a full
+        // re-strip to keep the output identical to the full-buffer pass.
+        clean = sanitizeShellOutput(raw);
+        return;
+      }
+      if (winStart === 0) {
+        clean = sanitizeShellOutput(raw);
+        return;
+      }
+      // `clean` is sanitizeShellOutput(raw[0..prevEnd]) by invariant; drop the
+      // sanitized length of the re-windowed region, then splice the fresh tail.
+      const removed = sanitizeShellOutput(raw.slice(winStart, prevEnd));
+      clean = clean.slice(0, clean.length - removed.length) + sanitizeShellOutput(raw.slice(winStart));
+    },
+
+    value(): string {
+      return clean;
+    },
+  };
+}
+
 /**
  * Format captured stdout/stderr for the transcript. Sanitizes both streams and
  * dims them; stderr is red only on actual failure.

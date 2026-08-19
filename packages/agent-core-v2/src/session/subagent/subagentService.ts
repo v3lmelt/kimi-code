@@ -64,6 +64,8 @@ export class SessionSubagentService extends Service implements ISessionSubagentS
       summaryPolicy: opts.summaryPolicy ?? this.summaryPolicyFor(handle),
       signal: opts.signal,
       onReady: opts.onReady,
+      requiresStructuredOutput: opts.requiresStructuredOutput,
+      structuredSchema: opts.structuredSchema,
     });
   }
 

@@ -53,6 +53,7 @@ import {
 } from './anthropic-profile';
 import { mergeConsecutiveUserMessages } from './merge-user-messages';
 import { mergeRequestHeaders, resolveAuthBackedClient } from './request-auth';
+import { parseToolCallArguments } from './tool-arguments';
 import {
   normalizeToolCallIdsForProvider,
   sanitizeToolCallId,
@@ -564,17 +565,7 @@ function convertMessage(message: Message, model: string): MessageParam {
     for (const tc of message.toolCalls) {
       let toolInput: Record<string, unknown> = {};
       if (tc.arguments) {
-        try {
-          const parsed: unknown = JSON.parse(tc.arguments);
-          if (typeof parsed === 'object' && parsed !== null && !Array.isArray(parsed)) {
-            toolInput = parsed as Record<string, unknown>;
-          } else {
-            throw new ChatProviderError('Tool call arguments must be a JSON object.');
-          }
-        } catch (error) {
-          if (error instanceof ChatProviderError) throw error;
-          throw new ChatProviderError('Tool call arguments must be valid JSON.');
-        }
+        toolInput = parseToolCallArguments(tc.arguments);
       }
       blocks.push({
         type: 'tool_use',
@@ -721,6 +712,10 @@ class AnthropicStreamedMessage implements StreamedMessage {
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
   }): void {
+    // Anthropic usage fields are disjoint buckets — total input tokens is the
+    // sum of `input_tokens` + `cache_read_input_tokens` +
+    // `cache_creation_input_tokens` — so each maps 1:1 onto TokenUsage without
+    // subtracting cache components from `inputOther` (that would double count).
     this._usage = {
       inputOther: usage.input_tokens ?? 0,
       output: usage.output_tokens ?? 0,
@@ -1173,6 +1168,7 @@ export class AnthropicChatProvider implements ChatProvider {
       { cachedClient: this._client, clientFactory: this._clientFactory },
       auth,
       (a) => this._buildClient(this._requireApiKey(a)),
+      this,
     );
   }
 

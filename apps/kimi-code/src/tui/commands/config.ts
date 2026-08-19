@@ -107,11 +107,25 @@ export async function handlePlanCommand(host: SlashCommandHost, args: string): P
   await applyPlanMode(host, session, enabled);
 }
 
+/**
+ * Turn plan mode off when it is on. Plan mode is exclusive with auto/yolo —
+ * entering either must not leave a stale plan-mode pill in the footer.
+ */
+async function clearPlanMode(host: SlashCommandHost, session: Session | undefined): Promise<void> {
+  if (!host.state.appState.planMode) return;
+  await session?.setPlanMode(false);
+  host.setAppState({ planMode: false });
+}
+
 async function applyPlanMode(host: SlashCommandHost, session: Session, enabled: boolean): Promise<void> {
   try {
     await session.setPlanMode(enabled);
     host.setAppState({ planMode: enabled });
     if (enabled) {
+      // Plan mode implies manual permission (the ACP 4-mode taxonomy), so a
+      // leftover auto/yolo permission can never coexist with the plan pill.
+      await session.setPermission('manual');
+      host.setAppState({ permissionMode: 'manual' });
       const plan = await session.getPlan().catch(() => null);
       host.showNotice(
         'Plan mode: ON',
@@ -143,6 +157,7 @@ export async function handleYoloCommand(host: SlashCommandHost, args: string): P
       host.showNotice('YOLO mode is already on');
       return;
     }
+    await clearPlanMode(host, session);
     await session?.setPermission('yolo');
     host.setAppState({ permissionMode: 'yolo' });
     host.showNotice('YOLO mode: ON', 'Tool actions auto-approved; the agent may still ask you questions.');
@@ -154,6 +169,7 @@ export async function handleYoloCommand(host: SlashCommandHost, args: string): P
       host.showNotice('YOLO mode is already off');
       return;
     }
+    await clearPlanMode(host, session);
     await session?.setPermission('manual');
     host.setAppState({ permissionMode: 'manual' });
     host.showNotice('YOLO mode: OFF');
@@ -162,10 +178,12 @@ export async function handleYoloCommand(host: SlashCommandHost, args: string): P
 
   // toggle
   if (currentMode === 'yolo') {
+    await clearPlanMode(host, session);
     await session?.setPermission('manual');
     host.setAppState({ permissionMode: 'manual' });
     host.showNotice('YOLO mode: OFF');
   } else {
+    await clearPlanMode(host, session);
     await session?.setPermission('yolo');
     host.setAppState({ permissionMode: 'yolo' });
     host.showNotice('YOLO mode: ON', 'Tool actions auto-approved; the agent may still ask you questions.');
@@ -189,6 +207,7 @@ export async function handleAutoCommand(host: SlashCommandHost, args: string): P
       host.showNotice('Auto mode is already on');
       return;
     }
+    await clearPlanMode(host, session);
     await session?.setPermission('auto');
     host.setAppState({ permissionMode: 'auto' });
     host.showNotice('Auto mode: ON', 'All actions auto-approved; the agent will not ask you questions.');
@@ -212,6 +231,7 @@ export async function handleAutoCommand(host: SlashCommandHost, args: string): P
     host.setAppState({ permissionMode: 'manual' });
     host.showNotice('Auto mode: OFF');
   } else {
+    await clearPlanMode(host, session);
     await session?.setPermission('auto');
     host.setAppState({ permissionMode: 'auto' });
     host.showNotice('Auto mode: ON', 'All actions auto-approved; the agent will not ask you questions.');
@@ -324,7 +344,11 @@ function showEffortPicker(
   segments: readonly string[],
 ): void {
   const liveEffort = host.state.appState.thinkingEffort;
-  const currentValue = segments.includes(liveEffort) ? liveEffort : (segments[0] ?? 'off');
+  const currentValue = host.state.appState.ultracode
+    ? 'ultracode'
+    : segments.includes(liveEffort)
+      ? liveEffort
+      : (segments[0] ?? 'off');
   const alias = host.state.appState.model;
   host.mountEditorReplacement(
     new EffortSelectorComponent({
@@ -493,6 +517,8 @@ async function performModelSwitch(
 
   const prevModel = host.state.appState.model;
   const prevEffort = host.state.appState.thinkingEffort;
+  const wantUltracode = effort === 'ultracode';
+  const prevUltracode = host.state.appState.ultracode === true;
   const modelChanged = alias !== prevModel;
   const effortChanged = effort !== prevEffort;
   const runtimeChanged = modelChanged || effortChanged;
@@ -501,12 +527,35 @@ async function performModelSwitch(
 
   try {
     if (session === undefined && runtimeChanged) {
-      await host.authFlow.activateModelAfterLogin(alias, effort);
+      if (wantUltracode) {
+        // No session yet (v2 lazy creation): record the intent to enter
+        // ultracode mode instead of passing the virtual 'ultracode' segment as
+        // a literal thinking effort. The first lazy-created session enters the
+        // mode via setUltracode, which maps it onto the model's supported
+        // effort (xhigh) rather than leaking 'ultracode' to the wire.
+        host.setAppState({ lazySessionUltracode: true });
+        await host.authFlow.activateModelAfterLogin(alias, undefined);
+      } else {
+        host.setAppState({ lazySessionUltracode: undefined });
+        await host.authFlow.activateModelAfterLogin(alias, effort);
+      }
     } else if (session !== undefined) {
+      // Picking the virtual 'ultracode' segment enters ultracode mode (the
+      // service switches the profile to xhigh and injects the enter reminder)
+      // rather than a plain thinking-effort switch; picking anything else while
+      // ultracode is on exits it. Switching models also exits ultracode first.
+      if (alias !== prevModel && prevUltracode) {
+        await session.setUltracode(false, 'manual');
+      }
+      if (wantUltracode && !prevUltracode) {
+        await session.setUltracode(true, 'manual');
+      } else if (!wantUltracode && prevUltracode) {
+        await session.setUltracode(false, 'manual');
+      }
       if (alias !== prevModel) {
         await session.setModel(alias);
       }
-      if (effort !== prevEffort) {
+      if (effort !== prevEffort && !wantUltracode) {
         await session.setThinking(effort);
       }
       const status = await session.getStatus();
@@ -529,7 +578,7 @@ async function performModelSwitch(
     effectiveAlias,
     host.state.appState.availableModels[effectiveAlias],
   );
-  host.setAppState({ model: effectiveAlias, thinkingEffort: effectiveEffort });
+  host.setAppState({ model: effectiveAlias, thinkingEffort: effectiveEffort, ultracode: wantUltracode });
   if (session === undefined && runtimeChanged) {
     if (effectiveModelChanged) {
       host.track('model_switch', { model: effectiveAlias });
@@ -544,7 +593,7 @@ async function performModelSwitch(
   }
 
   let persisted = false;
-  if (persist) {
+  if (persist && !wantUltracode) {
     try {
       persisted = await persistModelSelection(
         host,
@@ -950,6 +999,8 @@ async function applyPermissionChoice(host: SlashCommandHost, mode: PermissionMod
     }
     // v2 session-less: the chosen mode is recorded in appState and passed to
     // the lazy-created session.
+    // Permission modes are exclusive with plan mode — entering one clears it.
+    await clearPlanMode(host, host.session);
   } catch (error) {
     const msg = formatErrorMessage(error);
     host.showError(`Failed to set permission mode: ${msg}`);

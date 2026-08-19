@@ -111,6 +111,9 @@ export class AgentMcpService extends Service implements IAgentMcpService {
   declare readonly _serviceBrand: undefined;
   private readonly mcpTools = new Map<string, McpToolRegistration>();
   private readonly pendingDiscoveries: Array<() => void> = [];
+  // Becomes true once the initial MCP load has settled, letting subsequent
+  // steps skip the waitForInitialLoad/abortable wrapper entirely.
+  private _initialLoadDone = false;
 
   constructor(
     @ISessionMcpHandle private readonly mcpHandle: ISessionMcpHandle,
@@ -128,7 +131,13 @@ export class AgentMcpService extends Service implements IAgentMcpService {
     this.states.register(mcpDiscoveryWritesReadyKey);
     this.attachMcpTools();
     loop.hooks.onWillBeginStep.register('mcp', async (ctx, next) => {
-      await this.waitForInitialLoad(ctx.signal);
+      // Fast path: once the initial load has settled, skip the (now no-op)
+      // waitForInitialLoad/abortable wrapper and proceed on the current
+      // microtask. Cold-start steps still await with the original semantics.
+      if (!this._initialLoadDone) {
+        await this.waitForInitialLoad(ctx.signal);
+        this._initialLoadDone = true;
+      }
       await next();
     });
     this._register(
@@ -308,8 +317,11 @@ export class AgentMcpService extends Service implements IAgentMcpService {
     readonly registered: readonly string[];
     readonly collisions: readonly McpToolCollision[];
   } {
-    this.unregisterMcpServer(serverName);
-    const qualifiedNames: string[] = [];
+    // Phase 1 — plan the complete next generation without touching any
+    // registration bookkeeping. Same-server and cross-server name collisions
+    // reject the ENTIRE generation; the previous generation (if any) stays
+    // registered, so the model never observes a partial tool set.
+    const planned: Array<{ readonly qualified: string; readonly tool: KosongTool }> = [];
     const collisions: McpToolCollision[] = [];
     const seenInThisCall = new Map<string, string>();
     for (const tool of tools) {
@@ -325,7 +337,7 @@ export class AgentMcpService extends Service implements IAgentMcpService {
         continue;
       }
       const existingEntry = this.mcpTools.get(qualified);
-      if (existingEntry !== undefined) {
+      if (existingEntry !== undefined && existingEntry.serverName !== serverName) {
         collisions.push({
           qualified,
           toolName: tool.name,
@@ -334,20 +346,42 @@ export class AgentMcpService extends Service implements IAgentMcpService {
         continue;
       }
       seenInThisCall.set(qualified, tool.name);
-      const disposable = this._register(
-        this.registry.register(
-          createMcpTool(qualified, tool, client, {
-            originalsDir: sessionMediaOriginalsDir(this.sessionContext.sessionDir),
-            telemetry: this.telemetry,
-            reconnect: (signal) => this.reconnectForToolCall(serverName, client, signal),
-            isRemoved: () =>
-              this.mcpHandle.connectionManager.get(serverName)?.status === 'removed',
-          }),
-          { source: 'mcp' },
-        ),
-      );
-      this.mcpTools.set(qualified, { disposable, serverName });
-      qualifiedNames.push(qualified);
+      planned.push({ qualified, tool });
+    }
+    if (collisions.length > 0) {
+      return { registered: [], collisions };
+    }
+
+    // Phase 2 — commit: dispose the previous generation, then register the
+    // whole next generation in one synchronous burst, then swap the
+    // bookkeeping maps together.
+    this.unregisterMcpServer(serverName);
+    const qualifiedNames: string[] = [];
+    try {
+      for (const { qualified, tool } of planned) {
+        const disposable = this._register(
+          this.registry.register(
+            createMcpTool(qualified, tool, client, {
+              originalsDir: sessionMediaOriginalsDir(this.sessionContext.sessionDir),
+              telemetry: this.telemetry,
+              reconnect: (signal) => this.reconnectForToolCall(serverName, client, signal),
+              isRemoved: () =>
+                this.mcpHandle.connectionManager.get(serverName)?.status === 'removed',
+            }),
+            { source: 'mcp' },
+          ),
+        );
+        this.mcpTools.set(qualified, { disposable, serverName });
+        qualifiedNames.push(qualified);
+      }
+    } catch (error) {
+      // Never leave a partial set visible: dispose whatever was just
+      // registered and surface the failure.
+      for (const qualified of qualifiedNames) {
+        this.mcpTools.get(qualified)?.disposable.dispose();
+        this.mcpTools.delete(qualified);
+      }
+      throw error;
     }
     this.mcpToolsByServer.set(serverName, qualifiedNames);
     return { registered: qualifiedNames, collisions };
@@ -419,9 +453,9 @@ export class AgentMcpService extends Service implements IAgentMcpService {
       type: 'error',
       ...makeErrorPayload(
         ErrorCodes.MCP_TOOL_NAME_COLLISION,
-        `MCP server "${serverName}" registered ${collisions.length} tool name` +
+        `MCP server "${serverName}" has ${collisions.length} tool name collision` +
           `${collisions.length === 1 ? '' : 's'} ` +
-          `that collide with existing qualified names; the losing tools were dropped: ${summary}`,
+          `with existing qualified names; its tool set was rejected as a whole and none of its tools were registered: ${summary}`,
         { details: { serverName, collisions: collisions as readonly unknown[] } },
       ),
     });

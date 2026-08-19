@@ -27,7 +27,7 @@ export const UpdateManifestSchema = z.object({
 });
 
 export interface FetchLatestResult {
-  /** Raw newest version — what `kimi upgrade` installs, never rollout-gated. */
+  /** Raw newest version — what `hasu upgrade` installs, never rollout-gated. */
   readonly latest: string;
   /** Null when the JSON manifest was unavailable and we fell back to plain text. */
   readonly manifest: UpdateManifest | null;
@@ -46,7 +46,7 @@ async function fetchWithTimeout(fetchImpl: typeof fetch, input: string): Promise
 }
 
 /**
- * Fetch the latest published Kimi Code version from the CDN.
+ * Fetch the latest published Hasu version from the CDN.
  *
  * **Throws** on any failure (network error, non-2xx, empty body, non-semver
  * text). Callers must catch — `refreshUpdateCache` deliberately lets the

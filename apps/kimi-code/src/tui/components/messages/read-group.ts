@@ -1,23 +1,17 @@
 /**
- * ReadGroupComponent renders 2+ Read tool calls from the same step as one group.
+ * ReadGroupComponent renders 2+ Read/Grep/Glob calls from the same step as one group.
  *
  * It follows the same structure as `AgentGroupComponent`, with a smaller
  * surface:
- * - one summary header and a tree body listing each file path and status;
+ * - one summary header and a tree body listing each path/pattern and status;
  * - permanently grouped, while the body remains visible;
  * - 200ms throttling, matching AgentGroup;
  * - state stays in each `ToolCallComponent`; the group only reads snapshots.
  *
- * Header forms:
- *   pending > 0: Reading {N} files
- *   all done:    Read {N} files · {L} lines
+ * Header forms (mixed tools):
+ *   pending:     Reading 2 files · Grepping…
+ *   all done:    Read 3 files · Grepped 2 · Found 12
  *   some failed: append · {F} failed
- *   all failed:  Read {N} files · failed
- *
- * Body lines follow AgentGroup's branch style:
- *   src/main.ts · 51 lines
- *   src/cli.ts · reading
- *   src/missing.ts · failed
  */
 
 import type { TUI } from '@moonshot-ai/pi-tui';
@@ -29,6 +23,59 @@ import { currentTheme } from '#/tui/theme';
 import type { ToolCallComponent, ToolCallReadSnapshot } from './tool-call';
 
 const THROTTLE_MS = 200;
+
+function snapshotLabel(snap: ToolCallReadSnapshot): string {
+  if (snap.toolName === 'Grep' || snap.toolName === 'Glob') {
+    return snap.pattern ?? snap.filePath ?? '';
+  }
+  return snap.filePath ?? snap.pattern ?? '';
+}
+
+function pendingTail(toolName: string): string {
+  if (toolName === 'Grep') return ' · grepping…';
+  if (toolName === 'Glob') return ' · listing…';
+  return ' · reading…';
+}
+
+function summarizeSearchRead(
+  snapshots: readonly ToolCallReadSnapshot[],
+  pending: boolean,
+): string[] {
+  const reads = snapshots.filter((snap) => snap.toolName === 'Read');
+  const greps = snapshots.filter((snap) => snap.toolName === 'Grep');
+  const globs = snapshots.filter((snap) => snap.toolName === 'Glob');
+  const parts: string[] = [];
+  if (reads.length > 0) {
+    parts.push(
+      pending
+        ? `Reading ${String(reads.length)} ${reads.length === 1 ? 'file' : 'files'}…`
+        : `Read ${String(reads.length)} ${reads.length === 1 ? 'file' : 'files'}`,
+    );
+    if (!pending) {
+      const lines = reads.reduce((sum, snap) => sum + (snap.phase === 'done' ? snap.lines : 0), 0);
+      parts[parts.length - 1] += ` · ${String(lines)} ${lines === 1 ? 'line' : 'lines'}`;
+    }
+  }
+  if (greps.length > 0) {
+    if (pending) {
+      parts.push(greps.length === 1 ? 'Grepping…' : `Grepping ${String(greps.length)}…`);
+    } else {
+      const matches = greps.reduce((sum, snap) => sum + (snap.phase === 'done' ? snap.lines : 0), 0);
+      parts.push(
+        `Grepped ${String(greps.length)} · Found ${String(matches)}`,
+      );
+    }
+  }
+  if (globs.length > 0) {
+    if (pending) {
+      parts.push(globs.length === 1 ? 'Listing…' : `Listing ${String(globs.length)}…`);
+    } else {
+      const matches = globs.reduce((sum, snap) => sum + (snap.phase === 'done' ? snap.lines : 0), 0);
+      parts.push(`Found ${String(matches)}`);
+    }
+  }
+  return parts;
+}
 
 interface ReadEntry {
   readonly toolCallId: string;
@@ -101,20 +148,10 @@ export class ReadGroupComponent extends Container {
     }
 
     const snapshots = this.entries.map((e) => e.tc.getReadSnapshot());
-    let pending = 0;
-    let failed = 0;
-    let totalLines = 0;
-    for (const snap of snapshots) {
-      if (snap.phase === 'pending') pending += 1;
-      else if (snap.phase === 'failed') failed += 1;
-      else totalLines += snap.lines;
-    }
-    this.headerText.setText(this.buildHeader(snapshots.length, pending, failed, totalLines));
+    this.headerText.setText(this.buildHeader(snapshots));
 
     this.bodyContainer.clear();
-    const visibleSnapshots = snapshots.filter(
-      (snap) => snap.filePath !== undefined && snap.filePath.length > 0,
-    );
+    const visibleSnapshots = snapshots.filter((snap) => snapshotLabel(snap).length > 0);
     visibleSnapshots.forEach((snap, idx) => {
       const isLast = idx === visibleSnapshots.length - 1;
       this.bodyContainer.addChild(new Text(this.buildBodyLine(snap, isLast), 0, 0));
@@ -130,42 +167,44 @@ export class ReadGroupComponent extends Container {
     this.ui?.requestRender();
   }
 
-  private buildHeader(total: number, pending: number, failed: number, totalLines: number): string {
-    const dim = (text: string): string => currentTheme.dim(text);
+  private buildHeader(snapshots: readonly ToolCallReadSnapshot[]): string {
+    const pending = snapshots.filter((snap) => snap.phase === 'pending').length;
+    const failed = snapshots.filter((snap) => snap.phase === 'failed').length;
+    const parts = summarizeSearchRead(snapshots, pending > 0);
+    const labelText = parts.join(' · ') || (pending > 0 ? 'Searching…' : 'Searched');
 
     if (pending > 0) {
       const bullet = currentTheme.fg('text', STATUS_BULLET);
-      const label = currentTheme.boldFg('primary', `Reading ${String(total)} files…`);
+      const label = currentTheme.boldFg('primary', labelText);
       return `${bullet}${label}`;
     }
 
-    // All reads have finished, either successfully or with failures.
-    if (failed === total) {
+    if (failed === snapshots.length && snapshots.length > 0) {
       const bullet = currentTheme.fg('error', '✗ ');
-      const label = currentTheme.boldFg('error', `Read ${String(total)} files`);
+      const label = currentTheme.boldFg('error', labelText);
       return `${bullet}${label}${currentTheme.fg('error', ' · failed')}`;
     }
 
     const bullet = currentTheme.fg('success', STATUS_BULLET);
-    const label = currentTheme.boldFg('primary', `Read ${String(total)} files`);
-    const linesPart = dim(` · ${String(totalLines)} ${totalLines === 1 ? 'line' : 'lines'}`);
+    const label = currentTheme.boldFg('primary', labelText);
     const failPart = failed > 0 ? currentTheme.fg('error', ` · ${String(failed)} failed`) : '';
-    return `${bullet}${label}${linesPart}${failPart}`;
+    return `${bullet}${label}${failPart}`;
   }
 
   private buildBodyLine(snap: ToolCallReadSnapshot, isLast: boolean): string {
     const dim = (text: string): string => currentTheme.dim(text);
     const branch = isLast ? '└─' : '├─';
-    const path = snap.filePath ?? '';
-    const pathPart = currentTheme.fg('text', path);
+    const pathPart = currentTheme.fg('text', snapshotLabel(snap));
 
     let tail: string;
     if (snap.phase === 'pending') {
-      tail = dim(' · reading…');
+      tail = dim(pendingTail(snap.toolName));
     } else if (snap.phase === 'failed') {
       tail = currentTheme.fg('error', ' · failed');
-    } else {
+    } else if (snap.toolName === 'Read') {
       tail = dim(` · ${String(snap.lines)} ${snap.lines === 1 ? 'line' : 'lines'}`);
+    } else {
+      tail = dim(` · ${String(snap.lines)} ${snap.lines === 1 ? 'match' : 'matches'}`);
     }
     return `  ${branch} ${pathPart}${tail}`;
   }

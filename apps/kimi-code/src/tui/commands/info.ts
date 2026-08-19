@@ -4,6 +4,10 @@ import type { McpServerInfo, SessionStatus, SessionUsage } from '@moonshot-ai/ki
 
 import { buildMcpStatusReportLines } from '../components/messages/mcp-status-panel';
 import { buildStatusReportLines } from '../components/messages/status-panel';
+import {
+  buildContextBreakdown,
+  createContextPanel,
+} from '../components/messages/context-panel';
 import { buildUsageReportLines, UsagePanelComponent, type ManagedUsageReport } from '../components/messages/usage-panel';
 import {
   FEEDBACK_ISSUE_URL,
@@ -20,7 +24,11 @@ import {
   KIMI_CODE_SIGNUP_URL,
   withFeedbackVersionPrefix,
 } from '../constant/feedback';
-import { DEFAULT_OAUTH_PROVIDER_NAME, isManagedUsageProvider } from '../constant/kimi-tui';
+import {
+  DEFAULT_OAUTH_PROVIDER_NAME,
+  isManagedUsageProvider,
+  isOpenCodeGoProvider,
+} from '../constant/kimi-tui';
 import { submitFeedbackWithAttachments } from '../../feedback/feedback-attachments';
 import { formatErrorMessage } from '../utils/event-payload';
 import { openUrl } from '#/utils/open-url';
@@ -140,29 +148,45 @@ interface RuntimeStatusResult {
 }
 
 interface ManagedUsageResult {
-  readonly usage?: ManagedUsageReport;
-  readonly error?: string;
+  readonly managedUsage?: ManagedUsageReport;
+  readonly managedUsageError?: string;
+  readonly goUsage?: ManagedUsageReport;
+  readonly goUsageError?: string;
 }
 
 export async function showUsage(host: SlashCommandHost): Promise<void> {
   const sessionUsage = await loadSessionUsageReport(host);
-  const managedUsage = await loadManagedUsageReport(host);
+  const usageResult = await loadManagedUsageReport(host);
   const reportArgs = {
     sessionUsage: sessionUsage.usage,
     sessionUsageError: sessionUsage.error,
     contextUsage: host.state.appState.contextUsage,
     contextTokens: host.state.appState.contextTokens,
     maxContextTokens: host.state.appState.maxContextTokens,
-    managedUsage: managedUsage?.usage,
-    managedUsageError: managedUsage?.error,
+    managedUsage: usageResult.managedUsage,
+    managedUsageError: usageResult.managedUsageError,
+    goUsage: usageResult.goUsage,
+    goUsageError: usageResult.goUsageError,
   };
   const panel = new UsagePanelComponent(() => buildUsageReportLines(reportArgs), 'primary');
   host.state.transcriptContainer.addChild(panel);
   host.state.ui.requestRender();
 }
 
+export function showContext(host: SlashCommandHost): void {
+  const appState = host.state.appState;
+  const panel = createContextPanel(
+    buildContextBreakdown({
+      usedTokens: appState.contextTokens,
+      maxTokens: appState.maxContextTokens,
+    }),
+  );
+  host.state.transcriptContainer.addChild(panel);
+  host.state.ui.requestRender();
+}
+
 export async function showStatusReport(host: SlashCommandHost): Promise<void> {
-  const [runtimeStatus, managedUsage] = await Promise.all([
+  const [runtimeStatus, usageResult] = await Promise.all([
     loadRuntimeStatusReport(host),
     loadManagedUsageReport(host),
   ]);
@@ -182,8 +206,10 @@ export async function showStatusReport(host: SlashCommandHost): Promise<void> {
     availableModels: appState.availableModels,
     status: runtimeStatus.status,
     statusError: runtimeStatus.error,
-    managedUsage: managedUsage?.usage,
-    managedUsageError: managedUsage?.error,
+    managedUsage: usageResult.managedUsage,
+    managedUsageError: usageResult.managedUsageError,
+    goUsage: usageResult.goUsage,
+    goUsageError: usageResult.goUsageError,
   };
   const panel = new UsagePanelComponent(() => buildStatusReportLines(reportArgs), 'primary', ' Status ');
   host.state.transcriptContainer.addChild(panel);
@@ -233,19 +259,53 @@ async function loadRuntimeStatusReport(host: SlashCommandHost): Promise<RuntimeS
   }
 }
 
-async function loadManagedUsageReport(host: SlashCommandHost): Promise<ManagedUsageResult | undefined> {
+async function loadManagedUsageReport(host: SlashCommandHost): Promise<ManagedUsageResult> {
   const alias = host.state.appState.model;
   const providerKey = host.state.appState.availableModels[alias]?.provider;
-  if (!isManagedUsageProvider(providerKey)) return undefined;
-
-  let res;
-  try {
-    res = await host.harness.auth.getManagedUsage(providerKey);
-  } catch (error) {
-    return { error: formatErrorMessage(error) };
+  if (isManagedUsageProvider(providerKey)) {
+    let res;
+    try {
+      res = await host.harness.auth.getManagedUsage(providerKey);
+    } catch (error) {
+      return { managedUsageError: formatErrorMessage(error) };
+    }
+    if (res.kind === 'error') {
+      return { managedUsageError: res.message };
+    }
+    return { managedUsage: { summary: res.summary, limits: res.limits, extraUsage: res.extraUsage } };
   }
-  if (res.kind === 'error') {
-    return { error: res.message };
+  if (isOpenCodeGoProvider(providerKey)) {
+    let res;
+    try {
+      res = await host.harness.auth.getGoUsage();
+    } catch (error) {
+      return { goUsageError: formatErrorMessage(error) };
+    }
+    if (res.kind === 'error') {
+      return { goUsageError: formatErrorMessage(res.message) };
+    }
+    const summary: ManagedUsageReport['summary'] =
+      res.parsed.rolling === null
+        ? null
+        : {
+            window: { duration: 5, unit: 'hour' },
+            used: res.parsed.rolling.percent,
+            limit: 100,
+            resetAt: res.parsed.rolling.resetsAt,
+          };
+    const limits: ManagedUsageReport['limits'] =
+      res.parsed.weekly === null
+        ? []
+        : [
+            {
+              window: { duration: 1, unit: 'week' },
+              used: res.parsed.weekly.percent,
+              limit: 100,
+              resetAt: res.parsed.weekly.resetsAt,
+            },
+          ];
+    if (summary === null && limits.length === 0) return {};
+    return { goUsage: { summary, limits } };
   }
-  return { usage: { summary: res.summary, limits: res.limits, extraUsage: res.extraUsage } };
+  return {};
 }

@@ -24,6 +24,7 @@ const noopLog: IAppendLogStore = {
   _serviceBrand: undefined,
   append: () => {},
   read: async function* () {},
+  readFrom: async () => ({ records: [], nextByte: 0, truncated: false }),
   rewrite: async () => {},
   flush: async () => {},
   close: async () => {},
@@ -116,6 +117,16 @@ export function recordingWireLog(
     },
     read: async function* <R>() {
       for (const record of records) yield record as R;
+    },
+    readFrom: async <R>(_scope: string, _key: string, fromByte: number) => {
+      if (fromByte > records.length) {
+        return { records: [], nextByte: fromByte, truncated: true };
+      }
+      return {
+        records: records.slice(fromByte) as R[],
+        nextByte: records.length,
+        truncated: false,
+      };
     },
     rewrite: async (_scope, _key, next) => {
       records.splice(0, records.length, ...(next as readonly WireRecord[]));

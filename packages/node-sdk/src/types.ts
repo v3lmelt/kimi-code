@@ -265,12 +265,15 @@ export interface SessionUsage {
   readonly total?: TokenUsage | undefined;
 }
 
+export type UltracodeTrigger = 'manual' | 'keyword';
+
 export interface SessionStatus {
   readonly model?: string;
   readonly thinkingEffort: string;
   readonly permission: PermissionMode;
   readonly planMode: boolean;
   readonly swarmMode?: boolean | undefined;
+  readonly ultracode?: boolean | undefined;
   readonly contextTokens: number;
   readonly maxContextTokens: number;
   readonly contextUsage: number;

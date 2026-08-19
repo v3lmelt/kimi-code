@@ -35,7 +35,7 @@ const OPTIONS: readonly TrustPromptOption[] = [
   {
     value: 'distrust',
     label: 'No, exit',
-    description: 'Exit Kimi Code. Asked again next launch.',
+    description: 'Exit Hasu. Asked again next launch.',
   },
 ];
 
@@ -80,8 +80,8 @@ export class TrustPromptComponent implements Component, Focusable {
 
     const notice =
       this.opts.gatedMcpServers.length > 0
-        ? `Kimi Code loads project-level MCP servers (.mcp.json, .kimi-code/mcp.json) only in trusted folders. They run as local processes on your machine. This folder defines: ${this.opts.gatedMcpServers.join(', ')}.`
-        : 'Kimi Code loads project-level MCP servers (.mcp.json, .kimi-code/mcp.json) only in trusted folders. They run as local processes on your machine.';
+        ? `Hasu loads project-level MCP servers (.mcp.json, .kimi-code/mcp.json) only in trusted folders. They run as local processes on your machine. This folder defines: ${this.opts.gatedMcpServers.join(', ')}.`
+        : 'Hasu loads project-level MCP servers (.mcp.json, .kimi-code/mcp.json) only in trusted folders. They run as local processes on your machine.';
     for (const line of wrapTextWithAnsi(notice, Math.max(20, width - 2))) {
       lines.push(` ${currentTheme.fg('textMuted', line)}`);
     }

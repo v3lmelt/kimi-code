@@ -125,6 +125,7 @@ export type {
 } from '@moonshot-ai/agent-core';
 
 export type {
+  AuthGoUsageResult,
   KimiAuthCompleteFeedbackUploadInput,
   KimiAuthCompleteFeedbackUploadPart,
   KimiAuthCreateFeedbackUploadUrlInput,

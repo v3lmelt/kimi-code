@@ -15,6 +15,7 @@ import { LifecycleScope } from '#/app/scopes';
 import { type ISessionScopeHandle } from '#/_base/di/scope';
 import { TestInstantiationService } from '#/_base/di/test';
 import { Event } from '#/_base/event';
+import { Error2, ErrorCodes } from '#/errors';
 import { IAgentProfileService } from '#/agent/profile/profile';
 import '#/agent/profile/profileService';
 import { IAgentAgentsMdReminderService } from '#/agent/agentsMdReminder/agentsMdReminder';
@@ -26,7 +27,7 @@ import { IAgentStateService } from '#/agent/state/agentState';
 import { AgentStateService } from '#/agent/state/agentStateService';
 import { ISessionStateService } from '#/session/state/sessionState';
 import { SessionStateService } from '#/session/state/sessionStateService';
-import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import { IAgentLifecycleService, SUBAGENT_DEPTH_CAP } from '#/session/agentLifecycle/agentLifecycle';
 import { AgentLifecycleService } from '#/session/agentLifecycle/agentLifecycleService';
 import { ensureMainAgent } from '#/session/agentLifecycle/mainAgent';
 import { ISessionMcpHandle } from '#/session/mcp/sessionMcpHandle';
@@ -50,7 +51,7 @@ import { IPluginService } from '#/app/plugin/plugin';
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IAtomicDocumentStore } from '#/persistence/interface/atomicDocumentStore';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
-import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
+import { ISessionMetadata, type AgentMeta } from '#/session/sessionMetadata/sessionMetadata';
 import { createWireMetadataRecord, type WireRecord } from '#/wire/record';
 import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IAgentLoopService } from '#/agent/loop/loop';
@@ -123,6 +124,16 @@ function recordingAppendLog(initial: readonly WireRecord[] = []): {
         yield record as R;
       }
     },
+    readFrom: async <R>(_scope: string, _key: string, fromByte: number) => {
+      if (fromByte > records.length) {
+        return { records: [], nextByte: fromByte, truncated: true };
+      }
+      return {
+        records: records.slice(fromByte) as R[],
+        nextByte: records.length,
+        truncated: false,
+      };
+    },
     rewrite: <R>(_scope: string, _key: string, next: readonly R[]) => {
       const persisted = next as readonly WireRecord[];
       state.rewritten = persisted;
@@ -174,7 +185,11 @@ describe('AgentLifecycleService', () => {
     ix.set(IAgentStateService, new AgentStateService());
     ix.stub(IAppendLogStore, recordingAppendLog().store);
     stubBlobPassThrough(ix);
-    registerAgent = vi.fn<ISessionMetadata['registerAgent']>().mockResolvedValue(undefined);
+    const registeredAgents: Record<string, AgentMeta> = {};
+    registerAgent = vi.fn<ISessionMetadata['registerAgent']>((agentId, meta) => {
+      registeredAgents[agentId] = meta;
+      return Promise.resolve(undefined);
+    });
     atomicDocs = new Map();
     ix.stub(ISessionContext, {
       _serviceBrand: undefined,
@@ -191,7 +206,14 @@ describe('AgentLifecycleService', () => {
       _serviceBrand: undefined,
       ready: Promise.resolve(),
       onDidChangeMetadata: () => ({ dispose: () => {} }),
-      read: () => Promise.resolve({ id: 'sess_test', createdAt: 0, updatedAt: 0, archived: false }),
+      read: () =>
+        Promise.resolve({
+          id: 'sess_test',
+          createdAt: 0,
+          updatedAt: 0,
+          archived: false,
+          agents: registeredAgents,
+        }),
       update: () => Promise.resolve(),
       setTitle: () => Promise.resolve(),
       setArchived: () => Promise.resolve(),
@@ -536,6 +558,48 @@ describe('AgentLifecycleService', () => {
       forkedFrom: 'main',
       labels: { swarmItem: 'swarm-item-1' },
     });
+  });
+
+  it('stamps the subagent depth label on children of a parentAgentId chain', async () => {
+    const svc = ix.get(IAgentLifecycleService);
+    await svc.create({ agentId: 'main' });
+
+    await svc.create({ agentId: 'child', labels: { parentAgentId: 'main' } });
+
+    expect(registerAgent).toHaveBeenCalledWith(
+      'child',
+      expect.objectContaining({
+        labels: { parentAgentId: 'main', depth: '1' },
+      }),
+    );
+  });
+
+  it('rejects a subagent deeper than SUBAGENT_DEPTH_CAP', async () => {
+    const svc = ix.get(IAgentLifecycleService);
+    await svc.create({ agentId: 'main' });
+    let parentAgentId = 'main';
+    for (let depth = 1; depth <= SUBAGENT_DEPTH_CAP; depth += 1) {
+      const agentId = `depth-${String(depth)}`;
+      await svc.create({ agentId, labels: { parentAgentId } });
+      parentAgentId = agentId;
+    }
+
+    const error = await svc
+      .create({ agentId: 'depth-too-deep', labels: { parentAgentId } })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(Error2);
+    const coded = error as Error2;
+    expect(coded.code).toBe(ErrorCodes.AGENT_DEPTH_LIMIT_EXCEEDED);
+    expect(coded.message).toBe(
+      `Subagent nesting limit reached (depth ${String(SUBAGENT_DEPTH_CAP + 1)} of ${String(SUBAGENT_DEPTH_CAP)})`,
+    );
+    expect(coded.details).toMatchObject({
+      depth: SUBAGENT_DEPTH_CAP + 1,
+      limit: SUBAGENT_DEPTH_CAP,
+    });
+    expect(registerAgent).not.toHaveBeenCalledWith('depth-too-deep', expect.anything());
+    expect(svc.get('depth-too-deep')).toBeUndefined();
   });
 
   it('seals a fresh wire log with the metadata envelope as the first record', async () => {

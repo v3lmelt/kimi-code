@@ -1,5 +1,5 @@
 /**
- * Kimi Code version helpers.
+ * Hasu version helpers.
  *
  * `getVersion` reads the host CLI's `package.json#version`.
  */

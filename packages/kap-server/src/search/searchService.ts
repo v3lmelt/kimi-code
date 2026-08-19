@@ -105,7 +105,7 @@ import {
   type NormalizedQuery,
   type SearchBudgets,
 } from './match';
-import { makeSnippet } from './snippet';
+import { makeSnippet, snippetTerms } from './snippet';
 import { SearchWorkerError, SearchWorkerHost, dropLiveLockToken, noteLiveLockToken } from './worker/host';
 
 export { GlobalSearchError } from './contract';
@@ -427,6 +427,20 @@ export class GlobalSearchService implements IGlobalSearchService {
   private reindexing = false;
   /** Live-transcript source for the in-memory route; null until start.ts wires it. */
   private liveSource: LiveTranscriptSource | null = null;
+  /**
+   * Live-route doc memo (see `collectLiveDocs`) — keyed per (session,
+   * agent set); a hit reuses the exact docs a rebuild would produce. Bounded:
+   * cleared wholesale on overflow (live sessions are few — a clear only
+   * costs rebuilds).
+   */
+  private readonly liveDocsCache = new Map<
+    string,
+    {
+      summaryKey: string;
+      itemRefs: readonly (readonly unknown[])[];
+      docs: { key: string; value: MessageDoc | TitleDoc }[];
+    }
+  >();
   /** One queued follow-up pass behind the in-flight one (backpressure). */
   private syncQueued = false;
   /** Trailing-pass timer behind the debounce window. */
@@ -633,12 +647,15 @@ export class GlobalSearchService implements IGlobalSearchService {
    */
   async search(input: GlobalSearchQuery): Promise<GlobalSearchPage> {
     const q = normalizeQuery(input, this.maxQueryTerms);
+    // Query-split snippet terms are query-invariant — compute once per
+    // request instead of per hit (`makeSnippet` accepts them precomputed).
+    const snippetQ = snippetTerms(q.query);
     const sessionId = q.container?.sessionId;
     const liveStore = sessionId !== undefined ? this.liveSource?.forSessionLive(sessionId) : undefined;
     if (liveStore !== undefined && sessionId !== undefined) {
-      return this.searchLive(q, sessionId, liveStore, input.pageToken);
+      return this.searchLive(q, sessionId, liveStore, input.pageToken, snippetQ);
     }
-    return this.searchIndex(q, input.pageToken);
+    return this.searchIndex(q, input.pageToken, snippetQ);
   }
 
   // -- live route (in-memory transcript scan) ------------------------------------
@@ -648,6 +665,7 @@ export class GlobalSearchService implements IGlobalSearchService {
     sessionId: string,
     store: TranscriptStore,
     pageToken: string | undefined,
+    snippetQ: string[],
   ): Promise<GlobalSearchPage> {
     // The live route has no published generations — the store mutates
     // continuously — so its keyset tokens carry no `g` and no generation
@@ -690,7 +708,7 @@ export class GlobalSearchService implements IGlobalSearchService {
         : matchDocs(q, matchLiveTerms(q.termsQuery ?? [], docs), boundary, budget);
     const { pageRows, hasMore } = paginateRows(q, page, matched.rows);
     return {
-      items: pageRows.map((row) => this.projectHit(q, row)),
+      items: pageRows.map((row) => this.projectHit(q, row, snippetQ)),
       hasMore,
       pageToken: hasMore
         ? encodePageToken(q, 'live', boundaryOf(q, pageRows[pageRows.length - 1]!), undefined)
@@ -726,16 +744,36 @@ export class GlobalSearchService implements IGlobalSearchService {
     const workspaceId = summary?.workspaceId ?? '';
     const sessionTitle = summary?.title ?? '';
     const fallbackTime = summary?.updatedAt ?? 0;
+    const summaryKey = `${workspaceId}\u0000${fallbackTime}\u0000${sessionTitle}`;
     const parseTime = (iso: string | undefined): number => {
       if (iso === undefined) return fallbackTime;
-      const ms = Date.parse(iso);
+      const ms = parseIsoTime(iso);
       return Number.isNaN(ms) ? fallbackTime : ms;
     };
+    // Live-docs memo: the flattening depends only on the transcript stores'
+    // COW item arrays (array identity changes iff the store mutated — the
+    // same arrays `snapshot()` returns) plus the summary fields keyed above,
+    // so a cache hit returns the identical doc set a rebuild would produce;
+    // the docs are never mutated downstream. Bounded like the other
+    // live-route caches.
+    const cacheKey = `${sessionId}\u0000${agentIds.join(',')}`;
+    const itemRefs: (readonly unknown[])[] = [];
+    for (const agentId of agentIds) {
+      itemRefs.push(store.getAgent(agentId)?.getItems() ?? EMPTY_ITEMS);
+    }
+    const cached = this.liveDocsCache.get(cacheKey);
+    if (
+      cached !== undefined &&
+      cached.summaryKey === summaryKey &&
+      sameItemRefs(cached.itemRefs, itemRefs)
+    ) {
+      return cached.docs;
+    }
     const docs: { key: string; value: MessageDoc | TitleDoc }[] = [];
     for (const agentId of agentIds) {
       const transcript = store.getAgent(agentId);
       if (transcript === undefined) continue;
-      for (const item of transcript.snapshot().items) {
+      for (const item of transcript.getItems()) {
         if (item.kind !== 'turn') continue;
         const turnTime = parseTime(item.startedAt);
         const prompt = item.prompt?.trim() ?? '';
@@ -796,6 +834,8 @@ export class GlobalSearchService implements IGlobalSearchService {
         },
       });
     }
+    if (this.liveDocsCache.size >= LIVE_DOCS_CACHE_CAP) this.liveDocsCache.clear();
+    this.liveDocsCache.set(cacheKey, { summaryKey, itemRefs, docs });
     return docs;
   }
 
@@ -814,6 +854,7 @@ export class GlobalSearchService implements IGlobalSearchService {
   private async searchIndex(
     q: NormalizedQuery,
     pageToken: string | undefined,
+    snippetQ: string[],
   ): Promise<GlobalSearchPage> {
     // Query validation comes before any index-state handling: an invalid
     // query must fail the same way whether or not a generation is published.
@@ -888,7 +929,7 @@ export class GlobalSearchService implements IGlobalSearchService {
     if (result.kind === 'building') return this.buildingPage(result.index);
 
     return {
-      items: result.rows.map((row) => this.projectHit(q, row)),
+      items: result.rows.map((row) => this.projectHit(q, row, snippetQ)),
       hasMore: result.hasMore,
       pageToken: result.hasMore
         ? encodePageToken(
@@ -906,7 +947,7 @@ export class GlobalSearchService implements IGlobalSearchService {
 
   // -- shared hit projection & index-state assembly -------------------------------
 
-  private projectHit(q: NormalizedQuery, row: MatchedRow): GlobalSearchHit {
+  private projectHit(q: NormalizedQuery, row: MatchedRow, snippetQ: string[]): GlobalSearchHit {
     const doc = row.value;
     return {
       sessionId: doc.sessionId,
@@ -918,8 +959,8 @@ export class GlobalSearchService implements IGlobalSearchService {
         doc.kind === 'title'
           ? doc.text
           : row.anchor !== undefined && q.literalQuery !== undefined
-            ? makeSnippet(doc.text, q.query, 80, { at: row.anchor, len: q.literalQuery.length })
-            : makeSnippet(doc.text, q.query),
+            ? makeSnippet(doc.text, q.query, 80, { at: row.anchor, len: q.literalQuery.length }, snippetQ)
+            : makeSnippet(doc.text, q.query, 80, undefined, snippetQ),
       time: doc.time,
       turn: doc.kind === 'message' ? doc.turn : undefined,
       stepId: doc.kind === 'message' ? doc.stepId : undefined,
@@ -1054,6 +1095,62 @@ export class GlobalSearchService implements IGlobalSearchService {
 }
 
 // ---------------------------------------------------------------------------
+// live-route memoization (pure computations only — identical inputs must
+// keep producing identical outputs, or search results would change)
+// ---------------------------------------------------------------------------
+
+/**
+ * `Date.parse` memoized by exact input. `Date.parse` is deterministic, and
+ * the live transcript repeats the same `startedAt`/`endedAt` strings across
+ * requests. Bounded: on overflow the whole map clears — losing hits only,
+ * never correctness.
+ */
+const PARSE_TIME_CACHE_CAP = 4096;
+const parseTimeCache = new Map<string, number>();
+function parseIsoTime(iso: string): number {
+  let ms = parseTimeCache.get(iso);
+  if (ms === undefined) {
+    ms = Date.parse(iso);
+    if (parseTimeCache.size >= PARSE_TIME_CACHE_CAP) parseTimeCache.clear();
+    parseTimeCache.set(iso, ms);
+  }
+  return ms;
+}
+
+/**
+ * minidb's default `tokenize` memoized by exact text. It is a pure function
+ * of its input (lowercase + latin words + CJK uni/bigrams), and the live
+ * route re-tokenizes every in-memory document on every request — the
+ * dominant per-request cost. Keying on the full text keeps the memoized
+ * output byte-identical to a fresh tokenize by construction. Bounded as
+ * above.
+ */
+const TOKEN_CACHE_CAP = 8192;
+const tokenCache = new Map<string, readonly string[]>();
+function tokenizeMemo(text: string): readonly string[] {
+  const hit = tokenCache.get(text);
+  if (hit !== undefined) return hit;
+  const tokens = tokenize(text);
+  if (tokenCache.size >= TOKEN_CACHE_CAP) tokenCache.clear();
+  tokenCache.set(text, tokens);
+  return tokens;
+}
+
+/** Cap on the live-docs memo below (live sessions in one process are few). */
+const LIVE_DOCS_CACHE_CAP = 64;
+/** Shared empty item array for agents missing from the store (never cached into). */
+const EMPTY_ITEMS: readonly unknown[] = [];
+
+function sameItemRefs(
+  a: readonly (readonly unknown[])[],
+  b: readonly (readonly unknown[])[],
+): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+}
+
+// ---------------------------------------------------------------------------
 // live-route terms matching
 // ---------------------------------------------------------------------------
 
@@ -1077,7 +1174,7 @@ function matchLiveTerms(
   const matched: { key: string; value: MessageDoc | TitleDoc; score: number }[] = [];
   for (const { key, value: doc } of docs) {
     const counts = new Map<string, number>();
-    for (const token of tokenize(doc.text)) counts.set(token, (counts.get(token) ?? 0) + 1);
+    for (const token of tokenizeMemo(doc.text)) counts.set(token, (counts.get(token) ?? 0) + 1);
     let score = 0;
     let hit = true;
     for (const term of terms) {

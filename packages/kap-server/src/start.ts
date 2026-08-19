@@ -40,7 +40,6 @@ import { registerRequestLogging } from './requestLogging';
 import { resolveRequestId } from './request-id';
 import { registerApiV1Routes } from './routes/registerApiV1Routes';
 import { registerApiV2Routes } from './routes/registerApiV2Routes';
-import { registerWebAssetRoutes } from './routes/webAssets';
 import {
   createServerLogger,
   type ServerLogger,
@@ -148,12 +147,6 @@ export interface ServerStartOptions {
    * all sessions the server hosts — for embedding hosts, not per-session use.
    */
   readonly skillDirs?: readonly string[];
-  /**
-   * Directory of the built Kimi web UI (`dist-web`). When set, `GET /` and the
-   * `/*` SPA fallback serve these assets (auth-exempt, matching v1). Omit to run
-   * the API server without the web UI.
-   */
-  readonly webAssetsDir?: string;
   /**
    * Engine version, reported as `server_version` (GET /api/v1/meta), in the
    * OpenAPI document, and in the lock / instance registry. Defaults to
@@ -628,14 +621,6 @@ export async function startServer(opts: ServerStartOptions): Promise<RunningServ
     const openApiDocument = (app as unknown as { swagger(): unknown }).swagger();
     return reply.type('application/json').send(openApiDocument);
   });
-
-  // Web UI static assets (mirrors v1). Registered LAST so the `/*` SPA fallback
-  // only catches paths not already handled by `/api/*`, `/openapi.json`, or
-  // `/asyncapi.json`. The global auth hook already bypasses non-`/api` paths, so
-  // the page loads without a token; API calls carry it.
-  if (opts.webAssetsDir !== undefined) {
-    await registerWebAssetRoutes(app, opts.webAssetsDir);
-  }
 
   // Bind with port+1 retry on EADDRINUSE (mirrors v1). Port 0 (ephemeral) is
   // never retried.

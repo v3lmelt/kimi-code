@@ -57,6 +57,11 @@ function walk(dir: string, out: string[] = []): string[] {
   return out;
 }
 
+/** Normalize a package-relative path to forward slashes so the manifest is platform-independent. */
+function posixRelative(from: string, to: string): string {
+  return relative(from, to).split('\\').join('/');
+}
+
 function constStringValue(source: string, ident: string): string | undefined {
   const re = new RegExp(`(?:export\\s+)?const\\s+${ident}\\s*(?::[^=;]+)?=\\s*'([^']+)'`);
   return re.exec(source)?.[1];
@@ -71,7 +76,7 @@ function scanSectionOwners(): Map<string, string> {
     for (const match of source.matchAll(/registerConfigSection\(\s*(?:'([^']+)'|([A-Za-z0-9_$]+))/g)) {
       const ident = match[2];
       const domain = match[1] ?? (ident === undefined ? undefined : constStringValue(source, ident));
-      if (domain !== undefined) owners.set(domain, relative(PKG, file));
+      if (domain !== undefined) owners.set(domain, posixRelative(PKG, file));
     }
   }
   return owners;
@@ -88,7 +93,7 @@ function scanOverlayOwners(): Map<string, string> {
     if (!source.includes('registerConfigOverlay(')) continue;
     for (const match of source.matchAll(/registerConfigOverlay\(\s*([A-Za-z0-9_$]+)/g)) {
       const ident = match[1];
-      if (ident !== undefined) owners.set(ident, relative(PKG, file));
+      if (ident !== undefined) owners.set(ident, posixRelative(PKG, file));
     }
   }
   return owners;

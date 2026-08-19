@@ -10,6 +10,7 @@ import {
   type AgentLLMRequestFinish,
 } from '#/agent/llmRequester/llmRequester';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import type { ILogger as Logger, LogPayload } from '#/_base/log/log';
 import {
   configServices,
@@ -158,6 +159,38 @@ describe('LLMRequester service migration coverage', () => {
         messageCount: 1,
         turnStep: '7.3',
       });
+    });
+
+    it('invalidates the cached default tool table when the registry changes', async () => {
+      const registry = ctx.get(IAgentToolRegistryService);
+      const registration = registry.register(
+        {
+          name: 'CacheProbe',
+          description: 'Probe tool for the default-tools cache.',
+          parameters: { type: 'object', properties: {} },
+        } as never,
+        { source: 'builtin' },
+      );
+      ctx.mockNextResponse({ type: 'text', text: 'with tool' });
+      await llmRequester.request({
+        messages: [userMessage('first')],
+        systemPrompt: 'request-specific system',
+        source: { type: 'operation', requestKind: 'direct_test', logFields: {} },
+      });
+      const withTool = wireEvents(ctx, 'llm.tools_snapshot');
+      expect(JSON.stringify(withTool.at(-1)?.args)).toContain('CacheProbe');
+
+      registration.dispose();
+      ctx.mockNextResponse({ type: 'text', text: 'without tool' });
+      await llmRequester.request({
+        messages: [userMessage('second')],
+        systemPrompt: 'request-specific system',
+        source: { type: 'operation', requestKind: 'direct_test', logFields: {} },
+      });
+      const snapshots = wireEvents(ctx, 'llm.tools_snapshot');
+      expect(snapshots.length).toBe(2);
+      expect(JSON.stringify(snapshots[1]?.args)).not.toContain('CacheProbe');
+      expect(snapshots[1]?.args).not.toEqual(snapshots[0]?.args);
     });
 
     it('records the resolved Kimi thinking keep default when thinking is enabled', async () => {

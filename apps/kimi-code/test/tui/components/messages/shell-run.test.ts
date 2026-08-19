@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import { ShellRunComponent } from '#/tui/components/messages/shell-run';
 
+const ESC = '\u001B';
+
 function stripTheme(text: string): string {
   return text.replaceAll(/\u001B\[[0-9;]*m/g, '');
 }
@@ -66,5 +68,31 @@ describe('ShellRunComponent hardening', () => {
       c.append('output');
       c.render(100);
     }).not.toThrow();
+  });
+
+  it('strips escape sequences split across append chunks while running', () => {
+    const c = create();
+    c.append('line one\nline two\n');
+    c.append(`${ESC}[3`);
+    c.append(`1mline three${ESC}[0m\n`);
+    const rendered = stripTheme(c.render(100).join('\n'));
+    expect(rendered).toContain('line three');
+    expect(rendered).not.toContain(ESC);
+  });
+
+  it('shows only the last 5 sanitized lines while running', () => {
+    const c = create();
+    for (let i = 1; i <= 10; i++) c.append(`line ${i}\n`);
+    const rendered = stripTheme(c.render(100).join('\n'));
+
+    const lines = rendered.split('\n').map((l) => l.trimEnd());
+    expect(lines.filter((l) => l.startsWith('  line '))).toEqual([
+      '  line 6',
+      '  line 7',
+      '  line 8',
+      '  line 9',
+      '  line 10',
+    ]);
+    expect(lines).toContain('  +5 lines (0s)');
   });
 });

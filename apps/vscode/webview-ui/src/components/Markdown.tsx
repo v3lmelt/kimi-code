@@ -9,6 +9,7 @@ import { useRequest } from "ahooks";
 import { IconVideo } from "@tabler/icons-react";
 import type { Components } from "react-markdown";
 import { parseSegments, parseColorSegments, extractPaths, checkFilesExist, hasColors, isLocalPath } from "@/lib/text-enrichment";
+import { splitStreamingBlocks } from "@/lib/streaming-text";
 import { CopyButton } from "@/components/CopyButton";
 import { MediaPreviewModal, StreamImagePreview, ImageLoadFail } from "@/components/MediaPreviewModal";
 import { getMediaTypeFromSrc } from "@/lib/media-utils";
@@ -19,6 +20,13 @@ interface MarkdownProps {
   className?: string;
   enableEnrichment?: boolean;
   enableLocalImageRender?: boolean;
+  /**
+   * When true, skip ReactMarkdown/katex/SyntaxHighlighter entirely and render a
+   * cheap pre-wrap text view (fenced code blocks kept as <pre>). Used while a
+   * message is streaming: full re-parse per delta is O(n²) on long messages.
+   * The final render always uses the full ReactMarkdown path.
+   */
+  streaming?: boolean;
 }
 
 function useIsDark(): boolean {
@@ -178,7 +186,7 @@ function unwrapParagraphs(children: React.ReactNode): React.ReactNode {
   });
 }
 
-export const Markdown = memo(function Markdown({ content, className, enableEnrichment = true, enableLocalImageRender = true }: MarkdownProps) {
+export const Markdown = memo(function Markdown({ content, className, enableEnrichment = true, enableLocalImageRender = true, streaming = false }: MarkdownProps) {
   const isDark = useIsDark();
   const [fileMap, setFileMap] = useState<Record<string, boolean>>({});
   const [previewSrc, setPreviewSrc] = useState<string | null>(null);
@@ -263,7 +271,27 @@ export const Markdown = memo(function Markdown({ content, className, enableEnric
     };
   }, [enableEnrichment, enableLocalImageRender, fileMap, codeStyle]);
 
+  const streamingBlocks = useMemo(() => (streaming ? splitStreamingBlocks(content) : null), [streaming, content]);
+
   if (!content) return null;
+
+  if (streamingBlocks) {
+    return (
+      <div className={className}>
+        {streamingBlocks.map((block, i) =>
+          block.type === "code" ? (
+            <pre key={i} className="bg-muted rounded px-2 py-1 overflow-x-auto text-[11px] my-2">
+              <code className="bg-transparent!">{block.value}</code>
+            </pre>
+          ) : (
+            <div key={i} style={{ whiteSpace: "pre-wrap", overflowWrap: "break-word" }}>
+              {block.value}
+            </div>
+          ),
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className={className}>

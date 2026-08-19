@@ -523,3 +523,158 @@ maxContextSize = 200000
     30_000,
   );
 });
+
+/**
+ * RPC-economy tests: the per-session model-catalog cache and the
+ * parallelized usage_update. They drive `AcpSession` off fake klient /
+ * agent objects that count RPC invocations (the catalog is static for
+ * the engine's lifetime, so a session must fetch it at most once).
+ */
+describe('acp-server RPC economy', () => {
+  function catalogItem(model: string): {
+    readonly model: string;
+    readonly max_context_size: number;
+    readonly display_name: string;
+    readonly capabilities: readonly string[];
+  } {
+    return {
+      model,
+      max_context_size: 128_000,
+      display_name: model,
+      capabilities: [],
+    };
+  }
+
+  function makeCountingSession(): {
+    session: AcpSession;
+    listModelsCalls: () => number;
+    getContextCalls: () => number;
+  } {
+    let listModelsCalls = 0;
+    let getContextCalls = 0;
+    const session = Object.create(AcpSession.prototype) as AcpSession;
+    Object.assign(session as unknown as Record<string, unknown>, {
+      klient: {
+        global: {
+          kosong: {
+            listModels: async () => {
+              listModelsCalls += 1;
+              return [catalogItem('kimi-test')];
+            },
+          },
+        },
+      },
+      agent: {
+        getContext: async () => {
+          getContextCalls += 1;
+          return { history: [], tokenCount: 42 };
+        },
+        setThinking: async () => {},
+      },
+      conn: { sessionUpdate: async () => {} },
+      sessionId: 'session-economy',
+      currentModelId: 'kimi-test',
+      currentThinkingLevel: 'off',
+      currentModeId: 'default',
+    });
+    return {
+      session,
+      listModelsCalls: () => listModelsCalls,
+      getContextCalls: () => getContextCalls,
+    };
+  }
+
+  it('configOptions / setThinking reuse the catalog after the first RPC', async () => {
+    const { session, listModelsCalls } = makeCountingSession();
+
+    await session.configOptions();
+    await session.configOptions();
+    await session.setThinking('off');
+    await session.setThinking('on');
+
+    expect(listModelsCalls()).toBe(1);
+  });
+
+  it('usage_update fetches catalog + context in parallel and caches the catalog', async () => {
+    let listModelsInFlight = 0;
+    let sawConcurrentContext = false;
+    let listModelsCalls = 0;
+    let getContextCalls = 0;
+    const session = Object.create(AcpSession.prototype) as AcpSession;
+    Object.assign(session as unknown as Record<string, unknown>, {
+      klient: {
+        global: {
+          kosong: {
+            listModels: async () => {
+              listModelsCalls += 1;
+              listModelsInFlight += 1;
+              await new Promise((resolve) => setTimeout(resolve, 15));
+              listModelsInFlight -= 1;
+              return [catalogItem('kimi-test')];
+            },
+          },
+        },
+      },
+      agent: {
+        getContext: async () => {
+          getContextCalls += 1;
+          if (listModelsInFlight > 0) sawConcurrentContext = true;
+          return { history: [], tokenCount: 42 };
+        },
+      },
+      conn: { sessionUpdate: async () => {} },
+      sessionId: 'session-economy-usage',
+      currentModelId: 'kimi-test',
+    });
+
+    const typed = session as unknown as { emitUsageUpdate(): Promise<void> };
+    await typed.emitUsageUpdate();
+    expect(listModelsCalls).toBe(1);
+    expect(getContextCalls).toBe(1);
+    expect(sawConcurrentContext).toBe(true);
+
+    // A second settled turn must not re-fetch the catalog.
+    await typed.emitUsageUpdate();
+    expect(listModelsCalls).toBe(1);
+    expect(getContextCalls).toBe(2);
+  });
+
+  it('init seeds model + thinking state with parallel RPCs', async () => {
+    let inFlight = 0;
+    let maxConcurrent = 0;
+    const delay = async (): Promise<void> => {
+      inFlight += 1;
+      maxConcurrent = Math.max(maxConcurrent, inFlight);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      inFlight -= 1;
+    };
+    const on = () => ({ dispose: () => {} });
+    const sessionHandle = { events: { on }, skills: { list: async () => [] } };
+    const session = Object.create(AcpSession.prototype) as AcpSession;
+    Object.assign(session as unknown as Record<string, unknown>, {
+      klient: { session: () => sessionHandle },
+      session: sessionHandle,
+      agent: {
+        events: { on },
+        getModel: async () => {
+          await delay();
+          return 'kimi-test';
+        },
+        getThinking: async () => {
+          await delay();
+          return 'off';
+        },
+      },
+      acpConnection: { onTerminalCreated: () => () => {} },
+      sessionId: 'session-economy-init',
+      subscriptions: [],
+      skills: [],
+      currentModelId: '',
+      currentThinkingLevel: 'off',
+    });
+
+    await session.init();
+
+    expect(maxConcurrent).toBe(2);
+  });
+});

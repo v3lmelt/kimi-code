@@ -1,4 +1,5 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
+import type { Event } from '@moonshot-ai/kimi-code-sdk';
 
 import { SessionEventHandler } from '#/tui/controllers/session-event-handler';
 import { getBuiltInPalette } from '#/tui/theme';
@@ -19,6 +20,7 @@ function makeHost() {
         streamingPhase: 'idle',
         model: 'kimi-model',
         permissionMode: 'manual',
+        workflowRuns: [],
       },
       queuedMessages: [],
       queuedMessageDispatchPending: false,
@@ -121,12 +123,30 @@ function processStartedEvent(taskId: string) {
   } as const;
 }
 
+function workflowStartedEvent(taskId: string): Event {
+  return {
+    type: 'background.task.started',
+    sessionId: 's1',
+    agentId: 'main',
+    info: {
+      taskId,
+      kind: 'workflow',
+      description: 'Running workflow: smoke test',
+      status: 'running',
+      startedAt: Date.now(),
+      endedAt: null,
+    },
+  } as unknown as Event;
+}
+
 describe('SessionEventHandler — background task footer refresh', () => {
   beforeEach(() => {
+    vi.useFakeTimers();
     vi.clearAllMocks();
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     vi.restoreAllMocks();
   });
 
@@ -140,7 +160,10 @@ describe('SessionEventHandler — background task footer refresh', () => {
     const badgeCalls = host.state.footer.setBackgroundCounts.mock.calls as Array<
       [{ bashTasks: number; agentTasks: number }]
     >;
-    expect(badgeCalls.at(-1)?.[0]).toEqual({ bashTasks: 0, agentTasks: 1 });
+    expect(badgeCalls.at(-1)?.[0]).toEqual({ bashTasks: 0, agentTasks: 1, workflowTasks: 0 });
+
+    // Rows land on the throttled footer sync (250ms trailing window).
+    vi.advanceTimersByTime(250);
 
     // Per-agent rows refreshed with the running background agent.
     const rowsCalls = host.state.footer.setRunningAgents.mock.calls;
@@ -156,6 +179,10 @@ describe('SessionEventHandler — background task footer refresh', () => {
     handler.handleEvent(agentStartedEvent('t1'), vi.fn());
     handler.handleEvent(agentTerminatedEvent('t1'), vi.fn());
 
+    // Both events fall in one throttle window; the trailing sync reflects the
+    // final state (the row is gone).
+    vi.advanceTimersByTime(250);
+
     const rowsCalls = host.state.footer.setRunningAgents.mock.calls;
     const lastRows = rowsCalls.at(-1)?.[0] as unknown;
     expect(lastRows).toEqual([]);
@@ -166,6 +193,9 @@ describe('SessionEventHandler — background task footer refresh', () => {
     const handler = new SessionEventHandler(host);
 
     handler.handleEvent(processStartedEvent('t2'), vi.fn());
+
+    // Rows land on the throttled footer sync (250ms trailing window).
+    vi.advanceTimersByTime(250);
 
     const rowsCalls = host.state.footer.setRunningAgents.mock.calls;
     const lastRows = rowsCalls.at(-1)?.[0] as Array<{
@@ -178,6 +208,31 @@ describe('SessionEventHandler — background task footer refresh', () => {
     expect(lastRows!.some((row) => row.id === 't2' && row.name === 'bash' && row.tokens === 0)).toBe(true);
   });
 
+  it('coalesces rapid footer refreshes into one sync per throttle window', () => {
+    const { host } = makeHost();
+    const handler = new SessionEventHandler(host);
+
+    handler.handleEvent(processStartedEvent('t2'), vi.fn());
+    handler.handleEvent(agentStartedEvent('t1'), vi.fn());
+    handler.handleEvent(agentTerminatedEvent('t1'), vi.fn());
+
+    // A burst inside one window produces no intermediate syncs.
+    expect(host.state.footer.setRunningAgents).not.toHaveBeenCalled();
+
+    // The trailing sync reflects only the latest state.
+    vi.advanceTimersByTime(250);
+    expect(host.state.footer.setRunningAgents).toHaveBeenCalledTimes(1);
+    const rows = host.state.footer.setRunningAgents.mock.calls.at(-1)?.[0] as unknown[];
+    expect(rows.some((row) => (row as { id: string }).id === 't2')).toBe(true);
+    expect(rows.some((row) => (row as { id: string }).id === 'a1')).toBe(false);
+
+    // A later event opens a fresh window and still flushes at its end.
+    handler.handleEvent(agentStartedEvent('t3'), vi.fn());
+    expect(host.state.footer.setRunningAgents).toHaveBeenCalledTimes(1);
+    vi.advanceTimersByTime(250);
+    expect(host.state.footer.setRunningAgents).toHaveBeenCalledTimes(2);
+  });
+
   it('keeps the badge accurate when bash and agent tasks run together', () => {
     const { host } = makeHost();
     const handler = new SessionEventHandler(host);
@@ -188,6 +243,23 @@ describe('SessionEventHandler — background task footer refresh', () => {
     const badgeCalls = host.state.footer.setBackgroundCounts.mock.calls as Array<
       [{ bashTasks: number; agentTasks: number }]
     >;
-    expect(badgeCalls.at(-1)?.[0]).toEqual({ bashTasks: 1, agentTasks: 1 });
+    expect(badgeCalls.at(-1)?.[0]).toEqual({ bashTasks: 1, agentTasks: 1, workflowTasks: 0 });
+  });
+
+  it('updates the badge but skips the standalone entry for a workflow run', () => {
+    const { host } = makeHost();
+    const handler = new SessionEventHandler(host);
+
+    handler.handleEvent(workflowStartedEvent('wf1'), vi.fn());
+
+    // The workflow run's own tool call card shows the subagent activity, so
+    // no "bash task started in background" entry is appended.
+    expect(host.appendTranscriptEntry).not.toHaveBeenCalled();
+
+    // The run still counts towards the compact background-task badge.
+    const badgeCalls = host.state.footer.setBackgroundCounts.mock.calls as Array<
+      [{ bashTasks: number; agentTasks: number }]
+    >;
+    expect(badgeCalls.at(-1)?.[0]).toEqual({ bashTasks: 0, agentTasks: 0, workflowTasks: 1 });
   });
 });

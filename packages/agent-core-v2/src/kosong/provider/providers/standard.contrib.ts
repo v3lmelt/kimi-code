@@ -60,3 +60,33 @@ registerProviderDefinition({
     { endpoint: () => ({ apiKeyEnv: 'GOOGLE_API_KEY', baseUrlEnv: 'GOOGLE_GEMINI_BASE_URL' }) },
   ],
 });
+
+// OpenCode Go — an endpoint-only definition so the OPENCODE_GO_API_KEY env
+// chain resolves (id-level queries read this one). Models route to their wire
+// via the per-alias `protocol` override; the unregistered protocols fall back
+// to their base defaults, which is what this gateway needs.
+//
+// The gateway rejects assistant messages that carry neither `content` nor
+// `tool_calls` (a turn interrupted mid-reasoning then resumed leaves a
+// think-only assistant whose think is pulled into `reasoning_content`), so a
+// `convertMessage` trait drops exactly those — mirroring the kimi trait
+// pattern and keeping every other message untouched.
+registerProviderDefinition({
+  id: 'opencode-go',
+  baseProtocol: 'openai',
+  traits: [
+    {
+      convertMessage: (message, converted) => {
+        if (
+          message.role === 'assistant' &&
+          converted['content'] === undefined &&
+          converted['tool_calls'] === undefined
+        ) {
+          return null;
+        }
+        return converted;
+      },
+    },
+  ],
+  endpoint: { apiKeyEnv: 'OPENCODE_GO_API_KEY', baseUrlEnv: 'OPENCODE_GO_BASE_URL' },
+});

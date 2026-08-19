@@ -1,5 +1,5 @@
 /**
- * Native v2 `kimi -p` (print mode) runner.
+ * Native v2 `hasu -p` (print mode) runner.
  *
  * Unlike the v1 path (and the former `V2PromptHarness` / `V2Session` shim), this
  * runner talks to agent-core-v2's native DI services directly — no
@@ -338,7 +338,7 @@ async function resolveNativeSession(
     if (target.cwd !== undefined && resolve(target.cwd) !== resolve(workDir)) {
       stderr.write(
         `Session "${opts.session}" was created under a different directory.\n` +
-          `  cd "${target.cwd}" && kimi -r ${opts.session}\n\n`,
+          `  cd "${target.cwd}" && hasu -r ${opts.session}\n\n`,
       );
       throw new Error(`Session "${opts.session}" was created under a different directory.`);
     }
@@ -684,7 +684,7 @@ export interface PrintBackgroundPolicyInput {
 }
 
 /**
- * Apply the print-mode (`kimi -p`) background-resource policy after the main
+ * Apply the print-mode (`hasu -p`) background-resource policy after the main
  * turn completes. A single loop re-evaluates the Session's live resources in
  * order on every round and stays alive while any of them is pending:
  *  - goal    : while a goal is `active`, keep waiting for its continuation

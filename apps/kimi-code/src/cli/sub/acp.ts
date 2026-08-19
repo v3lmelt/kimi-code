@@ -1,5 +1,5 @@
 /**
- * `kimi acp` sub-command routing and legacy implementation.
+ * `hasu acp` sub-command routing and legacy implementation.
  *
  * By default the command delegates to the agent-core-v2 ACP server. A truthy
  * `KIMI_CODE_LEGACY_FLAG` uses the SDK harness and `@moonshot-ai/acp-adapter`
@@ -45,7 +45,7 @@ export function registerAcpCommand(parent: Command): void {
 
   parent
     .command('acp')
-    .description('Run kimi-code as an Agent Client Protocol (ACP) server over stdio.')
+    .description('Run hasu as an Agent Client Protocol (ACP) server over stdio.')
     .option(
       '--login',
       'Run the device-code login flow then exit (entry point for ACP terminal-auth).',
@@ -62,7 +62,7 @@ export function registerAcpCommand(parent: Command): void {
         uiMode: 'acp',
       });
       // Forward `KIMI_CODE_HOME` (if set) into `authMethods[0].env` so the
-      // `kimi login` subprocess clients spawn for terminal-auth writes its
+      // `hasu login` subprocess clients spawn for terminal-auth writes its
       // token under the same data root the ACP server reads from. Used for
       // sandboxed test setups (Zed's `agent_servers.*.env.KIMI_CODE_HOME =
       // /tmp/...`). Production runs leave the env unset and the field stays
@@ -77,7 +77,7 @@ export function registerAcpCommand(parent: Command): void {
       // AcpBetaFeatureFlag, current JetBrains plugin, etc.). `command` is
       // the absolute path to this very binary (`process.argv[1]`) so the
       // client can spawn it with `args:['login']` for the top-level
-      // `kimi login` subcommand — matches kimi-cli `acp/server.py:77-96`.
+      // `hasu login` subcommand — matches kimi-cli `acp/server.py:77-96`.
       const legacyCommand = process.argv[1];
       const builtinCommands: AvailableCommand[] = (ACP_BUILTIN_SLASH_COMMANDS as readonly AvailableCommand[]).map((cmd) => ({
         name: cmd.name,
@@ -117,7 +117,7 @@ export function registerAcpCommand(parent: Command): void {
       };
       try {
         await runAcpServer(harness, {
-          agentInfo: { name: 'Kimi Code CLI', version: getVersion() },
+          agentInfo: { name: 'Hasu CLI', version: getVersion() },
           slashCommands: resolveSlashCommands,
           ...(terminalAuthEnv ? { terminalAuthEnv } : {}),
           ...(legacyCommand !== undefined && legacyCommand.length > 0

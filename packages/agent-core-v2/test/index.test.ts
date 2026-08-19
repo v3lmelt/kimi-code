@@ -45,6 +45,8 @@ const V1_RECORD_TYPES: ReadonlySet<string> = new Set([
   'plan_mode.enter',
   'plan_mode.cancel',
   'plan_mode.exit',
+  'ultracode_mode.enter',
+  'ultracode_mode.exit',
   'swarm_mode.enter',
   'swarm_mode.exit',
   'tools.register_user_tool',

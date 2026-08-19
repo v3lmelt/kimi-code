@@ -135,22 +135,29 @@ export function deriveDefaultThinkingEffort(
  * `getConfig` throws — letting the caller decide how to surface a
  * degenerate config without forcing every test stub to provide every
  * field.
+ *
+ * `config` is an optional already-fetched harness config snapshot; when
+ * supplied, no `getConfig` round-trip happens. Callers that need the
+ * catalog more than once per request (e.g. a model switch followed by
+ * the `config_option_update` refresh) pass the same snapshot through so
+ * the harness is queried exactly once.
  */
 export async function listModelsFromHarness(
   harness: KimiHarness,
+  config?: Awaited<ReturnType<KimiHarness['getConfig']>>,
 ): Promise<readonly AcpModelEntry[]> {
   if (typeof harness.getConfig !== 'function') return [];
-  let config: Awaited<ReturnType<KimiHarness['getConfig']>>;
+  let cfg: Awaited<ReturnType<KimiHarness['getConfig']>>;
   try {
-    config = await harness.getConfig();
+    cfg = config ?? (await harness.getConfig());
   } catch {
     return [];
   }
-  const models = config.models;
+  const models = cfg.models;
   if (models === undefined) return [];
   const out: AcpModelEntry[] = [];
   for (const [id, alias] of Object.entries(models)) {
-    const providerType = providerTypeOf(alias, config);
+    const providerType = providerTypeOf(alias, cfg);
     const effective = effectiveModelAlias(alias, providerType);
     out.push({
       id,

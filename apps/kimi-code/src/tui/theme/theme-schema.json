@@ -1,8 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "$id": "https://github.com/moonshot-ai/kimi-code/blob/main/apps/kimi-code/src/tui/theme/theme-schema.json",
-  "title": "Kimi Code Custom Theme",
-  "description": "Schema for Kimi Code TUI custom theme definitions",
+  "title": "Hasu Custom Theme",
+  "description": "Schema for Hasu TUI custom theme definitions",
   "type": "object",
   "required": ["name"],
   "properties": {
@@ -46,7 +46,8 @@
         "diffGutter": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$", "description": "Diff gutter color" },
         "diffMeta": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$", "description": "Diff meta color" },
         "roleUser": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$", "description": "User message accent" },
-        "shellMode": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$", "description": "Shell mode (`!`) prompt, editor border, and the echoed `$ command` line" }
+        "shellMode": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$", "description": "Shell mode (`!`) prompt, editor border, and the echoed `$ command` line" },
+        "effortUltra": { "type": "string", "pattern": "^#[0-9a-fA-F]{6}$", "description": "Ultracode mode hue: footer ultracode pill, ultracode effort segment, animated ultracode labels" }
       },
       "additionalProperties": {
         "type": "string",

@@ -16,7 +16,12 @@
  * pair via `buildSubagentModelDescriptions`, suffixing each line with the
  * entry's capability flags resolved through `IModelCatalog`. Swarm mode is
  * entered through `IAgentSwarmService`; the caller's agent id comes from
- * `IAgentScopeContext`. Pure tool — owns no scoped state.
+ * `IAgentScopeContext`. When the `[agent_swarm_security]` section is enabled,
+ * each subagent prompt is pre-screened by a two-stage classifier (a fast round
+ * that escalates suspicious prompts to a careful review round) before spawn —
+ * blocked prompts fail that item without running, and completed results are
+ * post-scanned for secret / PII risk patterns, prefixing hits with a
+ * `SECURITY WARNING` marker. Pure tool — owns no scoped state.
  *
  * Registered via the module-level `registerAgentToolService(IAgentSwarmTool,
  * AgentSwarmTool)` at the bottom of this file — the same "import = register"
@@ -35,15 +40,34 @@ import { toInputJsonSchema } from '#/tool/input-schema';
 import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
 import { IModelCatalog } from '#/kosong/model/catalog';
-import { ISessionSwarmService, type SessionSwarmTask } from '#/session/swarm/sessionSwarm';
+import {
+  ISessionSwarmService,
+  type SessionSwarmRunResult,
+  type SessionSwarmTask,
+} from '#/session/swarm/sessionSwarm';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import { IAgentLLMRequesterService } from '#/agent/llmRequester/llmRequester';
+import { ITelemetryService } from '#/app/telemetry/telemetry';
+import { ILogService } from '#/_base/log/log';
+import { createUserMessage, extractText, type Message } from '#/kosong/contract/message';
+import type { ThinkingEffort } from '#/kosong/contract/provider';
+import type { ModelRequester } from '#/kosong/model/modelRequester';
 import {
   subagentAllowlistFor,
   subagentTypeNotAllowedMessage,
 } from '#/app/agentProfileCatalog/profile-shared';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import { IAgentSwarmService } from '#/agent/swarm/swarm';
+import {
+  parseSecurityVerdict,
+  resolveAgentSwarmSecurity,
+  scanSecurityRisk,
+  securityClassifierInstruction,
+  SWARM_SECURITY_REJECTED_MESSAGE,
+  type ResolvedSwarmSecurity,
+  type SecurityClassifierStage,
+} from '#/agent/swarm/securityConfig';
 import {
   buildSubagentModelDescriptions,
   resolveSubagentBinding,
@@ -112,6 +136,9 @@ export class AgentSwarmTool implements IAgentSwarmTool {
     @ISessionAgentProfileCatalog private readonly catalog: ISessionAgentProfileCatalog,
     @IAgentProfileService private readonly profile: IAgentProfileService,
     @IModelCatalog private readonly modelCatalog: IModelCatalog,
+    @IAgentLLMRequesterService private readonly llmRequester?: IAgentLLMRequesterService,
+    @ITelemetryService private readonly telemetry?: ITelemetryService,
+    @ILogService private readonly log?: ILogService,
   ) {
     this.callerAgentId = scopeContext.agentId;
   }
@@ -199,44 +226,255 @@ export class AgentSwarmTool implements IAgentSwarmTool {
     const specs = await createAgentSwarmSpecs(args, (agentId) =>
       this.swarmService.getSwarmItem({ callerAgentId: this.callerAgentId, agentId }),
     );
-    const tasks: SessionSwarmTask<AgentSwarmSpec>[] = specs.map((spec) => {
-      const descriptionName = spec.kind === 'resume' ? 'resume' : profileName;
-      const common = {
-        data: spec,
-        profileName: spec.kind === 'resume' ? 'subagent' : profileName,
-        parentToolCallId: toolCallId,
-        prompt: spec.prompt,
-        description: childDescription(args.description, spec.index, descriptionName),
-        swarmIndex: spec.index,
-        runInBackground: false,
-        swarmItem: spec.item,
-        signal,
-        timeout: timeoutMs,
-      };
-      if (spec.kind === 'resume') {
+    const security = resolveAgentSwarmSecurity(
+      this.config,
+      this.flags,
+      this.profile.data().modelAlias,
+      this.modelCatalog,
+    );
+    const blocked = new Set<number>();
+    if (security !== undefined && specs.length > 0) {
+      await this.classifySwarmSpecs(security, specs, blocked, signal);
+    }
+    const tasks: SessionSwarmTask<AgentSwarmSpec>[] = specs
+      .filter((spec) => !blocked.has(spec.index))
+      .map((spec) => {
+        const descriptionName = spec.kind === 'resume' ? 'resume' : profileName;
+        const common = {
+          data: spec,
+          profileName: spec.kind === 'resume' ? 'subagent' : profileName,
+          parentToolCallId: toolCallId,
+          prompt: spec.prompt,
+          description: childDescription(args.description, spec.index, descriptionName),
+          swarmIndex: spec.index,
+          runInBackground: false,
+          swarmItem: spec.item,
+          signal,
+          timeout: timeoutMs,
+        };
+        if (spec.kind === 'resume') {
+          return {
+            ...common,
+            kind: 'resume' as const,
+            resumeAgentId: spec.agentId,
+          };
+        }
         return {
           ...common,
-          kind: 'resume' as const,
-          resumeAgentId: spec.agentId,
+          kind: 'spawn' as const,
+          binding,
         };
-      }
-      return {
-        ...common,
-        kind: 'spawn' as const,
-        binding,
-      };
-    });
+      });
     const results = await this.swarmService.run({
       callerAgentId: this.callerAgentId,
       tasks,
     });
-    return renderSwarmResults(
-      results.map(({ task, ...result }) => ({ spec: task.data as AgentSwarmSpec, ...result })),
+    const combined = mergeSwarmResults(specs, blocked, results);
+    const reviewed =
+      security !== undefined && security.reviewResults ? applySecurityReview(combined) : combined;
+    return renderSwarmResults(reviewed);
+  }
+
+  private async classifySwarmSpecs(
+    security: ResolvedSwarmSecurity,
+    specs: readonly AgentSwarmSpec[],
+    blocked: Set<number>,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const startedAt = Date.now();
+    let blockedCount = 0;
+    let next = 0;
+    const workers = Array.from({ length: SWARM_SECURITY_CLASSIFY_CONCURRENCY }, async () => {
+      for (;;) {
+        if (signal.aborted) return;
+        const spec = specs[next];
+        if (spec === undefined) return;
+        next += 1;
+        if (blocked.has(spec.index)) continue;
+        if ((await this.classifySwarmSpec(security, spec, signal)) === 'block') {
+          blocked.add(spec.index);
+          blockedCount += 1;
+          this.log?.info('swarm security classifier blocked subagent prompt', {
+            index: spec.index,
+            kind: spec.kind,
+          });
+        }
+      }
+    });
+    await Promise.all(workers);
+    this.telemetry?.track('swarm_security_classify', {
+      total: specs.length,
+      blocked: blockedCount,
+      duration_ms: Date.now() - startedAt,
+    });
+  }
+
+  private async classifySwarmSpec(
+    security: ResolvedSwarmSecurity,
+    spec: AgentSwarmSpec,
+    signal: AbortSignal,
+  ): Promise<'allow' | 'block'> {
+    const context = buildSecurityClassifyContext(spec);
+    const fast = await this.runClassifierRound(security, 'fast', context, signal);
+    if (fast === undefined) return 'allow';
+    const fastVerdict = parseSecurityVerdict(fast);
+    if (fastVerdict === 'block') return 'block';
+    if (fastVerdict === 'allow') return 'allow';
+    if (!security.thinkingStage) return 'allow';
+    const review = await this.runClassifierRound(security, 'review', context, signal);
+    if (review === undefined) return 'allow';
+    return parseSecurityVerdict(review) === 'block' ? 'block' : 'allow';
+  }
+
+  private async runClassifierRound(
+    security: ResolvedSwarmSecurity,
+    stage: SecurityClassifierStage,
+    prompt: string,
+    signal: AbortSignal,
+  ): Promise<string | undefined> {
+    const model = stage === 'fast' ? security.fastModel : security.reviewModel;
+    const maxOutput =
+      stage === 'fast' ? security.fastMaxOutputTokens : security.reviewMaxOutputTokens;
+    const messages = [createUserMessage(`${securityClassifierInstruction(stage)}\n\n${prompt}`)];
+    const { signal: classifySignal, cancel } = linkTimeoutSignal(signal, security.timeoutMs);
+    try {
+      const text =
+        model === this.profile.data().modelAlias
+          ? await this.requestViaLlmRequester(messages, maxOutput, classifySignal)
+          : await runDirectClassifierRequest(
+              this.modelCatalog.getRequester(model),
+              messages,
+              maxOutput,
+              stage,
+              classifySignal,
+            );
+      const trimmed = text.trim();
+      return trimmed.length > 0 ? trimmed : undefined;
+    } catch (error) {
+      if (signal.aborted) throw error;
+      this.log?.warn('swarm security classifier request failed; allowing prompt', {
+        error: error instanceof Error ? error.message : String(error),
+        model,
+        stage,
+      });
+      return undefined;
+    } finally {
+      cancel();
+    }
+  }
+
+  private async requestViaLlmRequester(
+    messages: readonly Message[],
+    maxOutput: number,
+    signal: AbortSignal,
+  ): Promise<string> {
+    if (this.llmRequester === undefined) {
+      throw new Error('swarm security classifier unavailable: llmRequester not injected');
+    }
+    const finish = await this.llmRequester.request(
+      {
+        messages,
+        maxOutputSize: maxOutput,
+        source: { type: 'operation', requestKind: 'swarm_security_classify' },
+      },
+      undefined,
+      signal,
     );
+    return extractText(finish.message);
   }
 }
 
 registerAgentToolService(IAgentSwarmTool, AgentSwarmTool, { name: 'AgentSwarm', domain: 'swarm' });
+
+const SWARM_SECURITY_CLASSIFY_CONCURRENCY = 8;
+
+function buildSecurityClassifyContext(spec: AgentSwarmSpec): string {
+  const kind =
+    spec.kind === 'resume'
+      ? `Resume existing subagent (agent_id: ${spec.agentId})`
+      : 'Spawn a new subagent';
+  return `${kind}\nSubagent prompt:\n${spec.prompt}`;
+}
+
+function linkTimeoutSignal(signal: AbortSignal, timeoutMs: number): {
+  readonly signal: AbortSignal;
+  readonly cancel: () => void;
+} {
+  const controller = new AbortController();
+  const onAbort = () => controller.abort();
+  if (signal.aborted) {
+    controller.abort();
+  } else {
+    signal.addEventListener('abort', onAbort, { once: true });
+  }
+  const timer = setTimeout(() => controller.abort(), Math.max(1, timeoutMs));
+  return {
+    signal: controller.signal,
+    cancel: () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    },
+  };
+}
+
+/** Restores the spec order the renderer expects, filling blocked specs with a
+ *  synthetic failed result so the swarm never spawns them. */
+function mergeSwarmResults(
+  specs: readonly AgentSwarmSpec[],
+  blocked: ReadonlySet<number>,
+  runResults: readonly SessionSwarmRunResult<AgentSwarmSpec>[],
+): SwarmRunResult[] {
+  const ordered: SwarmRunResult[] = [];
+  let runIndex = 0;
+  for (const spec of specs) {
+    if (blocked.has(spec.index)) {
+      ordered.push({
+        spec,
+        status: 'failed',
+        state: 'not_started',
+        error: SWARM_SECURITY_REJECTED_MESSAGE,
+      });
+      continue;
+    }
+    const run = runResults[runIndex];
+    if (run === undefined) continue;
+    runIndex += 1;
+    const { task, ...rest } = run;
+    ordered.push({ spec: task.data as AgentSwarmSpec, ...rest });
+  }
+  return ordered;
+}
+
+/** Post-review: prefixes completed results that match a risk pattern. */
+function applySecurityReview(results: readonly SwarmRunResult[]): SwarmRunResult[] {
+  return results.map((result) => {
+    if (result.status !== 'completed' || result.result === undefined) return result;
+    const warning = scanSecurityRisk(result.result);
+    return warning === undefined
+      ? result
+      : { ...result, result: `${warning}\n\n${result.result}` };
+  });
+}
+
+async function runDirectClassifierRequest(
+  requester: ModelRequester,
+  messages: readonly Message[],
+  maxCompletionTokens: number,
+  stage: SecurityClassifierStage,
+  signal: AbortSignal,
+): Promise<string> {
+  const thinkingEffort: ThinkingEffort | undefined =
+    stage === 'review' && requester.model.capabilities.thinking === true ? 'on' : undefined;
+  let text = '';
+  for await (const event of requester.request(
+    { systemPrompt: '', tools: [], messages },
+    signal,
+    { maxCompletionTokens, thinkingEffort },
+  )) {
+    if (event.type === 'finish') text = extractText(event.message);
+  }
+  return text;
+}
 
 async function createAgentSwarmSpecs(
   args: AgentSwarmToolInput,

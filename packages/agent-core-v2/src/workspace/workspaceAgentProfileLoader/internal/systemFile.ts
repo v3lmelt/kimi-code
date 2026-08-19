@@ -25,6 +25,7 @@ import {
 import {
   renderPromptTemplateResult,
   skillActiveFor,
+  todoActiveFor,
 } from '#/app/agentProfileCatalog/profile-shared';
 import type { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { HostFsError, OsFsErrors } from '#/os/interface/hostFsErrors';
@@ -58,6 +59,9 @@ export async function loadSystemMdProfile(
   const skillActive =
     (builtinDefault.tools === undefined || skillActiveFor(builtinDefault.tools)) &&
     !(builtinDefault.disallowedTools ?? []).includes('Skill');
+  const todoActive =
+    (builtinDefault.tools === undefined || todoActiveFor(builtinDefault.tools)) &&
+    !(builtinDefault.disallowedTools ?? []).includes('TodoList');
   return normalizeAgentProfile({
     name: DEFAULT_AGENT_PROFILE_NAME,
     description: builtinDefault.description,
@@ -66,7 +70,7 @@ export async function loadSystemMdProfile(
     disallowedTools: builtinDefault.disallowedTools,
     subagents: builtinDefault.subagents,
     renderSystemPrompt: (context) =>
-      renderPromptTemplateResult(text, context, { skillActive }, (ctx) =>
+      renderPromptTemplateResult(text, context, { skillActive, todoActive }, (ctx) =>
         builtinDefault.renderSystemPrompt(ctx),
       ),
   });

@@ -37,6 +37,7 @@ import type {
   ContentPart,
   IDisposable,
   Klient,
+  ModelCatalogItem,
   PromptLaunchResult,
   SessionEventPayloads,
   SessionHandle,
@@ -186,6 +187,14 @@ export class AcpSession {
   private currentThinkingLevel: string = 'off';
   /** Current ACP mode. */
   private currentModeId: AcpModeId = DEFAULT_MODE_ID;
+  /**
+   * Cached engine model catalog. The catalog is static for the lifetime of an
+   * engine process (built from config at boot), so a per-session cache turns
+   * `usage_update`, `configOptions`, and config-change refreshes from a full
+   * `kosong.listModels` RPC each into a one-time fetch. Never cached on
+   * failure — the next call retries.
+   */
+  private modelsCache: readonly ModelCatalogItem[] | undefined;
   /**
    * Cached session skill summaries — the backing data for slash-intent
    * detection and `availableCommands()`. Seeded in `init()` and refreshed on
@@ -349,8 +358,13 @@ export class AcpSession {
     });
     this.subscriptions.push({ dispose: unsubscribeTerminal });
     try {
-      this.currentModelId = await this.agent.getModel();
-      this.currentThinkingLevel = await this.agent.getThinking();
+      // Two independent RPCs — resolve in parallel.
+      const [modelId, thinkingLevel] = await Promise.all([
+        this.agent.getModel(),
+        this.agent.getThinking(),
+      ]);
+      this.currentModelId = modelId;
+      this.currentThinkingLevel = thinkingLevel;
     } catch (error) {
       // Keep the unbound defaults — configOptions stays honest.
       log.warn('acp: could not seed model/thinking state', {
@@ -926,14 +940,21 @@ export class AcpSession {
    * from the catalog. Skipped while no catalog model matches the bound id —
    * there is nothing honest to report. `cost` stays omitted (the engine has
    * no cost data).
+   *
+   * The catalog fetch and the context read are independent — resolved in
+   * parallel — and the catalog comes from the per-session cache, so a
+   * settled turn costs one `getContext` RPC instead of two serial RPCs.
    */
   private async emitUsageUpdate(): Promise<void> {
     try {
-      const size = (await this.klient.global.kosong.listModels()).find(
+      const [models, context] = await Promise.all([
+        this.listModels(),
+        this.agent.getContext(),
+      ]);
+      const size = models.find(
         (item) => item.model === this.currentModelId,
       )?.max_context_size;
       if (size === undefined) return;
-      const context = await this.agent.getContext();
       this.emit(usageUpdateNotification(this.sessionId, context.tokenCount, size));
     } catch (error) {
       log.warn('acp: failed to push usage_update', {
@@ -1015,13 +1036,26 @@ export class AcpSession {
    * thinking-capable (see `buildSessionConfigOptions`).
    */
   async configOptions(): Promise<SessionConfigOption[]> {
-    const models = projectModelCatalog(await this.klient.global.kosong.listModels());
+    const models = projectModelCatalog(await this.listModels());
     return buildSessionConfigOptions(
       models,
       this.currentModelId,
       this.currentThinkingLevel,
       this.currentModeId,
     );
+  }
+
+  /**
+   * The engine model catalog, cached per session. The catalog is static for
+   * the lifetime of the engine process, so after the first fetch this never
+   * hits the RPC channel again; a failed fetch stays uncached and retries on
+   * the next call.
+   */
+  private async listModels(): Promise<readonly ModelCatalogItem[]> {
+    if (this.modelsCache === undefined) {
+      this.modelsCache = await this.klient.global.kosong.listModels();
+    }
+    return this.modelsCache;
   }
 
   /**
@@ -1054,7 +1088,7 @@ export class AcpSession {
     // picks the NEW model's default level, not the old one's.
     this.currentModelId = baseId;
     if (hasSuffix) {
-      const models = projectModelCatalog(await this.klient.global.kosong.listModels());
+      const models = projectModelCatalog(await this.listModels());
       const level = models.find((model) => model.id === baseId)?.defaultThinkingEffort ?? 'on';
       await this.agent.setThinking(level);
       this.currentThinkingLevel = level;
@@ -1073,7 +1107,7 @@ export class AcpSession {
    * `invalid_params`.
    */
   async setThinking(value: string): Promise<boolean> {
-    const models = projectModelCatalog(await this.klient.global.kosong.listModels());
+    const models = projectModelCatalog(await this.listModels());
     const entry = models.find((model) => model.id === this.currentModelId);
     const efforts = entry?.supportEfforts;
     const alwaysThinking = entry?.alwaysThinking === true;

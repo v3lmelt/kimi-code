@@ -127,7 +127,7 @@ describe('Session legacy status (best-effort runtime state)', () => {
         [IAgentProfileService, profile],
         [IAgentTokenCountingService, { get: () => ({ size: 25, measured: 20, estimated: 5 }), statusSize: () => 25 }],
         [IAgentPermissionModeService, { mode: 'manual' }],
-        [IAgentPlanService, { status: () => Promise.resolve(null) }],
+        [IAgentPlanService, { status: () => Promise.resolve(null), currentPlanFilePath: () => null }],
         [IAgentSwarmService, { isActive: false }],
         [
           IAgentActivityView,
@@ -186,7 +186,7 @@ describe('Session legacy status (best-effort runtime state)', () => {
         [IAgentProfileService, profile],
         [IAgentTokenCountingService, { get: () => ({ size: 0, measured: 0, estimated: 0 }), statusSize: () => 0 }],
         [IAgentPermissionModeService, { mode: 'manual' }],
-        [IAgentPlanService, { status: () => Promise.resolve(null) }],
+        [IAgentPlanService, { status: () => Promise.resolve(null), currentPlanFilePath: () => null }],
         [IAgentSwarmService, { isActive: false }],
         // Unbound: assembleStatus resolves the default model's context cap,
         // which asks the model service first — no default model here.
@@ -249,7 +249,7 @@ describe('Session legacy status (best-effort runtime state)', () => {
         [IAgentProfileService, profile],
         [IAgentTokenCountingService, { get: () => ({ size: 0, measured: 0, estimated: 0 }), statusSize: () => 0 }],
         [IAgentPermissionModeService, { mode: 'manual' }],
-        [IAgentPlanService, { status: () => Promise.resolve(null) }],
+        [IAgentPlanService, { status: () => Promise.resolve(null), currentPlanFilePath: () => null }],
         [IAgentSwarmService, { isActive: false }],
         [IModelService, { getDefaultModel: () => 'default-model' }],
         [
@@ -332,7 +332,7 @@ describe('Session legacy status (best-effort runtime state)', () => {
         [IAgentProfileService, profile],
         [IAgentTokenCountingService, { get: () => ({ size: 120_000, measured: 110_000, estimated: 10_000 }), statusSize: () => 120_000 }],
         [IAgentPermissionModeService, { mode: 'manual' }],
-        [IAgentPlanService, { status: () => Promise.resolve(null) }],
+        [IAgentPlanService, { status: () => Promise.resolve(null), currentPlanFilePath: () => null }],
         [IAgentSwarmService, { isActive: false }],
         [
           IAgentActivityView,

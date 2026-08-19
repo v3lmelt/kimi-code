@@ -27,10 +27,13 @@ import { toInputJsonSchema } from '#/tool/input-schema';
 import { isAbortError } from '#/_base/utils/abort';
 import { IAgentTaskService } from '#/agent/task/task';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
+import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
+import { ISessionInteractionService } from '#/session/interaction/interaction';
 import type { QuestionAnsweredEvent, QuestionDismissedEvent } from '#/app/telemetry/events';
 import type {
   ExecutableToolContext,
+  ExecutableToolErrorResult,
   ExecutableToolResult,
   ToolExecution,
 } from '#/tool/toolContract';
@@ -58,6 +61,9 @@ const QUESTION_DISMISSED_MESSAGE = 'User dismissed the question without answerin
 const QUESTION_UNSUPPORTED_FAILURE_MESSAGE =
   'The connected client does not support interactive questions. Do NOT call this tool again. Ask the user directly in your text response instead.';
 
+const AUTO_MODE_DENIED_MESSAGE =
+  'AskUserQuestion is disabled while auto permission mode is active. Make a reasonable decision and continue without asking the user.';
+
 
 export class AskUserQuestionTool implements IAskUserQuestionTool {
   declare readonly _serviceBrand: undefined;
@@ -70,12 +76,16 @@ export class AskUserQuestionTool implements IAskUserQuestionTool {
     @ITelemetryService private readonly telemetry: ITelemetryService,
     @IAgentTaskService private readonly tasks: IAgentTaskService,
     @IAgentScopeContext private readonly scopeContext: IAgentScopeContext,
+    @IAgentPermissionModeService private readonly permissionMode?: IAgentPermissionModeService,
+    @ISessionInteractionService private readonly interactions?: ISessionInteractionService,
   ) {
     this.description = `${DESCRIPTION}- Set background=true when you can keep working without the answer. This starts a background question task and returns a task_id immediately. The answer arrives automatically in a later turn — you do not need to poll, sleep, or check on it. Continue with other work; never fabricate or predict the answer.`;
     this.parameters = toInputJsonSchema(this.inputSchema());
   }
 
   resolveExecution(args: AskUserQuestionInput): ToolExecution {
+    const gate = this.interactionGate();
+    if (gate !== undefined) return gate;
     const isBackground = args.background === true;
     return {
       description: isBackground
@@ -84,6 +94,28 @@ export class AskUserQuestionTool implements IAskUserQuestionTool {
       approvalRule: this.name,
       execute: (ctx) => this.execution(args, ctx),
     };
+  }
+
+  /**
+   * Front gate that short-circuits `AskUserQuestion` before the call reaches
+   * the question broker: under auto permission mode the model must decide on
+   * its own, and with no interactive question channel at all the request would
+   * never be answered. Either way the model is told to ask in plain text
+   * instead of waiting on a stuck or `NOT_IMPLEMENTED` interaction.
+   */
+  private interactionGate(): ExecutableToolErrorResult | undefined {
+    if (this.permissionMode?.mode === 'auto') {
+      return { isError: true, output: AUTO_MODE_DENIED_MESSAGE };
+    }
+    // No interactive question channel at all: neither the session interaction
+    // kernel nor a question service is available (the latter only via a host
+    // that constructs the tool directly without DI), so the request would
+    // never be answered. `question` is required in the type, so this is a
+    // defensive runtime guard rather than a reachable branch.
+    if (this.question === undefined && this.interactions === undefined) {
+      return { isError: true, output: QUESTION_UNSUPPORTED_FAILURE_MESSAGE };
+    }
+    return undefined;
   }
 
   private async execution(

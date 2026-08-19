@@ -9,7 +9,7 @@ import {
   type Focusable,
 } from '@moonshot-ai/pi-tui';
 
-import { DEFAULT_OAUTH_PROVIDER_NAME, PRODUCT_NAME } from '#/constant/app';
+import { DEFAULT_OAUTH_PROVIDER_NAME } from '#/constant/app';
 import { CURRENT_MARK, SELECT_POINTER } from '#/tui/constant/symbols';
 import { currentTheme } from '#/tui/theme';
 import { SearchableList } from '#/tui/utils/searchable-list';
@@ -43,7 +43,7 @@ export function modelDisplayName(alias: string, model: ModelAlias | undefined): 
 }
 
 export function providerDisplayName(provider: string): string {
-  if (provider === DEFAULT_OAUTH_PROVIDER_NAME) return PRODUCT_NAME;
+  if (provider === DEFAULT_OAUTH_PROVIDER_NAME) return 'Kimi Code';
   if (provider.startsWith('managed:')) return provider.slice('managed:'.length);
   return provider;
 }
@@ -88,8 +88,20 @@ export interface ModelSelectorOptions {
 }
 
 function createModelChoices(models: Record<string, ModelAlias>): readonly ModelChoice[] {
-  return Object.entries(models).map(([alias, cfg]) => {
+  // effectiveModelAlias is memoized per identity: a picker tab owns every
+  // model alias exactly once, and the effective record only changes when the
+  // underlying config object is replaced (which rebuilds the picker), so the
+  // cache is safe for a picker's lifetime.
+  const effectiveCache = new Map<ModelAlias, ModelAlias>();
+  const effectiveOf = (cfg: ModelAlias): ModelAlias => {
+    const cached = effectiveCache.get(cfg);
+    if (cached !== undefined) return cached;
     const effective = effectiveModelAlias(cfg);
+    effectiveCache.set(cfg, effective);
+    return effective;
+  };
+  return Object.entries(models).map(([alias, cfg]) => {
+    const effective = effectiveOf(cfg);
     const name = modelDisplayName(alias, effective);
     const provider = providerDisplayName(effective.provider);
     return { alias, model: effective, name, provider, label: `${name} (${provider})` };
@@ -117,7 +129,11 @@ export function segmentsFor(model: ModelAlias): readonly string[] {
   const efforts = effortsOf(model);
   const availability = thinkingAvailability(model);
   if (efforts.length > 0) {
-    return availability === 'always-on' ? efforts : ['off', ...efforts];
+    const base = availability === 'always-on' ? efforts : ['off', ...efforts];
+    // Ultracode is a virtual effort segment appended after the model's own
+    // levels: picking it enters ultracode mode (xhigh + orchestration bar)
+    // instead of a plain effort switch. Only shown for effort-capable models.
+    return [...base, 'ultracode'];
   }
   if (availability === 'always-on') return ['on'];
   if (availability === 'unsupported') return ['off'];
@@ -370,10 +386,19 @@ export class ModelSelectorComponent extends Container implements Focusable {
   }
 
   private renderThinkingControl(choice: ModelChoice): string {
-    const segment = (label: string, active: boolean): string =>
-      active
+    const segment = (effort: string, label: string, active: boolean): string => {
+      // The virtual ultracode segment keeps the yellow effortUltra hue whether
+      // or not it is the active pick, so it reads as a distinct mode switch
+      // rather than another effort level.
+      if (effort === 'ultracode') {
+        return active
+          ? currentTheme.boldFg('effortUltra', `[ ${label} ]`)
+          : currentTheme.fg('effortUltra', `  ${label}  `);
+      }
+      return active
         ? currentTheme.boldFg('primary', `[ ${label} ]`)
         : currentTheme.fg('text', `  ${label}  `);
+    };
     // The whole segment is muted, suffix included, so the disabled side reads
     // as a single greyed-out control rather than a selectable option.
     const unavailable = (label: string): string =>
@@ -384,15 +409,15 @@ export class ModelSelectorComponent extends Container implements Focusable {
     const efforts = effortsOf(choice.model);
     const availability = thinkingAvailability(choice.model);
     if (efforts.length === 0 && availability === 'always-on') {
-      return `  ${segment('On', true)} ${unavailable('Off')}`;
+      return `  ${segment('on', 'On', true)} ${unavailable('Off')}`;
     }
     if (efforts.length === 0 && availability === 'unsupported') {
-      return `  ${unavailable('On')} ${segment('Off', true)}`;
+      return `  ${unavailable('On')} ${segment('off', 'Off', true)}`;
     }
 
     const segments = segmentsFor(choice.model);
     const active = this.effectiveEffort(choice);
-    const rendered = segments.map((effort) => segment(effortLabel(effort), effort === active));
+    const rendered = segments.map((effort) => segment(effort, effortLabel(effort), effort === active));
     return `  ${rendered.join('  ')}`;
   }
 }

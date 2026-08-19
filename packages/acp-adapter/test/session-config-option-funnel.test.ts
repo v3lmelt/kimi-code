@@ -254,3 +254,75 @@ describe('config_option_update wire-shape funnel', () => {
     expect(viaModel.configOptionCategories).toEqual(['model', 'mode']);
   });
 });
+
+/**
+ * RPC-economy tests: the adapter must query the harness config at most once
+ * per model/thinking change — the same snapshot is shared by the effort
+ * resolution and the `config_option_update` refresh (the catalog fetch used
+ * to happen twice per switch).
+ */
+describe('harness config round-trip economy', () => {
+  it('setModel with the merged `,thinking` form fetches the harness config exactly once', async () => {
+    let calls = 0;
+    const session = makeFakeSession('sess-roundtrip-1');
+    const harness: KimiHarness = {
+      auth: { status: async () => AUTHED_STATUS },
+      createSession: async () => session,
+      getConfig: async () => {
+        calls += 1;
+        return {
+          providers: {},
+          defaultModel: 'kimi-coder',
+          models: makeModelsMap([
+            {
+              id: 'kimi-coder',
+              name: 'Kimi Coder',
+              thinkingSupported: true,
+              efforts: ['low', 'medium', 'high'],
+              defaultEffort: 'medium',
+            },
+            { id: 'kimi-v2', name: 'Kimi v2', thinkingSupported: false },
+          ]),
+        };
+      },
+    } as unknown as KimiHarness;
+    const { client, sessionId } = await openSession(harness);
+    // `session/new` already consumed one fetch — count only the change path.
+    calls = 0;
+
+    await client.unstable_setSessionModel({ sessionId, modelId: 'kimi-coder,thinking' });
+
+    expect(calls).toBe(1);
+  });
+
+  it('setThinking fetches the harness config exactly once', async () => {
+    let calls = 0;
+    const session = makeFakeSession('sess-roundtrip-2');
+    const harness: KimiHarness = {
+      auth: { status: async () => AUTHED_STATUS },
+      createSession: async () => session,
+      getConfig: async () => {
+        calls += 1;
+        return {
+          providers: {},
+          defaultModel: 'kimi-coder',
+          models: makeModelsMap([
+            {
+              id: 'kimi-coder',
+              name: 'Kimi Coder',
+              thinkingSupported: true,
+              efforts: ['low', 'medium', 'high'],
+              defaultEffort: 'medium',
+            },
+          ]),
+        };
+      },
+    } as unknown as KimiHarness;
+    const { client, sessionId } = await openSession(harness);
+    calls = 0;
+
+    await client.setSessionConfigOption({ sessionId, configId: 'thinking', value: 'medium' });
+
+    expect(calls).toBe(1);
+  });
+});

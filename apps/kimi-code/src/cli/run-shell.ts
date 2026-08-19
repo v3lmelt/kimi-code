@@ -81,7 +81,7 @@ export async function runShell(
     },
     sessionStartedProperties: { yolo: opts.yolo, auto: opts.auto, plan: opts.plan, afk: false },
   };
-  // The agent-core-v2 route is the default (same engine gate as `kimi -p`):
+  // The agent-core-v2 route is the default (same engine gate as `hasu -p`):
   // the harness is the SDK's v2-backed client, so the whole TUI runs on the
   // agent-core-v2 engine unless the legacy flag is set.
   const engineV2 = isKimiV2Enabled();
@@ -89,7 +89,7 @@ export async function runShell(
     ? createKimiHarnessV2(harnessOptions)
     : createKimiHarness(harnessOptions);
   startupTrace('harness:created');
-  log.info('kimi-code starting', {
+  log.info('hasu starting', {
     version,
     uiMode: CLI_UI_MODE,
     nodeVersion: process.version,
@@ -230,7 +230,7 @@ export async function runShell(
     process.stdout.write(`${gutter}Bye!\n`);
     const hints: string[] = [];
     if (sessionId !== '' && hasContent) {
-      hints.push(`${gutter}To resume this session: kimi -r ${sessionId}`);
+      hints.push(`${gutter}To resume this session: hasu -r ${sessionId}`);
     }
     if (tui.exitOpenUrl !== undefined) {
       hints.push(`${gutter}open ${toTerminalHyperlink(tui.exitOpenUrl, tui.exitOpenUrl)}`);

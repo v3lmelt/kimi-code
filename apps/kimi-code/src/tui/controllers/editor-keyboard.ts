@@ -53,7 +53,7 @@ export interface EditorKeyboardHost {
   openUndoSelector(): void;
   stop(exitCode?: number): Promise<void>;
   ensureSession(): Promise<Session | undefined>;
-  handlePlanToggle(next: boolean): void;
+  handleModeCycle(): void;
   handleInputModeChange(mode: 'prompt' | 'bash'): void;
   clearQueuedMessages(): void;
   setExternalEditorRunning(running: boolean): void;
@@ -214,25 +214,22 @@ export class EditorKeyboardController {
     };
 
     editor.onShiftTab = () => {
-      const togglePlan = (): void => {
-        const next = !host.state.appState.planMode;
-        host.track('shortcut_plan_toggle', { enabled: next });
-        host.track('shortcut_mode_switch', { to_mode: next ? 'plan' : 'agent' });
-        host.handlePlanToggle(next);
+      const cycleMode = (): void => {
+        host.handleModeCycle();
       };
       if (host.session === undefined) {
         if (!host.engineV2) {
           host.showError(NO_ACTIVE_SESSION_MESSAGE);
           return;
         }
-        // v2 session-less: lazy-create the session, then toggle — the same
-        // path /plan takes.
+        // v2 session-less: lazy-create the session, then cycle — the same
+        // path /plan, /auto and /yolo take.
         void host.ensureSession().then((session) => {
-          if (session !== undefined) togglePlan();
+          if (session !== undefined) cycleMode();
         });
         return;
       }
-      togglePlan();
+      cycleMode();
     };
 
     editor.onInputModeChange = (mode) => {

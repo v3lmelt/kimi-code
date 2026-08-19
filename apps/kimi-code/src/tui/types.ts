@@ -12,6 +12,7 @@ import type {
 import type { NotificationsConfig, StatusLineConfig, UpgradePreferences } from './config';
 import type { PendingApproval, PendingQuestion } from './reverse-rpc/types';
 import type { ColorToken, ThemeName } from './theme';
+import type { WorkflowRunView } from './utils/workflow-model';
 
 export type BannerDisplay = 'always' | 'once' | 'cooldown';
 
@@ -39,6 +40,8 @@ export interface AppState {
   /** 'bash' when the editor is in `!` shell-command mode. */
   inputMode: 'prompt' | 'bash';
   swarmMode: boolean;
+  /** Live ultracode-mode flag of the active session; mirrors the runtime. */
+  ultracode?: boolean;
   /** Live thinking effort of the active session (e.g. 'off', 'on', 'high');
    * mirrors the runtime. The single source of truth for the thinking state in
    * the TUI. */
@@ -57,6 +60,14 @@ export interface AppState {
    * default is used instead when unset.
    */
   lazySessionThinking?: ThinkingEffort;
+  /**
+   * Session-only intent to enter ultracode mode (the virtual 'ultracode'
+   * effort segment of the model/effort picker) while no session exists yet on
+   * the v2 engine. The first lazy-created session enters the mode via
+   * `setUltracode`, which maps it onto the model's supported effort (xhigh) —
+   * 'ultracode' is never a real thinking effort and must not reach the wire.
+   */
+  lazySessionUltracode?: boolean;
   contextUsage: number;
   contextTokens: number;
   maxContextTokens: number;
@@ -74,6 +85,20 @@ export interface AppState {
     turnStartedAt: number;
     live?: { input: number; output: number };
   };
+  /**
+   * Session-cumulative prompt-cache token usage observed in this process,
+   * summed from each completed step's exact usage. Drives the footer
+   * cache-hit-rate slot; undefined until the first step completes.
+   */
+  sessionCacheUsage?: {
+    inputOther: number;
+    inputCacheRead: number;
+    inputCacheCreation: number;
+  };
+  /** Session-cumulative output tokens across completed turns, folded from each
+   *  turn's settled usage at turn end. Undefined (treated as 0) until the
+   *  first turn finishes; backs the footer's idle token display. */
+  sessionOutputTokens?: number;
   theme: ThemeName;
   version: string;
   editorCommand: string | null;
@@ -96,6 +121,12 @@ export interface AppState {
   mcpServersSummary: string | null;
   /** Optional banner shown below the welcome panel; null means no banner to render. */
   banner?: BannerState | null;
+  /**
+   * Ledger of workflow runs the TUI has observed this session, folded from the
+   * engine's `workflow.progress` wire events (newest first). Rendered by the
+   * `/workflows` command; empty when no workflow has run yet.
+   */
+  workflowRuns: readonly WorkflowRunView[];
 }
 
 export interface ToolCallBlockData {
@@ -158,7 +189,7 @@ export interface RunningAgentSummary {
   readonly description?: string;
   /** Latest sub-tool activity inside this agent, e.g. "Using Read (path)". */
   readonly latestActivity?: string;
-  readonly phase: 'running' | 'waiting' | 'starting';
+  readonly phase: 'running' | 'waiting' | 'starting' | 'done' | 'failed';
   /** Timestamp (ms) when the agent started; footer computes elapsed live. */
   readonly startedAtMs: number;
   readonly tokens: number;

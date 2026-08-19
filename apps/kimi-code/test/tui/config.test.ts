@@ -32,7 +32,7 @@ describe('TUI config', () => {
 
     expect(result).toEqual(DEFAULT_TUI_CONFIG);
     const text = readFileSync(filePath, 'utf-8');
-    expect(text).toContain('Client preferences for kimi-code.');
+    expect(text).toContain('Client preferences for hasu.');
     expect(text).toContain('theme = "claude"');
     expect(text).toContain('cache_expiry_hint = true');
     expect(text).toContain('hide_thinking = false');
@@ -42,6 +42,7 @@ describe('TUI config', () => {
     expect(text).toContain('[notifications]');
     expect(text).toContain('enabled = true');
     expect(text).toContain('notification_condition = "unfocused"');
+    expect(text).toContain('system = false');
   });
 
   it('parses valid TOML', () => {
@@ -65,7 +66,7 @@ auto_install = false
       cacheExpiryHint: true,
       hideThinking: false,
       editorCommand: 'code --wait',
-      notifications: { enabled: false, condition: 'always' },
+      notifications: { enabled: false, condition: 'always', system: false },
       upgrade: { autoInstall: false },
       statusLine: { items: null, command: null },
     });
@@ -110,7 +111,7 @@ command = "   "
       cacheExpiryHint: true,
       hideThinking: false,
       editorCommand: null,
-      notifications: { enabled: true, condition: 'unfocused' },
+      notifications: { enabled: true, condition: 'unfocused', system: false },
       upgrade: { autoInstall: true },
       statusLine: { items: null, command: null },
     });
@@ -119,8 +120,19 @@ command = "   "
   it('falls back to default notifications when the section is omitted', () => {
     const config = parseTuiConfig(`theme = "dark"`);
 
-    expect(config.notifications).toEqual({ enabled: true, condition: 'unfocused' });
+    expect(config.notifications).toEqual({ enabled: true, condition: 'unfocused', system: false });
     expect(config.upgrade).toEqual({ autoInstall: true });
+  });
+
+  it('parses the system-notification switch', () => {
+    const config = parseTuiConfig(`
+theme = "dark"
+
+[notifications]
+system = true
+`);
+
+    expect(config.notifications).toEqual({ enabled: true, condition: 'unfocused', system: true });
   });
 
   it('throws TuiConfigParseError with fallback when parsing fails, leaving the file untouched', async () => {
@@ -145,7 +157,7 @@ command = "   "
         cacheExpiryHint: true,
         hideThinking: true,
         editorCommand: 'vim',
-        notifications: { enabled: false, condition: 'always' },
+        notifications: { enabled: false, condition: 'always', system: false },
         upgrade: { autoInstall: false },
         statusLine: { items: null, command: null },
       },
@@ -158,7 +170,7 @@ command = "   "
       cacheExpiryHint: true,
       hideThinking: true,
       editorCommand: 'vim',
-      notifications: { enabled: false, condition: 'always' },
+      notifications: { enabled: false, condition: 'always', system: false },
       upgrade: { autoInstall: false },
       statusLine: { items: null, command: null },
     });

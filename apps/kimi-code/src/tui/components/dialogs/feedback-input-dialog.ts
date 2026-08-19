@@ -26,7 +26,7 @@ export type FeedbackInputDialogResult =
   | { readonly kind: 'ok'; readonly value: string }
   | { readonly kind: 'cancel' };
 
-const TITLE = 'Send feedback to Kimi Code';
+const TITLE = 'Send feedback to Hasu';
 const SUBTITLE_DEFAULT = "Tell us what's working or what's not.";
 const SUBTITLE_EMPTY = 'Feedback cannot be empty.';
 const FOOTER = 'Enter to submit  ·  Esc to cancel';
@@ -61,6 +61,10 @@ export class FeedbackInputDialogComponent extends Container implements Focusable
       this.emptyHinted = false;
     }
     this.input.handleInput(data);
+    // Version-cache: the input line renders into this panel's hand-drawn
+    // output, so a bare Input mutation would let a parent container serve
+    // its cached lines.
+    this.bump();
   }
 
   override invalidate(): void {

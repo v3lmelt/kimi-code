@@ -4,15 +4,39 @@
 
 import { claudeColors, claudeLightColors, getBuiltInPalette } from './colors';
 import type { ColorPalette, ResolvedTheme } from './colors';
-import { loadCustomThemeMerged } from './custom-theme-loader';
-import { detectTerminalTheme } from './detect';
+import {
+  loadCustomThemeMerged,
+  listCustomThemes,
+  loadCustomTheme,
+  startThemeWatch,
+  stopThemeWatch,
+} from './custom-theme-loader';
+import { detectTerminalTheme, pinTruecolorChalkLevel, supportsTruecolor } from './detect';
 
 export { currentTheme, Theme } from './theme';
 export type { ColorToken } from './theme';
 export { darkColors, lightColors, claudeColors, claudeLightColors, getBuiltInPalette, AUTO_ACCEPT_DARK, AUTO_ACCEPT_LIGHT } from './colors';
 export type { ColorPalette, ResolvedTheme } from './colors';
-export { detectTerminalTheme } from './detect';
-export { loadCustomTheme, loadCustomThemeMerged, listCustomThemes } from './custom-theme-loader';
+export { detectTerminalTheme, pinTruecolorChalkLevel, supportsTruecolor } from './detect';
+export {
+  loadCustomTheme,
+  loadCustomThemeMerged,
+  listCustomThemes,
+  startThemeWatch,
+  stopThemeWatch,
+} from './custom-theme-loader';
+
+/** One-time truecolor pin so the first palette resolution can't run twice. */
+let terminalColorSupportPinned = false;
+
+function pinTerminalColorSupportOnce(): void {
+  if (terminalColorSupportPinned) return;
+  terminalColorSupportPinned = true;
+  // Runs on the first palette resolution (startup, from cli/run-shell.ts,
+  // before pi-tui grabs stdin / any frame renders). Pins chalk to 24-bit
+  // colour when the terminal advertises truecolor support.
+  pinTruecolorChalkLevel();
+}
 
 /**
  * User-facing theme preference.
@@ -43,6 +67,7 @@ export function isThemeName(_value: string): _value is ThemeName {
  *   missing / invalid files fall back to dark palette.
  */
 export async function getColorPalette(theme: ThemeName): Promise<ColorPalette> {
+  pinTerminalColorSupportOnce();
   if (theme === 'light') return getBuiltInPalette('light');
   if (theme === 'dark') return getBuiltInPalette('dark');
   if (theme === 'claude') {

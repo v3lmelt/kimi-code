@@ -12,6 +12,12 @@ export const RESULT_PREVIEW_LINES = 3;
 export const THINKING_PREVIEW_LINES = 2;
 export const COMMAND_PREVIEW_LINES = 10;
 
+// While thinking streams, only this bounded tail of the draft is styled and
+// re-wrapped per flush (the live block shows THINKING_PREVIEW_LINES lines), so
+// per-flush cost stays O(window) as a long reasoning draft grows instead of
+// O(total^2). finalize() re-wraps the full text once.
+export const THINKING_LIVE_WINDOW_CHARS = 8 * 1024;
+
 // Claude Code-style spinner frames, shared by the activity/login/update
 // loaders and the subagent windows. The reversed pass makes the sequence
 // ping-pong instead of jumping back to the first frame.

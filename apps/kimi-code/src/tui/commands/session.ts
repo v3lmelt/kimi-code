@@ -113,7 +113,7 @@ export async function handleExportMdCommand(host: SlashCommandHost, args: string
     const now = new Date();
     const shortId = session.id.slice(0, 8);
     const timestamp = now.toISOString().replaceAll(/[-:]/g, '').replace(/T/, '-').slice(0, 15);
-    const defaultName = `kimi-export-${shortId}-${timestamp}.md`;
+    const defaultName = `hasu-export-${shortId}-${timestamp}.md`;
 
     const trimmedArgs = args.trim();
     const outputPath = trimmedArgs.length > 0

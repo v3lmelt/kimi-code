@@ -19,6 +19,10 @@ overrides:
 importers:
 
   .:
+    dependencies:
+      zod:
+        specifier: ^4.3.6
+        version: 4.3.6
     devDependencies:
       '@arethetypeswrong/cli':
         specifier: 0.18.2
@@ -613,6 +617,9 @@ importers:
       sinon:
         specifier: ^22.0.0
         version: 22.0.0
+      tsx:
+        specifier: ^4.21.0
+        version: 4.21.0
       yazl:
         specifier: ^3.3.1
         version: 3.3.1
@@ -649,6 +656,9 @@ importers:
       '@mozilla/readability':
         specifier: ^0.6.0
         version: 0.6.0
+      acorn:
+        specifier: 8.17.0
+        version: 8.17.0
       ajv:
         specifier: ^8.18.0
         version: 8.18.0

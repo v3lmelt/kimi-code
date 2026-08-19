@@ -22,6 +22,8 @@
     "build": "tsdown",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
+    "bench:search-live": "tsx --import ../../build/register-raw-text-loader.mjs bench/search-live.ts",
+    "bench:message-history": "tsx --import ../../build/register-raw-text-loader.mjs bench/bench-message-history.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {
