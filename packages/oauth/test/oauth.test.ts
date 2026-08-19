@@ -26,6 +26,7 @@ import { KIMI_CODE_PLATFORM } from '../src/identity';
 import {
   createOpenAICodexAuthorizationUrl,
   getOpenAICodexAccountId,
+  loginOpenAICodex,
   loginOpenAICodexDevice,
   refreshOpenAICodexToken,
 } from '../src/openai-codex';
@@ -190,6 +191,36 @@ describe('OpenAI Codex OAuth contract', () => {
       state: 'state-1',
       codex_cli_simplified_flow: 'true',
       originator: 'kimi-code',
+    });
+  });
+
+  it('accepts browser callbacks through the IPv4 loopback', async () => {
+    const accessToken = openAICodexJwt('workspace-loopback');
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      Response.json({
+        access_token: accessToken,
+        refresh_token: 'refresh-loopback',
+        expires_in: 3600,
+        token_type: 'Bearer',
+      }),
+    );
+
+    const token = await loginOpenAICodex({
+      fetch: fetchMock,
+      onAuthorization: async ({ url }) => {
+        const state = new URL(url).searchParams.get('state');
+        expect(state).not.toBeNull();
+        const query = new URLSearchParams({ code: 'code-loopback', state: state ?? '' });
+        const path = `/auth/callback?${query.toString()}`;
+        const response = await fetch(`http://127.0.0.1:1455${path}`);
+        expect(response.status).toBe(200);
+      },
+    });
+
+    expect(token).toMatchObject({
+      accessToken,
+      refreshToken: 'refresh-loopback',
+      expiresIn: 3600,
     });
   });
 
