@@ -22,11 +22,10 @@ import { STATUS_BULLET } from '#/tui/constant/symbols';
 import { currentTheme } from '#/tui/theme';
 import { formatTokenCount } from '#/utils/usage/usage-format';
 
+import { formatDetachHint } from './tool-call';
 import type { ToolCallComponent, ToolCallSubagentSnapshot } from './tool-call';
 
 const THROTTLE_MS = 200;
-
-const DETACH_HINT_TEXT = 'Press Ctrl+B to run in background';
 
 interface AgentEntry {
   readonly toolCallId: string;
@@ -135,7 +134,7 @@ export class AgentGroupComponent extends Container {
       this.appendLines(snap, isLast);
     });
     if (this.shouldShowDetachHint(snapshots)) {
-      this.bodyContainer.addChild(new Text(currentTheme.dim(DETACH_HINT_TEXT), 2, 0));
+      this.bodyContainer.addChild(new Text(currentTheme.dim(formatDetachHint()), 2, 0));
     }
 
     this.lastFlushPhases.clear();
@@ -151,62 +150,32 @@ export class AgentGroupComponent extends Container {
   private buildHeader(snapshots: readonly ToolCallSubagentSnapshot[]): string {
     const total = snapshots.length;
     const counts = countPhases(snapshots);
-    const allDone = counts.terminal === total;
-    const bullet = allDone
+    const allTerminal = counts.terminal === total;
+    const bullet = allTerminal
       ? currentTheme.fg('success', STATUS_BULLET)
       : currentTheme.fg('text', STATUS_BULLET);
-    const elapsedSeconds = maxElapsedSeconds(snapshots);
-
-    if (allDone) {
-      const types = new Set(snapshots.map((s) => s.agentName).filter((n) => n !== undefined));
-      const headerLabel =
-        types.size === 1
-          ? `${String(total)} ${[...types][0]} agents finished`
-          : `${String(total)} agents finished`;
-      const totalTools = snapshots.reduce((acc, s) => acc + s.toolCount, 0);
-      const totalTokens = snapshots.reduce((acc, s) => acc + s.tokens, 0);
-      const tail = formatHeaderTail({ toolCount: totalTools, tokens: totalTokens, elapsedSeconds });
-      return `${bullet}${currentTheme.boldFg('primary', headerLabel)}${tail}`;
-    }
-
-    const parts = formatBreakdownParts(counts);
-    const headerText = parts.length > 0
-      ? `Running ${String(total)} agents (${parts.join(', ')})`
-      : `Running ${String(total)} agents`;
-    const tail = formatHeaderTail({ toolCount: 0, tokens: 0, elapsedSeconds });
-    return `${bullet}${currentTheme.boldFg('primary', headerText)}${tail}`;
+    const breakdown = formatBreakdownParts(counts);
+    const suffix = breakdown.length > 1 ? ` (${breakdown.join(', ')})` : '';
+    const label = `${String(total)} ${total === 1 ? 'agent' : 'agents'}${suffix}`;
+    return `${bullet}${currentTheme.boldFg('primary', label)}`;
   }
 
   private appendLines(snap: ToolCallSubagentSnapshot, isLast: boolean): void {
     const dim = (text: string) => currentTheme.dim(text);
-
-    // First-level branch line.
     const branch1 = isLast ? '└─' : '├─';
-    const agentType = snap.agentName ?? 'agent';
-    const desc = snap.toolCallDescription || '(no description)';
-    const tail = formatLineTail(snap);
-    const namePart = currentTheme.fg('primary', agentType);
-    const descPart = dim(`· ${desc}`);
-    const stats = formatStats(snap);
-    const line1 = `  ${branch1} ${namePart} ${descPart}${stats}${tail}`;
-    this.bodyContainer.addChild(new Text(line1, 0, 0));
-
-    // Second-level line: latest activity, or Error for failures.
     const branch2 = isLast ? '   ' : '│  ';
-    if (snap.phase === 'failed') {
-      // Show one error line; error messages can be long.
-      const errLine = (snap.errorText ?? 'Failed').split('\n').at(0) ?? 'Failed';
-      const errStr = currentTheme.fg('error', `Error: ${errLine}`);
-      this.bodyContainer.addChild(new Text(`  ${branch2}    ${errStr}`, 0, 0));
-      return;
-    }
-    if (snap.phase === 'done' || snap.phase === 'backgrounded') {
-      // Terminal states omit the second line.
-      return;
-    }
-    // Running or not-yet-started agents show latest activity, with a fallback.
-    const activity = snap.latestActivity ?? fallbackActivityForPhase(snap.phase);
-    this.bodyContainer.addChild(new Text(`  ${branch2}    ${dim(activity)}`, 0, 0));
+    const agentType = snap.agentName ?? 'agent';
+    const namePart = currentTheme.fg('primary', agentType);
+    const description = snap.toolCallDescription
+      ? dim(` (${snap.toolCallDescription})`)
+      : '';
+    const stats = formatStats(snap);
+    this.bodyContainer.addChild(
+      new Text(`  ${branch1} ${namePart}${description}${stats}`, 0, 0),
+    );
+
+    const status = formatAgentStatus(snap);
+    this.bodyContainer.addChild(new Text(`  ${branch2} ⎿  ${status}`, 0, 0));
   }
 
   /**
@@ -304,76 +273,26 @@ function formatStats(snap: ToolCallSubagentSnapshot): string {
   const parts: string[] = [];
   if (snap.model !== undefined) parts.push(snap.model);
   if (snap.effort !== undefined) parts.push(snap.effort);
-  parts.push(`${String(snap.toolCount)} tool${snap.toolCount === 1 ? '' : 's'}`);
-  if (snap.elapsedSeconds !== undefined) parts.push(formatElapsed(snap.elapsedSeconds));
-  if (snap.tokens > 0) parts.push(formatTokens(snap.tokens));
+  parts.push(`${String(snap.toolCount)} tool ${snap.toolCount === 1 ? 'use' : 'uses'}`);
+  if (snap.tokens > 0) parts.push(`${formatTokenCount(snap.tokens)} tokens`);
   return currentTheme.dim(` · ${parts.join(' · ')}`);
 }
 
-function formatLineTail(snap: ToolCallSubagentSnapshot): string {
-  const separator = currentTheme.dim(' · ');
+function formatAgentStatus(snap: ToolCallSubagentSnapshot): string {
   switch (snap.phase) {
     case 'done':
-      return separator + currentTheme.fg('success', '✓ Completed');
-    case 'failed':
-      return separator + currentTheme.fg('error', '✗ Failed');
+      return currentTheme.fg('success', 'Done');
+    case 'failed': {
+      const error = (snap.errorText ?? 'Failed').split('\n').at(0) ?? 'Failed';
+      return currentTheme.fg('error', `Error: ${error}`);
+    }
     case 'backgrounded':
-      return separator + currentTheme.dim('◐ backgrounded');
+      return currentTheme.dim('Running in the background');
     case 'queued':
-      return separator + currentTheme.fg('primary', 'Waiting');
-    case 'running':
-      return separator + currentTheme.fg('primary', 'Running');
     case 'spawning':
     case undefined:
-      return separator + currentTheme.fg('primary', 'Starting');
-  }
-}
-
-function fallbackActivityForPhase(phase: ToolCallSubagentSnapshot['phase']): string {
-  switch (phase) {
-    case 'queued':
-      return 'Waiting to start…';
+      return currentTheme.dim('Initializing…');
     case 'running':
-      return 'Still working…';
-    case 'spawning':
-    case undefined:
-      return 'Starting…';
-    case 'done':
-    case 'failed':
-    case 'backgrounded':
-      return '';
+      return currentTheme.dim(snap.latestActivity ?? 'Still working…');
   }
-}
-
-function formatHeaderTail(args: {
-  readonly toolCount: number;
-  readonly tokens: number;
-  readonly elapsedSeconds: number | undefined;
-}): string {
-  const parts: string[] = [];
-  if (args.toolCount > 0) parts.push(`${String(args.toolCount)} tool${args.toolCount === 1 ? '' : 's'}`);
-  if (args.tokens > 0) parts.push(formatTokens(args.tokens));
-  if (args.elapsedSeconds !== undefined) parts.push(formatElapsed(args.elapsedSeconds));
-  return parts.length > 0 ? currentTheme.dim(` · ${parts.join(' · ')}`) : '';
-}
-
-function maxElapsedSeconds(snapshots: readonly ToolCallSubagentSnapshot[]): number | undefined {
-  let max: number | undefined;
-  for (const snap of snapshots) {
-    const elapsed = snap.elapsedSeconds;
-    if (elapsed === undefined) continue;
-    max = max === undefined ? elapsed : Math.max(max, elapsed);
-  }
-  return max;
-}
-
-function formatElapsed(seconds: number): string {
-  if (seconds < 60) return `${String(seconds)}s`;
-  const minutes = Math.floor(seconds / 60);
-  const remainder = seconds % 60;
-  return `${String(minutes)}m ${String(remainder)}s`;
-}
-
-function formatTokens(n: number): string {
-  return `${formatTokenCount(n)} tok`;
 }

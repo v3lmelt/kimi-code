@@ -79,12 +79,12 @@ describe('AgentGroupComponent', () => {
     group.attach('call_agent_2', waiting);
 
     const output = renderText(group);
-    expect(output).toContain('Running 2 agents (1 running, 1 waiting) · 0s');
-    expect(output).toContain('explore · inspect project · 0 tools · 0s · Running');
-    expect(output).toContain('Using Read (src/a.ts)');
-    expect(output).toContain('coder · write tests · 0 tools · 0s · Waiting');
-    expect(output).toContain('Waiting to start…');
-    expect(output).not.toContain('Initializing…');
+    expect(output).toContain('2 agents (1 running, 1 waiting)');
+    expect(output).toContain('explore (inspect project) · 1 tool use');
+    expect(output).toContain('⎿  Using Read (src/a.ts)');
+    expect(output).toContain('coder (write tests) · 0 tool uses');
+    expect(output).toContain('⎿  Initializing…');
+    expect(output).not.toContain('Running 2 agents');
 
     group.dispose();
     running.dispose();
@@ -100,12 +100,14 @@ describe('AgentGroupComponent', () => {
     startAgent(running, 'call_agent_1', 'explore');
 
     group.attach('call_agent_1', running);
-    expect(renderText(group)).toContain('explore · inspect project · 0 tools');
+    expect(renderText(group)).toContain('explore (inspect project) · 0 tool uses');
 
-    running.updateSubagentMetrics({ modelDisplay: 'Kimi K2.5' });
+    running.updateSubagentMetrics({ modelDisplay: 'Kimi K2.5', effortDisplay: 'high' });
     // Non-phase updates are throttled; flush the pending refresh.
     vi.runOnlyPendingTimers();
-    expect(renderText(group)).toContain('explore · inspect project · Kimi K2.5 · 0 tools');
+    expect(renderText(group)).toContain(
+      'explore (inspect project) · Kimi K2.5 · high · 0 tool uses',
+    );
 
     group.dispose();
     running.dispose();
@@ -123,13 +125,13 @@ describe('AgentGroupComponent', () => {
     group.attach('call_agent_1', a);
     group.attach('call_agent_2', b);
 
-    expect(renderText(group)).toContain('Press Ctrl+B to run in background');
+    expect(renderText(group)).toContain('(ctrl+b to run in background)');
 
     a.markBackgrounded();
-    expect(renderText(group)).toContain('Press Ctrl+B to run in background');
+    expect(renderText(group)).toContain('(ctrl+b to run in background)');
 
     b.markBackgrounded();
-    expect(renderText(group)).not.toContain('Press Ctrl+B to run in background');
+    expect(renderText(group)).not.toContain('(ctrl+b to run in background)');
 
     group.dispose();
     a.dispose();
@@ -150,15 +152,15 @@ describe('AgentGroupComponent', () => {
 
     const output = renderText(group);
     expect(output).toContain('Still working…');
-    expect(output).toContain('Waiting to start…');
-    expect(output).not.toContain('Initializing…');
+    expect(output).toContain('Initializing…');
+    expect(output).not.toContain('Waiting to start…');
 
     group.dispose();
     running.dispose();
     waiting.dispose();
   });
 
-  it('refreshes grouped elapsed time from child subagent timers', () => {
+  it('keeps grouped rows free of elapsed-time churn while child timers tick', () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const ui = stubTui();
@@ -170,21 +172,24 @@ describe('AgentGroupComponent', () => {
     group.attach('call_agent_1', running);
     group.attach('call_agent_2', waiting);
 
-    expect(renderText(group)).toContain('Running 2 agents (1 running, 1 waiting) · 0s');
+    let output = renderText(group);
+    expect(output).toContain('2 agents (1 running, 1 waiting)');
+    expect(output).not.toContain('0s');
     vi.mocked(ui.requestRender).mockClear();
 
     vi.advanceTimersByTime(1_200);
 
     expect(ui.requestRender).toHaveBeenCalled();
-    expect(renderText(group)).toContain('Running 2 agents (1 running, 1 waiting) · 1s');
-    expect(renderText(group)).toContain('explore · inspect project · 0 tools · 1s · Running');
+    output = renderText(group);
+    expect(output).toContain('explore (inspect project) · 0 tool uses');
+    expect(output).not.toContain('1s');
 
     group.dispose();
     running.dispose();
     waiting.dispose();
   });
 
-  it('keeps terminal rows explicit while mixed agents are still running', () => {
+  it('keeps per-agent status rows explicit through mixed terminal states', () => {
     vi.useFakeTimers();
     vi.setSystemTime(0);
     const ui = stubTui();
@@ -201,17 +206,20 @@ describe('AgentGroupComponent', () => {
     done.onSubagentCompleted({ resultSummary: 'done' });
 
     const mixed = renderText(group);
-    expect(mixed).toContain('Running 2 agents (1 done, 1 running) · 12s');
-    expect(mixed).toContain('explore · inspect project · 0 tools · 12s · ✓ Completed');
-    expect(mixed).toContain('coder · write tests · 0 tools · 12s · Running');
+    expect(mixed).toContain('2 agents (1 done, 1 running)');
+    expect(mixed).toContain('explore (inspect project) · 0 tool uses');
+    expect(mixed).toContain('⎿  Done');
+    expect(mixed).toContain('coder (write tests) · 0 tool uses');
+    expect(mixed).toContain('⎿  Still working…');
+    expect(mixed).not.toContain('12s');
 
     vi.setSystemTime(15_000);
     running.onSubagentFailed({ error: 'review failed' });
 
     const terminal = renderText(group);
-    expect(terminal).toContain('2 agents finished · 15s');
-    expect(terminal).toContain('✗ Failed');
-    expect(terminal).toContain('Error: review failed');
+    expect(terminal).toContain('2 agents (1 done, 1 failed)');
+    expect(terminal).toContain('⎿  Done');
+    expect(terminal).toContain('⎿  Error: review failed');
     expect(terminal).not.toContain('Still working…');
 
     group.dispose();
@@ -240,11 +248,12 @@ describe('AgentGroupComponent', () => {
     });
 
     const out = renderText(group);
-    // `a` must show as backgrounded, NOT completed.
-    expect(out).toContain('◐ backgrounded');
-    expect(out).not.toContain('✓ Completed');
+    expect(out).toContain('2 agents (1 backgrounded, 1 running)');
+    // `a` must stay backgrounded, not become done.
+    expect(out).toContain('⎿  Running in the background');
+    expect(out).not.toContain('⎿  Done');
     // `b` is still running.
-    expect(out).toContain('Running');
+    expect(out).toContain('⎿  Still working…');
 
     group.dispose();
     a.dispose();

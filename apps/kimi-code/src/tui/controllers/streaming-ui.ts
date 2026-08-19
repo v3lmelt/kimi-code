@@ -770,6 +770,7 @@ export class StreamingUIController {
       undefined,
       state.ui,
       state.appState.workDir,
+      () => this._pendingToolComponents.size,
     );
     if (state.toolOutputExpanded) tc.setExpanded(true);
     this._pendingToolComponents.set(toolCall.id, tc);
