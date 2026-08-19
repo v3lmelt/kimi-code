@@ -8,7 +8,7 @@
 
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   OAuthConnectionError,
@@ -23,6 +23,12 @@ import {
   type RefreshOptions,
 } from '../src/oauth';
 import { KIMI_CODE_PLATFORM } from '../src/identity';
+import {
+  createOpenAICodexAuthorizationUrl,
+  getOpenAICodexAccountId,
+  loginOpenAICodexDevice,
+  refreshOpenAICodexToken,
+} from '../src/openai-codex';
 import type { DeviceHeaders, OAuthFlowConfig } from '../src/types';
 
 interface FakeResponse {
@@ -168,6 +174,100 @@ beforeEach(async () => {
   server = new FakeOAuthServer();
   await server.start();
 });
+
+describe('OpenAI Codex OAuth contract', () => {
+  it('builds a PKCE browser authorization URL for the fixed localhost callback', () => {
+    const url = new URL(
+      createOpenAICodexAuthorizationUrl({ state: 'state-1', challenge: 'challenge-1' }),
+    );
+
+    expect(url.origin + url.pathname).toBe('https://auth.openai.com/oauth/authorize');
+    expect(Object.fromEntries(url.searchParams)).toMatchObject({
+      response_type: 'code',
+      redirect_uri: 'http://localhost:1455/auth/callback',
+      code_challenge: 'challenge-1',
+      code_challenge_method: 'S256',
+      state: 'state-1',
+      codex_cli_simplified_flow: 'true',
+      originator: 'kimi-code',
+    });
+  });
+
+  it('completes device authorization when the user approves the displayed code', async () => {
+    const accessToken = openAICodexJwt('workspace-1');
+    const onAuthorization = vi.fn();
+    const fetchMock = vi.fn<typeof fetch>(async (input) => {
+      const url =
+        typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+      if (url.endsWith('/deviceauth/usercode')) {
+        return Response.json({ device_auth_id: 'device-1', user_code: 'ABCD-EFGH', interval: 1 });
+      }
+      if (url.endsWith('/deviceauth/token')) {
+        return Response.json({ authorization_code: 'code-1', code_verifier: 'verifier-1' });
+      }
+      if (url.endsWith('/oauth/token')) {
+        return Response.json({
+          access_token: accessToken,
+          refresh_token: 'refresh-1',
+          expires_in: 3600,
+          token_type: 'Bearer',
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    });
+
+    const token = await loginOpenAICodexDevice({
+      onAuthorization,
+      fetch: fetchMock,
+      sleep: async () => {},
+    });
+
+    expect(onAuthorization).toHaveBeenCalledWith({
+      url: 'https://auth.openai.com/codex/device',
+      instructions: 'Enter code: ABCD-EFGH',
+      userCode: 'ABCD-EFGH',
+    });
+    expect(token).toMatchObject({
+      accessToken,
+      refreshToken: 'refresh-1',
+      expiresIn: 3600,
+      tokenType: 'Bearer',
+    });
+  });
+
+  it('preserves the previous refresh token when rotation omits a replacement', async () => {
+    const accessToken = openAICodexJwt('workspace-2');
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      Response.json({ access_token: accessToken, expires_in: 1800 }),
+    );
+
+    const token = await refreshOpenAICodexToken('refresh-existing', { fetch: fetchMock });
+
+    expect(token.refreshToken).toBe('refresh-existing');
+    expect(getOpenAICodexAccountId(token.accessToken)).toBe('workspace-2');
+  });
+
+  it('classifies an invalid refresh grant as a login-required failure', async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      Response.json(
+        { error: { code: 'invalid_grant', message: 'The refresh token is no longer valid.' } },
+        { status: 400 },
+      ),
+    );
+
+    await expect(
+      refreshOpenAICodexToken('refresh-revoked', { fetch: fetchMock }),
+    ).rejects.toBeInstanceOf(OAuthUnauthorizedError);
+  });
+});
+
+function openAICodexJwt(accountId: string): string {
+  const encode = (value: Record<string, unknown>) =>
+    Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${encode({ alg: 'none' })}.${encode({
+    'https://api.openai.com/auth': { chatgpt_account_id: accountId },
+  })}.signature`;
+}
 
 afterEach(async () => {
   await server.stop();

@@ -696,6 +696,32 @@ describe('per-turn intent wire encoding (behavior probes)', () => {
     expect(body['prompt_cache_key']).toBe('session-probe');
   });
 
+  it('shapes OpenAI Codex requests through the provider trait', async () => {
+    const provider = registry.createChatProvider({
+      protocol: 'openai_responses',
+      providerType: 'openai-codex',
+      modelName: 'gpt-5.6-sol',
+      apiKey: 'sk-probe',
+    });
+
+    const body = await captureResponsesBody(provider, {
+      thinking: { effort: 'high' },
+      maxCompletionTokens: 5000,
+    });
+
+    expect((body['input'] as unknown[])[0]).toEqual({
+      type: 'additional_tools',
+      role: 'developer',
+      tools: [],
+    });
+    expect((body['input'] as unknown[]).length).toBeGreaterThan(1);
+    expect(body).not.toHaveProperty('tools');
+    expect(body).not.toHaveProperty('max_output_tokens');
+    expect(body['parallel_tool_calls']).toBe(false);
+    expect(body['tool_choice']).toBe('auto');
+    expect(body['reasoning']).toEqual({ effort: 'high', summary: 'auto', context: 'all_turns' });
+  });
+
   it('encodes cacheKey on Anthropic as metadata.user_id', async () => {
     const provider = registry.createChatProvider({
       protocol: 'anthropic',

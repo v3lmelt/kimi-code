@@ -9,6 +9,7 @@ export const ProviderTypeSchema = z.enum([
   'kimi',
   'google-genai',
   'openai_responses',
+  'openai-codex',
   'vertexai',
   'opencode-go',
 ]);

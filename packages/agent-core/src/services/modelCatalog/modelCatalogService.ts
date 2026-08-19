@@ -231,6 +231,7 @@ function hasConfiguredApiKey(provider: ProviderConfig): boolean {
       return nonEmpty(provider.env?.['ANTHROPIC_API_KEY']) !== undefined;
     case 'openai':
     case 'openai_responses':
+    case 'openai-codex':
       return nonEmpty(provider.env?.['OPENAI_API_KEY']) !== undefined;
     case 'kimi':
       return nonEmpty(provider.env?.['KIMI_API_KEY']) !== undefined;

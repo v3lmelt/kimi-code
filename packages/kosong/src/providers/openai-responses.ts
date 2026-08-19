@@ -372,6 +372,10 @@ export interface OpenAIResponsesOptions {
    * `withGenerationKwargs` morph layers on top of both.
    */
   generationKwargs?: OpenAIResponsesGenerationKwargs | undefined;
+  /** ChatGPT Codex wire adjustments layered on top of the Responses API. */
+  codex?: {
+    readonly responsesLite?: boolean;
+  };
 }
 
 export interface OpenAIResponsesGenerationKwargs {
@@ -1038,6 +1042,49 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
     }
   }
 }
+
+function shapeOpenAICodexRequest(body: Record<string, unknown>, responsesLite: boolean): void {
+  delete body['max_output_tokens'];
+  delete body['max_completion_tokens'];
+  if (!responsesLite) return;
+
+  const input = Array.isArray(body['input']) ? body['input'] : [];
+  stripOpenAICodexImageDetails(input);
+  const tools = Array.isArray(body['tools']) ? body['tools'] : [];
+  const prefix: unknown[] = [{ type: 'additional_tools', role: 'developer', tools }];
+  const instructions = body['instructions'];
+  if (typeof instructions === 'string' && instructions.length > 0) {
+    prefix.push({
+      type: 'message',
+      role: 'developer',
+      content: [{ type: 'input_text', text: instructions }],
+    });
+  }
+  body['input'] = [...prefix, ...input];
+  body['parallel_tool_calls'] = false;
+  const toolChoice = body['tool_choice'];
+  if (toolChoice !== 'none' && toolChoice !== 'required') body['tool_choice'] = 'auto';
+  body['reasoning'] = { ...asRawObject(body['reasoning']), context: 'all_turns' };
+  delete body['instructions'];
+  delete body['tools'];
+}
+
+function stripOpenAICodexImageDetails(input: unknown[]): void {
+  for (const item of input) {
+    const itemRecord = asRawObject(item);
+    if (itemRecord === null) continue;
+    for (const field of ['content', 'output']) {
+      const parts = itemRecord[field];
+      if (!Array.isArray(parts)) continue;
+      for (const part of parts) {
+        const partRecord = asRawObject(part);
+        if (partRecord === null || partRecord['type'] !== 'input_image') continue;
+        delete partRecord['detail'];
+      }
+    }
+  }
+}
+
 export class OpenAIResponsesChatProvider implements ChatProvider {
   readonly name: string = 'openai-responses';
 
@@ -1057,6 +1104,7 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
   private _client: OpenAI | undefined;
   private _httpClient: unknown;
   private _clientFactory: ((auth: ProviderRequestAuth) => OpenAI) | undefined;
+  private _codex: OpenAIResponsesOptions['codex'];
 
   constructor(options: OpenAIResponsesOptions) {
     const apiKey = options.apiKey ?? process.env['OPENAI_API_KEY'];
@@ -1070,6 +1118,7 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
     this._toolMessageConversion = options.toolMessageConversion ?? null;
     this._httpClient = options.httpClient;
     this._clientFactory = options.clientFactory;
+    this._codex = options.codex;
 
     if (options.maxOutputTokens !== undefined) {
       this._generationKwargs.max_output_tokens = options.maxOutputTokens;
@@ -1150,6 +1199,9 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
           ...asRawObject(createParams['text']),
           ...responseFormatToResponsesText(options.responseFormat),
         };
+      }
+      if (this._codex !== undefined) {
+        shapeOpenAICodexRequest(createParams, this._codex.responsesLite === true);
       }
 
       if (
