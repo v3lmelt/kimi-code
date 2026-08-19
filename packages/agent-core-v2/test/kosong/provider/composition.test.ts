@@ -318,6 +318,18 @@ describe('explainCapability', () => {
     expect(source.detail).toContain('base');
   });
 
+  it('reports GPT-5.6 image, thinking, and tool capabilities from the Responses base', () => {
+    const { capability, source } = registry.explainCapability(
+      'openai_responses',
+      'gpt-5.6-sol',
+    );
+    expect(capability.image_in).toBe(true);
+    expect(capability.thinking).toBe(true);
+    expect(capability.tool_use).toBe(true);
+    expect(source.kind).toBe('builtin');
+    expect(source.detail).toContain('base');
+  });
+
   it('reports none when nothing knows the model', () => {
     const { capability, source } = registry.explainCapability('openai', 'mystery-model');
     expect(isUnknownCapability(capability)).toBe(true);

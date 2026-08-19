@@ -11,7 +11,13 @@ import {
 } from '@moonshot-ai/kimi-code-oauth';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { ErrorCodes, KimiError, KimiForCodingProvider } from '#/index';
+import {
+  ErrorCodes,
+  KimiError,
+  KimiForCodingProvider,
+  OPENAI_HARNESS_MODELS,
+  OpenAIResponsesModelProvider,
+} from '#/index';
 
 import { TEST_IDENTITY } from './test-identity';
 
@@ -72,5 +78,56 @@ describe('KimiForCodingProvider OAuth error mapping', () => {
 
     const auth = resolveAuth();
     await expect(auth(async () => 'ok')).rejects.toBe(oauthError);
+  });
+});
+
+describe('OpenAIResponsesModelProvider', () => {
+  it('registers the GPT-5.6 family on the Responses API with official limits', () => {
+    const provider = new OpenAIResponsesModelProvider({
+      apiKey: 'YOUR_API_KEY',
+      promptCacheKey: 'session-1',
+    });
+
+    expect(OPENAI_HARNESS_MODELS.map((model) => model.id)).toEqual([
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
+    ]);
+    expect(provider.defaultModel).toBe('gpt-5.6-sol');
+    expect(provider.resolveProviderConfig('gpt-5.6-terra')).toMatchObject({
+      providerName: 'openai',
+      provider: {
+        type: 'openai_responses',
+        model: 'gpt-5.6-terra',
+        apiKey: 'YOUR_API_KEY',
+        maxOutputTokens: 128_000,
+        offEffort: 'none',
+        generationKwargs: { prompt_cache_key: 'session-1' },
+      },
+      modelCapabilities: {
+        image_in: true,
+        thinking: true,
+        tool_use: true,
+        max_context_tokens: 1_050_000,
+      },
+      supportEfforts: ['off', 'low', 'medium', 'high', 'xhigh', 'max'],
+      defaultEffort: 'medium',
+      maxOutputSize: 128_000,
+      type: 'openai_responses',
+    });
+  });
+
+  it('uses the first custom model as the default when no default is supplied', () => {
+    const provider = new OpenAIResponsesModelProvider({
+      models: [{ id: 'gpt-example', maxContextTokens: 32_000, maxOutputTokens: 4_000 }],
+    });
+
+    expect(provider.defaultModel).toBe('gpt-example');
+  });
+
+  it('rejects an unregistered default model before a session starts', () => {
+    expect(
+      () => new OpenAIResponsesModelProvider({ defaultModel: 'gpt-not-registered' }),
+    ).toThrow(/not registered/);
   });
 });

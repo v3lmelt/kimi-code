@@ -60,8 +60,10 @@ import {
   summarizeSkill,
 } from '../skill';
 import {
-  ProviderManager, type BearerTokenProvider,
-  type OAuthTokenProviderResolver
+  ProviderManager,
+  type BearerTokenProvider,
+  type ModelProvider,
+  type OAuthTokenProviderResolver,
 } from '../session/provider-manager';
 import { SessionAPIImpl } from '../session/rpc';
 import { normalizeWorkDir, SessionStore } from '../session/store/index';
@@ -200,6 +202,8 @@ export interface KimiCoreOptions {
    * `applyPrintModeConfigDefaults` (user-set values still win).
    */
   readonly uiMode?: string | undefined;
+  /** Optional runtime model source owned by the embedding harness. */
+  readonly modelProviderFactory?: (sessionId: string) => ModelProvider;
 }
 
 export class KimiCore implements PromisableMethods<CoreAPI> {
@@ -229,6 +233,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
   private readonly experimentalFlags: FlagResolver;
   /** `true` when the host runs `kimi -p` (v1 print mode); see `withPrintModeDefaults`. */
   private readonly printMode: boolean;
+  private readonly modelProviderFactory: ((sessionId: string) => ModelProvider) | undefined;
   /** Owner-scoped [image] limits; reload pushes the new config via setConfig. */
   readonly imageLimits: ImageLimits;
 
@@ -250,6 +255,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     this.telemetry = options.telemetry ?? noopTelemetryClient;
     this.appVersion = options.appVersion;
     this.printMode = options.uiMode === 'print';
+    this.modelProviderFactory = options.modelProviderFactory;
     ensureKimiHome(this.homeDir);
     // One-shot config migrations, before the first load (best-effort, never
     // throws): rewrites a persisted thinking.effort "max" to "high" once.
@@ -397,6 +403,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     // Session ctor attaches its own log sink. If anything in the setup-after-
     // ctor block throws, `session.close()` releases the sink (and mcp).
     const runtime = await this.resolveRuntime(config);
+    const providerManager = this.resolveProviderManager(summary.id);
     const session = new Session({
       kaos: parentKaos.withCwd(workDir),
       persistenceKaos,
@@ -406,7 +413,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       homedir: summary.sessionDir,
       kimiHomeDir: this.homeDir,
       rpc: proxyWithExtraPayload(await this.sdk, { sessionId: summary.id }),
-      providerManager: this.resolveProviderManager(summary.id),
+      providerManager,
       background: sessionConfig.background,
       hooks: [...(config.hooks ?? []), ...this.plugins.enabledHooks()],
       permissionRules: config.permission?.rules,
@@ -443,7 +450,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       };
       const mainAgent = await session.createMain();
       mainAgent.config.update({
-        modelAlias: options.model ?? config.defaultModel,
+        modelAlias: options.model ?? providerManager.defaultModel ?? config.defaultModel,
         thinkingEffort,
       });
       if (permissionMode !== undefined) {
@@ -1324,7 +1331,9 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
     };
   }
 
-  private resolveProviderManager(sessionId: string): ProviderManager {
+  private resolveProviderManager(sessionId: string): ModelProvider {
+    const runtimeProvider = this.modelProviderFactory?.(sessionId);
+    if (runtimeProvider !== undefined) return runtimeProvider;
     return new ProviderManager({
       config: () => this.config,
       kimiRequestHeaders: this.kimiRequestHeaders,

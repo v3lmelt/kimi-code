@@ -254,6 +254,15 @@ export const OPENAI_REASONING_CAPABILITY = Object.freeze({
   max_context_tokens: 0,
 });
 
+export const OPENAI_GPT5_CAPABILITY = Object.freeze({
+  image_in: true,
+  video_in: false,
+  audio_in: false,
+  thinking: true,
+  tool_use: true,
+  max_context_tokens: 0,
+});
+
 export const OPENAI_VISION_TOOL_CAPABILITY = Object.freeze({
   image_in: true,
   video_in: false,
@@ -276,6 +285,10 @@ export const OPENAI_VISION_TOOL_PREFIXES = ['gpt-4o', 'gpt-4-turbo', 'gpt-4.1', 
 
 export function isOpenAIReasoningModel(normalizedModelName: string): boolean {
   return /^o\d/.test(normalizedModelName);
+}
+
+export function isOpenAIGpt5Model(normalizedModelName: string): boolean {
+  return /^gpt-5(?:[.-]|$)/.test(normalizedModelName);
 }
 
 export function hasModelPrefix(modelName: string, prefixes: readonly string[]): boolean {

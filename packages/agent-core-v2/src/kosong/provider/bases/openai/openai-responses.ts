@@ -49,7 +49,9 @@ import {
   hasModelPrefix,
   isMediaPart,
   isOpenAIInsufficientQuotaCode,
+  isOpenAIGpt5Model,
   isOpenAIReasoningModel,
+  OPENAI_GPT5_CAPABILITY,
   OPENAI_REASONING_CAPABILITY,
   OPENAI_VISION_TOOL_CAPABILITY,
   OPENAI_VISION_TOOL_PREFIXES,
@@ -531,6 +533,7 @@ const OPENAI_RESPONSES_DEVELOPER_ROLE_MODELS = new Set([
 
 export function usesOpenAIResponsesDeveloperRole(modelName: string): boolean {
   const normalized = modelName.toLowerCase();
+  if (isOpenAIGpt5Model(normalized)) return true;
   if (OPENAI_RESPONSES_DEVELOPER_ROLE_MODELS.has(normalized)) return true;
   for (const cataloguedModel of OPENAI_RESPONSES_DEVELOPER_ROLE_MODELS) {
     if (normalized.startsWith(cataloguedModel + '-')) return true;
@@ -1222,6 +1225,9 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
 
 export function getOpenAIResponsesModelCapability(modelName: string) {
   const normalized = modelName.toLowerCase();
+  if (isOpenAIGpt5Model(normalized)) {
+    return OPENAI_GPT5_CAPABILITY;
+  }
   if (isOpenAIReasoningModel(normalized)) {
     return OPENAI_REASONING_CAPABILITY;
   }

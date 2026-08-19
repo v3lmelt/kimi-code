@@ -46,7 +46,6 @@ import {
   type AgentProfileCatalogSnapshot,
   type ResolvedAgentProfile,
 } from '../profile';
-import type { ProviderManager } from './provider-manager';
 import {
   resolveSecondaryModel,
   wrapSubagentModelError,
@@ -65,6 +64,7 @@ import {
 } from '../skill';
 import { noopTelemetryClient, type TelemetryClient, withTelemetryProperties } from '../telemetry';
 import { SessionSubagentHost } from './subagent-host';
+import type { ModelProvider } from './provider-manager';
 import { sessionMediaOriginalsDir } from '../tools/support/image-originals';
 import type { ToolServices } from '../tools/support/services';
 import { FlagResolver, type ExperimentalFlagResolver } from '../flags';
@@ -82,7 +82,7 @@ export interface SessionOptions {
   readonly rpc: SDKSessionRPC;
   readonly toolServices?: ToolServices;
   readonly initializeMainAgent?: boolean | undefined;
-  readonly providerManager?: ProviderManager | undefined;
+  readonly providerManager?: ModelProvider;
   readonly background?: BackgroundConfig | undefined;
   readonly hooks?: readonly HookDef[];
   readonly permissionRules?: readonly PermissionRule[];

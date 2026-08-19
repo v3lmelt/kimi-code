@@ -107,6 +107,29 @@ base_url = "https://api.openai.com/v1"
 api_key = "sk-xxxxx"
 ```
 
+### 进程内 harness
+
+TypeScript harness 提供仅在运行时生效的 OpenAI 接入，API 密钥不会写入
+`config.toml`：
+
+```ts
+import { createKimiHarness } from '@moonshot-ai/kimi-code-sdk';
+
+const harness = createKimiHarness({
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY,
+    defaultModel: 'gpt-5.6-terra',
+  },
+});
+
+const session = await harness.createSession({ workDir: process.cwd() });
+```
+
+内置条目包括 `gpt-5.6-sol`、`gpt-5.6-terra` 和 `gpt-5.6-luna`。三个模型均使用
+Responses API，提供 1,050,000 token 上下文窗口、128,000 token 最大输出、图片输入、
+函数工具，以及从关闭到 max 的推理等级。默认模型为 `gpt-5.6-sol`。省略凭证或端点时，
+运行时会读取 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL`。
+
 ## `google-genai`
 
 用于直连 Google Gemini API。thinking、视觉及多模态能力按模型名自动识别。

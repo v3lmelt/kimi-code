@@ -20,6 +20,14 @@ export {
 export { SDKRpcClientBase } from '#/rpc';
 export { KimiForCodingProvider } from '#/kimi-code-model-provider';
 export type { KimiForCodingProviderOptions } from '#/kimi-code-model-provider';
+export {
+  OPENAI_HARNESS_MODELS,
+  OpenAIResponsesModelProvider,
+} from '#/openai-model-provider';
+export type {
+  OpenAIResponsesHarnessModel,
+  OpenAIResponsesModelProviderOptions,
+} from '#/openai-model-provider';
 export { removeProviderFromConfig } from '#/v2/config-mapper';
 
 export {
