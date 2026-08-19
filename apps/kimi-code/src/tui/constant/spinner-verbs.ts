@@ -1,4 +1,4 @@
-// Claude Code's spinner verb list (188 entries, verbatim). One verb is picked
+// Claude Code's spinner verb list. One verb is picked
 // per spinner run and rendered as `<verb>…` next to the spinner frame.
 export const SPINNER_VERBS: readonly string[] = [
   'Accomplishing',
@@ -58,7 +58,6 @@ export const SPINNER_VERBS: readonly string[] = [
   'Embellishing',
   'Enchanting',
   'Envisioning',
-  'Evaporating',
   'Fermenting',
   'Fiddle-faddling',
   'Finagling',
@@ -191,5 +190,26 @@ export const SPINNER_VERBS: readonly string[] = [
 ];
 
 export function randomSpinnerVerb(): string {
-  return SPINNER_VERBS[Math.floor(Math.random() * SPINNER_VERBS.length)] ?? 'Working';
+  const verbs = configuredSpinnerVerbs();
+  return verbs[Math.floor(Math.random() * verbs.length)] ?? 'Working';
+}
+
+export type SpinnerVerbMode = 'append' | 'replace';
+
+let customSpinnerVerbs: readonly string[] = [];
+let customSpinnerVerbMode: SpinnerVerbMode = 'append';
+
+export function configureSpinnerVerbs(
+  verbs: readonly string[],
+  mode: SpinnerVerbMode,
+): void {
+  customSpinnerVerbs = verbs.map((verb) => verb.trim()).filter((verb) => verb.length > 0);
+  customSpinnerVerbMode = mode;
+}
+
+export function configuredSpinnerVerbs(): readonly string[] {
+  if (customSpinnerVerbMode === 'replace' && customSpinnerVerbs.length > 0) {
+    return customSpinnerVerbs;
+  }
+  return [...SPINNER_VERBS, ...customSpinnerVerbs];
 }

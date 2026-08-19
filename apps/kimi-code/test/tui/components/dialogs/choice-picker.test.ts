@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ChoicePickerComponent, type ChoiceOption } from '#/tui/components/dialogs/choice-picker';
 import { EditorSelectorComponent } from '#/tui/components/dialogs/editor-selector';
 import { PermissionSelectorComponent } from '#/tui/components/dialogs/permission-selector';
+import { MotionSelectorComponent } from '#/tui/components/dialogs/motion-selector';
 import { SettingsSelectorComponent } from '#/tui/components/dialogs/settings-selector';
 import { ThemeSelectorComponent } from '#/tui/components/dialogs/theme-selector';
 import { UpdatePreferenceSelectorComponent } from '#/tui/components/dialogs/update-preference-selector';
@@ -105,6 +106,14 @@ describe('ChoicePickerComponent', () => {
     expect(settingsOutput).toContain('  ❯ Model');
     expect(settingsOutput).toContain('    Switch the active model and thinking mode.');
     expect(settingsOutput).toContain('    Turn automatic CLI updates on or off.');
+    expect(settingsOutput).toContain('    Use full animation or a reduced-motion display.');
+
+    const motion = new MotionSelectorComponent({
+      currentValue: true,
+      onSelect,
+      onCancel,
+    });
+    expect(motion.render(120).map(strip)).toContain('  ❯ Reduced motion ← current');
 
     const upgradePreference = new UpdatePreferenceSelectorComponent({
       currentValue: true,

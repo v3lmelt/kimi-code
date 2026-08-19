@@ -447,6 +447,9 @@ MCP server 的声明配置写在 `~/.kimi-code/mcp.json` 或项目内 `.kimi-cod
 | `disable_paste_burst` | `boolean` | `false` | 禁用非 bracketed paste 的粘贴突发兜底；默认开启，避免快速多行粘贴被逐行提交 |
 | `cache_expiry_hint` | `boolean` | `true` | resume 长时间未活动的会话、或长时间空闲后发送消息时，若上下文缓存可能已过期则弹出提醒，可选择先压缩或新建会话（仅 v2 引擎） |
 | `hide_thinking` | `boolean` | `false` | 将思考块折叠为单行 `thinking...` 指示，而不是内联渲染推理内容（仍可用 Ctrl-O 展开单个块） |
+| `reduced_motion` | `boolean` | `false` | 用静态标记替代动态活动指示并关闭闪烁效果；也可在 `/config` 的 Motion 设置中调整 |
+| `[spinner].verbs` | `string[]` | `[]` | 显示在 spinner 旁的自定义活动动词 |
+| `[spinner].verb_mode` | `string` | `append` | 自定义动词与内置列表的组合方式：`append` 表示追加，`replace` 表示只使用自定义列表 |
 | `[editor].command` | `string` | `""` | 编写长输入用的外部编辑器命令；留空则回退到 `$VISUAL` / `$EDITOR` |
 | `[notifications].enabled` | `boolean` | `true` | 是否发送桌面通知 |
 | `[notifications].notification_condition` | `string` | `unfocused` | 何时通知：`unfocused`（仅终端失去焦点时）或 `always`（总是） |
@@ -461,6 +464,11 @@ theme = "auto" # "auto" | "dark" | "light" | "claude" | 自定义主题名
 disable_paste_burst = false # true 表示禁用非 bracketed paste 的粘贴突发兜底
 cache_expiry_hint = true # false 表示关闭 resume / 空闲提交时的"缓存已过期"提醒弹窗
 hide_thinking = false # true 表示将思考块折叠为单行 "thinking..." 指示
+reduced_motion = false # true 表示使用静态活动指示并关闭闪烁效果
+
+[spinner]
+verbs = [] # 自定义活动动词
+verb_mode = "append" # "append" 表示追加到内置列表，"replace" 表示只使用此列表
 
 [editor]
 command = "" # 留空则使用 $VISUAL / $EDITOR

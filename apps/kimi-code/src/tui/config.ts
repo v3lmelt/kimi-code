@@ -35,6 +35,11 @@ export const UpgradePreferencesSchema = z.object({
   autoInstall: z.boolean(),
 });
 
+export const SpinnerPreferencesSchema = z.object({
+  verbs: z.array(z.string()),
+  verbMode: z.enum(['append', 'replace']),
+});
+
 export const STATUS_LINE_ITEMS = ['mode', 'goal', 'model', 'tasks', 'cwd', 'git', 'tips'] as const;
 export type StatusLineItem = (typeof STATUS_LINE_ITEMS)[number];
 
@@ -61,6 +66,13 @@ export const TuiConfigFileSchema = z.object({
   disable_paste_burst: z.boolean().optional(),
   cache_expiry_hint: z.boolean().optional(),
   hide_thinking: z.boolean().optional(),
+  reduced_motion: z.boolean().optional(),
+  spinner: z
+    .object({
+      verbs: z.array(z.string()).optional(),
+      verb_mode: z.enum(['append', 'replace']).optional(),
+    })
+    .optional(),
   editor: z
     .object({
       command: z.string().optional(),
@@ -90,6 +102,8 @@ export const TuiConfigSchema = z.object({
   /** Present in every normalized config; optional only so hand-built test
    * fixtures from before this field existed still typecheck. */
   hideThinking: z.boolean().optional(),
+  reducedMotion: z.boolean().optional(),
+  spinner: SpinnerPreferencesSchema.optional(),
   editorCommand: z.string().nullable(),
   notifications: NotificationsConfigSchema,
   upgrade: UpgradePreferencesSchema,
@@ -102,6 +116,7 @@ export type TuiConfigFileShape = z.infer<typeof TuiConfigFileSchema>;
 export type TuiConfig = z.infer<typeof TuiConfigSchema>;
 export type NotificationsConfig = z.infer<typeof NotificationsConfigSchema>;
 export type UpgradePreferences = z.infer<typeof UpgradePreferencesSchema>;
+export type SpinnerPreferences = z.infer<typeof SpinnerPreferencesSchema>;
 
 export const DEFAULT_NOTIFICATIONS_CONFIG: NotificationsConfig = {
   enabled: true,
@@ -113,11 +128,18 @@ export const DEFAULT_UPGRADE_PREFERENCES: UpgradePreferences = {
   autoInstall: true,
 };
 
+export const DEFAULT_SPINNER_PREFERENCES: SpinnerPreferences = {
+  verbs: [],
+  verbMode: 'append',
+};
+
 export const DEFAULT_TUI_CONFIG: TuiConfig = TuiConfigSchema.parse({
   theme: 'claude',
   disablePasteBurst: false,
   cacheExpiryHint: true,
   hideThinking: false,
+  reducedMotion: false,
+  spinner: DEFAULT_SPINNER_PREFERENCES,
   editorCommand: null,
   notifications: DEFAULT_NOTIFICATIONS_CONFIG,
   upgrade: DEFAULT_UPGRADE_PREFERENCES,
@@ -205,6 +227,11 @@ export function normalizeTuiConfig(
     disablePasteBurst: config.disable_paste_burst ?? DEFAULT_TUI_CONFIG.disablePasteBurst,
     cacheExpiryHint: config.cache_expiry_hint ?? DEFAULT_TUI_CONFIG.cacheExpiryHint,
     hideThinking: config.hide_thinking ?? DEFAULT_TUI_CONFIG.hideThinking,
+    reducedMotion: config.reduced_motion ?? DEFAULT_TUI_CONFIG.reducedMotion,
+    spinner: {
+      verbs: config.spinner?.verbs ?? DEFAULT_SPINNER_PREFERENCES.verbs,
+      verbMode: config.spinner?.verb_mode ?? DEFAULT_SPINNER_PREFERENCES.verbMode,
+    },
     editorCommand: command === undefined || command.length === 0 ? null : command,
     notifications: {
       enabled: config.notifications?.enabled ?? DEFAULT_NOTIFICATIONS_CONFIG.enabled,
@@ -256,6 +283,11 @@ theme = "${escapeTomlBasicString(config.theme)}" # "auto" | "dark" | "light" | "
 disable_paste_burst = ${String(config.disablePasteBurst)} # true disables non-bracketed paste-burst fallback
 cache_expiry_hint = ${String(config.cacheExpiryHint !== false)} # false disables the "cache expired" dialog on resume / idle submit
 hide_thinking = ${String(config.hideThinking === true)} # true collapses thinking blocks to a single "∴ Thinking…" indicator
+reduced_motion = ${String(config.reducedMotion === true)} # true uses a static activity indicator and disables shimmer effects
+
+[spinner]
+verbs = ${JSON.stringify(config.spinner?.verbs ?? [])} # custom activity verbs
+verb_mode = "${config.spinner?.verbMode ?? 'append'}" # "append" | "replace"
 
 [editor]
 command = "${escapeTomlBasicString(config.editorCommand ?? '')}" # Empty uses $VISUAL / $EDITOR

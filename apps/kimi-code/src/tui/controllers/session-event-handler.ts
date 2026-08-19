@@ -413,6 +413,7 @@ export class SessionEventHandler {
   private handleTurnBegin(event: TurnStartedEvent): void {
     this.currentTurnHasAssistantText = false;
     this.estimatedOutputTokens = 0;
+    this.lastActivityAtMs = Date.now();
     if (event.origin?.kind === 'plugin_command') {
       this.pluginCommandTurns.set(String(event.turnId), event.origin.pluginId);
     }

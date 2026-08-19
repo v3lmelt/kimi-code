@@ -92,11 +92,6 @@ export function formatTurnUsage(
   if (usage === undefined || usage.turnStartedAt <= 0 || phase === 'idle') return '';
   const totalOutput = displayedOutput ?? turnOutputTokens(usage, estimatedOutput);
   const parts: string[] = [];
-  if (thinkingStatus === 'thinking') {
-    parts.push('thinking');
-  } else if (typeof thinkingStatus === 'number') {
-    parts.push(`thought for ${Math.max(1, Math.round(thinkingStatus / 1000))}s`);
-  }
   if (toolTimer !== undefined) {
     const seconds = Math.max(1, Math.round((now - toolTimer.startedAtMs) / 1000));
     parts.push(
@@ -109,6 +104,11 @@ export function formatTurnUsage(
   if (totalOutput > 0) {
     const arrow = phase === 'waiting' ? '↑' : '↓';
     parts.push(`${arrow} ${formatTokenCount(totalOutput)} tokens`);
+  }
+  if (thinkingStatus === 'thinking') {
+    parts.push('thinking');
+  } else if (typeof thinkingStatus === 'number') {
+    parts.push(`thought for ${Math.max(1, Math.round(thinkingStatus / 1000))}s`);
   }
   return ` (${parts.join(' · ')})`;
 }

@@ -8,6 +8,7 @@ export type SettingsSelection =
   | 'experiments'
   | 'upgrade'
   | 'thinking'
+  | 'motion'
   | 'usage';
 
 const SETTINGS_OPTIONS: readonly ChoiceOption[] = [
@@ -47,6 +48,11 @@ const SETTINGS_OPTIONS: readonly ChoiceOption[] = [
     description: 'Show the model reasoning inline or collapse it to "∴ Thinking…".',
   },
   {
+    value: 'motion',
+    label: 'Motion',
+    description: 'Use full animation or a reduced-motion display.',
+  },
+  {
     value: 'usage',
     label: 'Usage',
     description: 'Show session tokens, context window, and plan quotas.',
@@ -62,6 +68,7 @@ function isSettingsSelection(value: string): value is SettingsSelection {
     value === 'experiments' ||
     value === 'upgrade' ||
     value === 'thinking' ||
+    value === 'motion' ||
     value === 'usage'
   );
 }

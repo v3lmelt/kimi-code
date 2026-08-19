@@ -10,8 +10,12 @@
  * appears once usage approaches the window limit.
  */
 
-import { bumpVersion, type Component } from '@moonshot-ai/pi-tui';
-import { truncateToWidth, visibleWidth } from '@moonshot-ai/pi-tui';
+import {
+  bumpVersion,
+  truncateToWidth,
+  visibleWidth,
+  type Component,
+} from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
 import { formatDuration } from '@moonshot-ai/kimi-code-oauth';
 import { effectiveModelAlias } from '@moonshot-ai/kimi-code-sdk';
@@ -83,6 +87,23 @@ const AGENT_TIMER_INTERVAL_MS = 1_000;
 // displayed value is nudged toward the true estimate in small steps so it
 // scrolls smoothly instead of jumping straight to the final number.
 const TOKEN_ANIMATION_INTERVAL_MS = 50;
+
+export function advanceTokenDisplayUnits(
+  displayUnits: number,
+  targetTokens: number,
+  steps: number,
+): number {
+  const targetUnits = targetTokens * 4;
+  if (targetUnits <= 0) return 0;
+  if (targetUnits < displayUnits) return targetUnits;
+  let next = displayUnits;
+  for (let step = 0; step < steps && next < targetUnits; step++) {
+    const gap = targetUnits - next;
+    const increment = gap < 70 ? 3 : gap < 200 ? Math.max(8, Math.ceil(gap * 0.15)) : 50;
+    next = Math.min(next + increment, targetUnits);
+  }
+  return next;
+}
 
 /**
  * Expand tips into a rotation sequence using smooth weighted round-robin
@@ -335,7 +356,8 @@ export class FooterComponent implements Component {
    *  settled footer isn't redrawn once a second for nothing. */
   private lastAgentElapsedSignature: string | null = null;
   /** Displayed main-agent token count, chased toward the estimate on each render. */
-  private tokenDisplay = 0;
+  /** Smoothed response length in Claude-style quarter-token display units. */
+  private tokenDisplayUnits = 0;
   /** Supplies the live streamed output-token estimate (see turn-usage.ts). */
   private tokenTargetProvider: (() => number) | undefined = undefined;
   /** Last time the catch-up animation advanced (for the 50ms throttle). */
@@ -466,7 +488,7 @@ export class FooterComponent implements Component {
     }
     // Seed the display to the current target so the first render reflects
     // settled output instead of starting a long catch-up from 0.
-    this.tokenDisplay = turnOutputTokens(this.state.turnUsage, provider());
+    this.tokenDisplayUnits = turnOutputTokens(this.state.turnUsage, provider()) * 4;
     this.tokenLastTickMs = Date.now();
     bumpVersion(this);
   }
@@ -480,12 +502,12 @@ export class FooterComponent implements Component {
    * layer; absent states read as 0), so an idle `main` row keeps its total.
    */
   getDisplayedMainTokens(): number {
-    if (this.state.turnUsage !== undefined) return this.tokenDisplay;
+    if (this.state.turnUsage !== undefined) return Math.round(this.tokenDisplayUnits / 4);
     return this.state.sessionOutputTokens ?? 0;
   }
 
   private stopTokenAnimation(): void {
-    this.tokenDisplay = 0;
+    this.tokenDisplayUnits = 0;
     this.tokenLastTickMs = 0;
   }
 
@@ -500,27 +522,18 @@ export class FooterComponent implements Component {
   private tickTokenAnimation(): void {
     if (this.tokenTargetProvider === undefined) return;
     const now = Date.now();
-    if (now - this.tokenLastTickMs < TOKEN_ANIMATION_INTERVAL_MS) return;
-    this.tokenLastTickMs = now;
+    const elapsed = now - this.tokenLastTickMs;
+    if (elapsed < TOKEN_ANIMATION_INTERVAL_MS) return;
+    const steps = Math.min(1_000, Math.floor(elapsed / TOKEN_ANIMATION_INTERVAL_MS));
+    this.tokenLastTickMs += steps * TOKEN_ANIMATION_INTERVAL_MS;
 
-    const before = this.tokenDisplay;
+    const before = this.tokenDisplayUnits;
     const target = turnOutputTokens(this.state.turnUsage, this.tokenTargetProvider());
-    if (target <= 0) {
-      this.tokenDisplay = 0;
-    } else if (target < this.tokenDisplay) {
-      this.tokenDisplay = target;
-    } else {
-      const gap = target - this.tokenDisplay;
-      if (gap > 0) {
-        const increment =
-          gap < 70 ? 3 : gap < 200 ? Math.max(8, Math.ceil(gap * 0.15)) : 50;
-        this.tokenDisplay = Math.min(this.tokenDisplay + increment, target);
-      }
-    }
+    this.tokenDisplayUnits = advanceTokenDisplayUnits(this.tokenDisplayUnits, target, steps);
     // Only a display change is worth a re-render: once caught up to the target
     // (stream paused / settled) stop bumping, so the footer stops redrawing the
     // same line on every frame while the estimate keeps coming in.
-    if (this.tokenDisplay !== before) bumpVersion(this);
+    if (this.tokenDisplayUnits !== before) bumpVersion(this);
   }
 
   /**
@@ -582,7 +595,7 @@ export class FooterComponent implements Component {
 
     // Advance the main-agent token counter's catch-up animation before reading
     // it below; throttled to ~50ms so it scrolls smoothly with the render
-    // cadence (the spinner redraws ~120ms while animating).
+    // cadence. Missed 50ms beats are replayed by `tickTokenAnimation`.
     this.tickTokenAnimation();
 
     // ── Line 1: primary slots (mode/goal/model) or a user command ──
