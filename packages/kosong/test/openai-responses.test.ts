@@ -99,6 +99,64 @@ const MUL_TOOL: Tool = {
 };
 
 describe('OpenAIResponsesChatProvider', () => {
+  it('shapes ChatGPT requests for the Codex Responses Lite wire contract', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5.6-sol',
+      apiKey: 'test-key',
+      maxOutputTokens: 512,
+      generationKwargs: { reasoning_effort: 'high' },
+      codex: { responsesLite: true },
+    });
+    const history: Message[] = [
+      {
+        role: 'user',
+        content: [
+          { type: 'text', text: 'Inspect this image.' },
+          { type: 'image_url', imageUrl: { url: 'https://example.com/image.png' } },
+        ],
+        toolCalls: [],
+      },
+    ];
+
+    const body = await captureRequestBody(provider, 'Follow the harness policy.', [ADD_TOOL], history);
+
+    expect(body).not.toHaveProperty('instructions');
+    expect(body).not.toHaveProperty('tools');
+    expect(body).not.toHaveProperty('max_output_tokens');
+    expect(body['input']).toEqual([
+      {
+        type: 'additional_tools',
+        role: 'developer',
+        tools: [
+          {
+            type: 'function',
+            name: 'add',
+            description: 'Add two integers.',
+            parameters: ADD_TOOL.parameters,
+            strict: false,
+          },
+        ],
+      },
+      {
+        type: 'message',
+        role: 'developer',
+        content: [{ type: 'input_text', text: 'Follow the harness policy.' }],
+      },
+      {
+        type: 'message',
+        role: 'user',
+        content: [
+          { type: 'input_text', text: 'Inspect this image.' },
+          { type: 'input_image', image_url: 'https://example.com/image.png' },
+        ],
+      },
+    ]);
+    expect(body['parallel_tool_calls']).toBe(false);
+    expect(body['tool_choice']).toBe('auto');
+    expect(body['reasoning']).toEqual({ effort: 'high', summary: 'auto', context: 'all_turns' });
+    expect(body['include']).toEqual(['reasoning.encrypted_content']);
+  });
+
   describe('message conversion', () => {
     it('sends system prompt as top-level instructions', async () => {
       const provider = createProvider();

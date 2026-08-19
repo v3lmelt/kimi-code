@@ -7,13 +7,18 @@ import {
   OPENCODE_GO_DEFAULT_BASE_URL,
   OPENCODE_GO_MODELS,
   OPENCODE_GO_PROVIDER_ID,
+  OPENAI_CODEX_PROVIDER_NAME,
   OpenPlatformApiError,
   toManagedModelInfo,
   type ManagedKimiCodeModelInfo,
   type ManagedKimiConfigShape,
   type OpenPlatformDefinition,
 } from '@moonshot-ai/kimi-code-oauth';
-import { log } from '@moonshot-ai/kimi-code-sdk';
+import {
+  applyOpenAICodexConfig,
+  log,
+  OPENAI_HARNESS_MODELS,
+} from '@moonshot-ai/kimi-code-sdk';
 
 import type { ChoiceOption } from '../components/dialogs/choice-picker';
 import { DEFAULT_OAUTH_PROVIDER_NAME } from '../constant/kimi-tui';
@@ -45,9 +50,108 @@ export async function handleLoginCommand(host: SlashCommandHost): Promise<void> 
     return;
   }
 
+  if (platformId === OPENAI_CODEX_PROVIDER_NAME) {
+    await handleOpenAICodexLogin(host);
+    return;
+  }
+
   const platform = getOpenPlatformById(platformId);
   if (platform === undefined) return;
   await handleOpenPlatformLogin(host, platform);
+}
+
+async function handleOpenAICodexLogin(host: SlashCommandHost): Promise<void> {
+  const previous = await host.harness.auth.getOpenAIStatus();
+  const alreadyLoggedIn = previous.authenticated && previous.accountId !== undefined;
+  let accountId = previous.accountId;
+  let spinner: LoginProgressSpinnerHandle | undefined;
+  const controller = new AbortController();
+  const cancelLogin = (): void => {
+    controller.abort();
+  };
+  host.cancelInFlight = cancelLogin;
+
+  try {
+    if (!alreadyLoggedIn) {
+      const result = await host.harness.auth.loginOpenAI({
+        signal: controller.signal,
+        onAuthorization: (info) => {
+          spinner = host.showLoginAuthorizationPrompt({
+            userCode: info.userCode ?? '',
+            deviceCode: '',
+            verificationUri: info.url,
+            verificationUriComplete: info.url,
+            expiresIn: null,
+            interval: 5,
+          });
+        },
+      });
+      accountId = result.accountId;
+      spinner?.stop({ ok: true, label: 'Logged in.' });
+      spinner = undefined;
+    }
+    if (accountId === undefined) {
+      throw new Error('ChatGPT OAuth token does not contain an account id.');
+    }
+
+    const models: ManagedKimiCodeModelInfo[] = OPENAI_HARNESS_MODELS.map((model) => ({
+      id: model.id,
+      contextLength: Math.min(model.maxContextTokens, 1_000_000),
+      supportsReasoning: true,
+      supportsImageIn: true,
+      supportsVideoIn: false,
+      supportsToolUse: true,
+      supportsThinkingType: 'both',
+      supportEfforts: model.supportEfforts?.filter((effort) => effort !== 'off'),
+      defaultEffort: model.defaultEffort,
+      displayName: model.displayName,
+    }));
+    const platform: OpenPlatformDefinition = {
+      id: OPENAI_CODEX_PROVIDER_NAME,
+      name: 'OpenAI ChatGPT',
+      baseUrl: 'https://chatgpt.com/backend-api/codex',
+    };
+    const selection = await promptModelSelectionForOpenPlatform(host, models, platform);
+    if (selection === undefined) return;
+
+    const config = await host.harness.getConfig();
+    applyOpenAICodexConfig(config, {
+      accountId,
+      selectedModel: selection.model.id,
+      thinking: selection.thinking !== 'off',
+      effort:
+        selection.thinking !== 'off' && selection.thinking !== 'on'
+          ? selection.thinking
+          : undefined,
+    });
+    await host.harness.setConfig({
+      providers: config.providers,
+      models: config.models,
+      defaultModel: config.defaultModel,
+      thinking: config.thinking,
+    });
+    await host.authFlow.refreshConfigAfterLogin();
+    host.track('login', {
+      provider: OPENAI_CODEX_PROVIDER_NAME,
+      method: 'oauth',
+      already_logged_in: alreadyLoggedIn,
+    });
+    host.showStatus(`Setup complete: OpenAI ChatGPT · ${selection.model.id}`);
+  } catch (error) {
+    const cancelled = controller.signal.aborted;
+    spinner?.stop({ ok: false, label: cancelled ? 'Login cancelled.' : 'Login failed.' });
+    spinner = undefined;
+    if (cancelled) return;
+    log.warn('login failed', {
+      providerName: OPENAI_CODEX_PROVIDER_NAME,
+      alreadyLoggedIn,
+      sessionId: host.session?.id,
+      error,
+    });
+    host.showError(`Login failed: ${formatErrorMessage(error)}`);
+  } finally {
+    if (host.cancelInFlight === cancelLogin) host.cancelInFlight = undefined;
+  }
 }
 
 async function handleKimiCodeOAuthLogin(host: SlashCommandHost): Promise<void> {
@@ -239,6 +343,7 @@ async function handleOpenCodeGoLogin(host: SlashCommandHost): Promise<void> {
 
 export async function handleLogoutCommand(host: SlashCommandHost): Promise<void> {
   const oauthStatus = await host.harness.auth.status(DEFAULT_OAUTH_PROVIDER_NAME);
+  const openAIStatus = await host.harness.auth.getOpenAIStatus();
   const hasOAuthToken = oauthStatus.providers.some(
     (p) => p.providerName === DEFAULT_OAUTH_PROVIDER_NAME && p.hasToken,
   );
@@ -246,7 +351,9 @@ export async function handleLogoutCommand(host: SlashCommandHost): Promise<void>
   const hasManagedRemnant =
     hasOAuthToken || config.providers[DEFAULT_OAUTH_PROVIDER_NAME] !== undefined;
   const apiKeyProviderIds = Object.keys(config.providers ?? {})
-    .filter((id) => id !== DEFAULT_OAUTH_PROVIDER_NAME)
+    .filter(
+      (id) => id !== DEFAULT_OAUTH_PROVIDER_NAME && id !== OPENAI_CODEX_PROVIDER_NAME,
+    )
     .toSorted();
 
   const options: ChoiceOption[] = [];
@@ -254,6 +361,16 @@ export async function handleLogoutCommand(host: SlashCommandHost): Promise<void>
     options.push({
       value: DEFAULT_OAUTH_PROVIDER_NAME,
       label: 'Kimi Code',
+      description: 'OAuth login',
+    });
+  }
+  if (
+    openAIStatus.authenticated ||
+    config.providers[OPENAI_CODEX_PROVIDER_NAME] !== undefined
+  ) {
+    options.push({
+      value: OPENAI_CODEX_PROVIDER_NAME,
+      label: 'OpenAI ChatGPT',
       description: 'OAuth login',
     });
   }
@@ -279,6 +396,11 @@ export async function handleLogoutCommand(host: SlashCommandHost): Promise<void>
 
   if (target === DEFAULT_OAUTH_PROVIDER_NAME) {
     await host.harness.auth.logout(DEFAULT_OAUTH_PROVIDER_NAME);
+  } else if (target === OPENAI_CODEX_PROVIDER_NAME) {
+    await host.harness.auth.logoutOpenAI();
+    if (config.providers[OPENAI_CODEX_PROVIDER_NAME] !== undefined) {
+      await host.harness.removeProvider(OPENAI_CODEX_PROVIDER_NAME);
+    }
   } else {
     await host.harness.removeProvider(target);
   }
@@ -295,6 +417,11 @@ export async function handleLogoutCommand(host: SlashCommandHost): Promise<void>
   }
 
   host.track('logout', { provider: target });
-  const label = target === DEFAULT_OAUTH_PROVIDER_NAME ? 'Kimi Code' : target;
+  const label =
+    target === DEFAULT_OAUTH_PROVIDER_NAME
+      ? 'Kimi Code'
+      : target === OPENAI_CODEX_PROVIDER_NAME
+        ? 'OpenAI ChatGPT'
+        : target;
   host.showStatus(`Logged out from ${label}.`);
 }

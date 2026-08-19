@@ -1,3 +1,5 @@
+import { join } from 'node:path';
+
 import {
   loadRuntimeConfigSafe,
   readConfigFile,
@@ -9,9 +11,17 @@ import {
 import {
   applyManagedKimiCodeConfig,
   applyManagedKimiCodeLogoutConfig,
+  FileTokenStorage,
   fetchGoUsage,
+  getOpenAICodexAccountId,
   KIMI_CODE_PROVIDER_NAME,
   KimiOAuthToolkit,
+  loginOpenAICodex,
+  loginOpenAICodexDevice,
+  OPENAI_CODEX_FLOW_CONFIG,
+  OPENAI_CODEX_PROVIDER_NAME,
+  OAuthManager,
+  refreshOpenAICodexToken,
   resolveKimiCodeLoginAuth,
   resolveKimiCodeRuntimeAuth,
   type AuthManagedUsageResult,
@@ -24,6 +34,8 @@ import {
   type KimiOAuthLoginOptions,
   type ManagedKimiConfigShape,
   type OAuthRefreshOutcome,
+  type OpenAICodexBrowserLoginOptions,
+  type OpenAICodexDeviceLoginOptions,
   type ParsedGoUsage,
 } from '@moonshot-ai/kimi-code-oauth';
 
@@ -88,6 +100,24 @@ export interface KimiAuthLogoutResult {
   readonly ok: true;
 }
 
+export type OpenAIAuthLoginOptions =
+  | ({ readonly flow?: 'browser' } & OpenAICodexBrowserLoginOptions)
+  | ({ readonly flow: 'device' } & OpenAICodexDeviceLoginOptions);
+
+export interface OpenAIAuthLoginResult {
+  readonly providerName: typeof OPENAI_CODEX_PROVIDER_NAME;
+  readonly ok: true;
+  readonly accountId: string;
+  readonly expiresAt: number;
+}
+
+export interface OpenAIAuthStatus {
+  readonly providerName: typeof OPENAI_CODEX_PROVIDER_NAME;
+  readonly authenticated: boolean;
+  readonly accountId?: string;
+  readonly expiresAt?: number;
+}
+
 export interface KimiAuthFacadeOptions {
   readonly homeDir: string;
   readonly configPath: string;
@@ -104,6 +134,8 @@ export type AuthGoUsageResult =
 
 export class KimiAuthFacade {
   private readonly toolkit: KimiOAuthToolkit<SDKManagedConfig>;
+  private readonly openAICodexStorage: FileTokenStorage;
+  private readonly openAICodexManager: OAuthManager;
 
   constructor(private readonly options: KimiAuthFacadeOptions) {
     this.toolkit = new KimiOAuthToolkit<SDKManagedConfig>({
@@ -122,7 +154,62 @@ export class KimiAuthFacade {
         remove: applyManagedKimiCodeLogoutConfig,
       },
     });
+    this.openAICodexStorage = new FileTokenStorage(join(options.homeDir, 'credentials'));
+    this.openAICodexManager = new OAuthManager({
+      config: OPENAI_CODEX_FLOW_CONFIG,
+      storage: this.openAICodexStorage,
+      configDir: options.homeDir,
+      refreshTokenImpl: (_config, refreshToken) => refreshOpenAICodexToken(refreshToken),
+      onRefresh: options.onRefresh,
+    });
   }
+
+  async loginOpenAI(options: OpenAIAuthLoginOptions): Promise<OpenAIAuthLoginResult> {
+    const token =
+      options.flow === 'device'
+        ? await loginOpenAICodexDevice(options)
+        : await loginOpenAICodex(options);
+    const accountId = getOpenAICodexAccountId(token.accessToken);
+    if (accountId === undefined) {
+      throw new Error('ChatGPT OAuth token does not contain an account id.');
+    }
+    await this.openAICodexStorage.save(OPENAI_CODEX_PROVIDER_NAME, token);
+    return {
+      providerName: OPENAI_CODEX_PROVIDER_NAME,
+      ok: true,
+      accountId,
+      expiresAt: token.expiresAt,
+    };
+  }
+
+  async getOpenAIStatus(): Promise<OpenAIAuthStatus> {
+    const authenticated = await this.openAICodexManager.hasToken();
+    if (!authenticated) {
+      return { providerName: OPENAI_CODEX_PROVIDER_NAME, authenticated: false };
+    }
+    const token = await this.openAICodexStorage.load(OPENAI_CODEX_PROVIDER_NAME);
+    return {
+      providerName: OPENAI_CODEX_PROVIDER_NAME,
+      authenticated: true,
+      accountId:
+        token === undefined ? undefined : getOpenAICodexAccountId(token.accessToken),
+      expiresAt: token?.expiresAt,
+    };
+  }
+
+  async logoutOpenAI(): Promise<void> {
+    await this.openAICodexManager.logout();
+  }
+
+  readonly resolveOpenAICodexTokenProvider = (): BearerTokenProvider => ({
+    getAccessToken: async (options) => {
+      try {
+        return await this.openAICodexManager.ensureFresh(options);
+      } catch (error) {
+        throw mapOAuthTokenError(error, OPENAI_CODEX_PROVIDER_NAME) ?? error;
+      }
+    },
+  });
 
   async status(providerName?: string | undefined): Promise<AuthStatus> {
     return this.toolkit.status(providerName, this.resolveRuntimeManagedAuth(providerName).oauthRef);
@@ -272,6 +359,9 @@ export class KimiAuthFacade {
     providerName?: string,
     oauthRef?: OAuthRef | undefined,
   ): Promise<string | undefined> {
+    if (providerName === OPENAI_CODEX_PROVIDER_NAME) {
+      return (await this.openAICodexStorage.load(OPENAI_CODEX_PROVIDER_NAME))?.accessToken;
+    }
     return this.toolkit.getCachedAccessToken(
       providerName,
       this.runtimeOAuthRef(providerName, oauthRef),
@@ -282,6 +372,9 @@ export class KimiAuthFacade {
     providerName: string,
     oauthRef?: OAuthRef | undefined,
   ): BearerTokenProvider => {
+    if (providerName === OPENAI_CODEX_PROVIDER_NAME) {
+      return this.resolveOpenAICodexTokenProvider();
+    }
     const provider = this.toolkit.tokenProvider(
       providerName,
       this.runtimeOAuthRef(providerName, oauthRef),

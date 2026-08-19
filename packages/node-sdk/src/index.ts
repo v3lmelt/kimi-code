@@ -21,10 +21,13 @@ export { SDKRpcClientBase } from '#/rpc';
 export { KimiForCodingProvider } from '#/kimi-code-model-provider';
 export type { KimiForCodingProviderOptions } from '#/kimi-code-model-provider';
 export {
+  applyOpenAICodexConfig,
   OPENAI_HARNESS_MODELS,
   OpenAIResponsesModelProvider,
 } from '#/openai-model-provider';
 export type {
+  ApplyOpenAICodexConfigOptions,
+  ApplyOpenAICodexConfigResult,
   OpenAIResponsesHarnessModel,
   OpenAIResponsesModelProviderOptions,
 } from '#/openai-model-provider';
@@ -143,6 +146,9 @@ export type {
   KimiAuthLoginResult,
   KimiAuthLogoutResult,
   KimiAuthSubmitFeedbackInput,
+  OpenAIAuthLoginOptions,
+  OpenAIAuthLoginResult,
+  OpenAIAuthStatus,
 } from '#/auth';
 
 export * from '#/events';

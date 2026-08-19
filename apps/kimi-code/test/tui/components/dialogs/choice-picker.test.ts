@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { ChoicePickerComponent, type ChoiceOption } from '#/tui/components/dialogs/choice-picker';
 import { EditorSelectorComponent } from '#/tui/components/dialogs/editor-selector';
 import { PermissionSelectorComponent } from '#/tui/components/dialogs/permission-selector';
+import { PlatformSelectorComponent } from '#/tui/components/dialogs/platform-selector';
 import { SettingsSelectorComponent } from '#/tui/components/dialogs/settings-selector';
 import { ThemeSelectorComponent } from '#/tui/components/dialogs/theme-selector';
 import { UpdatePreferenceSelectorComponent } from '#/tui/components/dialogs/update-preference-selector';
@@ -114,6 +115,9 @@ describe('ChoicePickerComponent', () => {
     const upgradePreferenceOutput = upgradePreference.render(120).map(strip);
     expect(upgradePreferenceOutput).toContain('  ❯ On ← current');
     expect(upgradePreferenceOutput).toContain('    Install new versions in the background.');
+
+    const platform = new PlatformSelectorComponent({ onSelect, onCancel });
+    expect(platform.render(120).map(strip)).toContain('    OpenAI ChatGPT (OAuth)');
   });
 
   it('routes Space into the query for searchable lists instead of selecting', () => {

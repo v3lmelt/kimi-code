@@ -1,6 +1,6 @@
 # 平台与模型
 
-Hasu CLI 支持同时接入多家 LLM 平台——用 Kimi Code 托管服务一键登录、用 Anthropic API key 接 Claude、用 OpenAI 兼容协议连接第三方推理服务。每个供应商对应一种 API 协议，模型在供应商之上声明自己的名称、上下文长度和能力。本页介绍如何在 `config.toml` 里配置各种供应商。
+Hasu CLI 支持同时接入多家 LLM 平台——通过 OAuth 登录 Kimi Code 与 OpenAI ChatGPT、用 Anthropic API key 接 Claude、用 OpenAI 兼容协议连接第三方推理服务。每个供应商对应一种 API 协议，模型在供应商之上声明自己的名称、上下文长度和能力。本页介绍如何在 `config.toml` 里配置各种供应商。
 
 ## 支持的供应商类型
 
@@ -12,6 +12,7 @@ Hasu CLI 支持同时接入多家 LLM 平台——用 Kimi Code 托管服务一�
 | `anthropic` | Anthropic Messages | Claude 系列模型 |
 | `openai` | OpenAI Chat Completions | OpenAI 及兼容服务、DeepSeek、Qwen 等 |
 | `openai_responses` | OpenAI Responses API | OpenAI 较新的 Responses 接口 |
+| `openai-codex` | Codex Responses | 通过 OAuth 使用 ChatGPT 订阅 |
 | `google-genai` | Google GenAI | Gemini API |
 | `vertexai` | Google GenAI on Vertex | Google Cloud Vertex AI |
 
@@ -35,7 +36,7 @@ Hasu CLI 支持同时接入多家 LLM 平台——用 Kimi Code 托管服务一�
 - **Custom registry (api.json)**：粘贴自定义 registry 地址和 Bearer token，CLI 自动创建 `providers` / `models` 条目。后续启动时，同一个 registry 地址下的供应商会一起刷新，因此上游新增、删除供应商以及模型元数据变化都会同步。
 
 ::: warning
-通过 `/login` 登录的 Kimi Code OAuth 托管账号不会在 `/provider` 里显示，请用 `/login` 和 `/logout` 管理。
+通过 `/login` 登录的 Kimi Code 与 OpenAI ChatGPT OAuth 账号不会在 `/provider` 里显示，请用 `/login` 和 `/logout` 管理。
 :::
 
 非交互环境下也可以用 shell 命令完成同样操作：[`hasu provider`](../reference/kimi-command.md#hasu-provider)。
@@ -107,6 +108,18 @@ base_url = "https://api.openai.com/v1"
 api_key = "sk-xxxxx"
 ```
 
+## `openai-codex`
+
+运行 `/login`，选择 **OpenAI ChatGPT OAuth**，然后在浏览器中完成授权。打开浏览器前，
+CLI 会把完整授权地址复制到剪贴板，必要时可以手动粘贴。CLI 会在 `localhost:1455`
+等待 OAuth 回调。认证成功后，选择一个内置 GPT-5.6 模型。CLI 会把全部内置 OpenAI
+模型写入 `config.toml`，将所选模型设为默认模型，把 OAuth 凭据保存在 Hasu 主目录中，
+并自动刷新访问令牌。此后这些模型会显示在 `/model` 的 **OpenAI ChatGPT** 标签页中。
+运行 `/logout` 并选择 **OpenAI ChatGPT** 后，CLI 会同时移除凭据与供应商配置。
+
+该登录入口通过 ChatGPT 订阅访问 Codex Responses 后端，不会使用
+`OPENAI_API_KEY`。OpenAI Platform API 密钥计费仍属于独立认证路径。
+
 ### 进程内 harness
 
 TypeScript harness 提供仅在运行时生效的 OpenAI 接入，API 密钥不会写入
@@ -124,6 +137,31 @@ const harness = createKimiHarness({
 
 const session = await harness.createSession({ workDir: process.cwd() });
 ```
+
+harness 也支持通过 Codex OAuth 使用 ChatGPT 订阅登录：
+
+```ts
+const harness = createKimiHarness({
+  openai: {
+    authentication: 'chatgpt',
+    defaultModel: 'gpt-5.6-sol',
+  },
+});
+
+await harness.auth.loginOpenAI({
+  onAuthorization: ({ url }) => {
+    console.log(`请在浏览器中打开此地址完成登录：${url}`);
+  },
+});
+
+const session = await harness.createSession({ workDir: process.cwd() });
+```
+
+浏览器流程会在 `localhost:1455` 等待 OAuth 回调。无界面环境可以设置
+`flow: 'device'`，再向用户显示回调提供的地址和用户码。harness 会将凭据
+保存在自身主目录中，并在凭据即将过期时自动刷新。此模式使用 ChatGPT
+订阅与 Codex Responses 后端，因此不需要 `OPENAI_API_KEY`。OpenAI Platform
+API 密钥与 ChatGPT 订阅仍是彼此独立的认证方式。
 
 内置条目包括 `gpt-5.6-sol`、`gpt-5.6-terra` 和 `gpt-5.6-luna`。三个模型均使用
 Responses API，提供 1,050,000 token 上下文窗口、128,000 token 最大输出、图片输入、
@@ -177,7 +215,7 @@ hasu
 
 ## OAuth 与凭证注入
 
-Kimi Code 托管服务使用 OAuth 而非静态 API 密钥。运行 `/login` 后，内置的认证工具链会自动写入并刷新凭证，`config.toml` 里无需手动配置这部分内容。
+Kimi Code 与 OpenAI ChatGPT 均支持 OAuth 登录。运行 `/login` 后，内置认证工具链会自动写入并刷新凭据。OpenAI 登录入口还会把所选模型与供应商写入 `config.toml`。
 
 ## 下一步
 

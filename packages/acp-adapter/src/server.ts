@@ -155,6 +155,7 @@ function providerHasNonOAuthCredentials(provider: ProviderConfig): boolean {
       return hasProviderValue(provider, 'ANTHROPIC_API_KEY');
     case 'openai':
     case 'openai_responses':
+    case 'openai-codex':
       return hasProviderValue(provider, 'OPENAI_API_KEY');
     case 'kimi':
       return hasProviderValue(provider, 'KIMI_API_KEY');

@@ -2827,13 +2827,16 @@ export class KimiTUI {
   }
 
   showLoginAuthorizationPrompt(auth: DeviceAuthorization): LoginProgressSpinnerHandle {
+    void copyTextToClipboard(auth.verificationUriComplete).catch((error: unknown) => {
+      this.showStatus(`Failed to copy authorization URL: ${formatErrorMessage(error)}`, 'warning');
+    });
     openUrl(auth.verificationUriComplete);
     this.state.transcriptContainer.addChild(
       new DeviceCodeBoxComponent({
         title: 'Sign in to Hasu',
         url: auth.verificationUriComplete,
         code: auth.userCode,
-        hint: 'Press Ctrl-C to cancel',
+        hint: 'Full URL copied to clipboard · Press Ctrl-C to cancel',
       }),
     );
     this.state.ui.requestRender();

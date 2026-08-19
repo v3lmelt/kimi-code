@@ -27,6 +27,24 @@ export type { LoginOptions, OAuthManagerOptions, OAuthRefreshOutcome } from './o
 export { OAuthManager, defaultRefreshThreshold, newInstanceId } from './oauth-manager';
 
 export {
+  createOpenAICodexAuthorizationUrl,
+  exchangeOpenAICodexAuthorizationCode,
+  getOpenAICodexAccountId,
+  loginOpenAICodex,
+  loginOpenAICodexDevice,
+  OPENAI_CODEX_BASE_URL,
+  OPENAI_CODEX_FLOW_CONFIG,
+  OPENAI_CODEX_PROVIDER_NAME,
+  refreshOpenAICodexToken,
+} from './openai-codex';
+export type {
+  OpenAICodexAuthorizationInfo,
+  OpenAICodexBrowserLoginOptions,
+  OpenAICodexDeviceLoginOptions,
+  OpenAICodexRefreshOptions,
+} from './openai-codex';
+
+export {
   assertKimiHostIdentity,
   createKimiDefaultHeaders,
   createKimiDeviceHeaders,

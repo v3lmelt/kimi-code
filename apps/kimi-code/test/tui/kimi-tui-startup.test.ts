@@ -9,12 +9,17 @@ import { describe, expect, it, vi } from 'vitest';
 import { BannerProvider } from '#/tui/banner/banner-provider';
 import { readBannerDisplayState } from '#/tui/banner/state';
 import { handleLoginCommand, handleLogoutCommand } from '#/tui/commands/auth';
-import { promptPlatformSelection, promptLogoutProviderSelection } from '#/tui/commands/prompts';
+import {
+  promptLogoutProviderSelection,
+  promptModelSelectionForOpenPlatform,
+  promptPlatformSelection,
+} from '#/tui/commands/prompts';
 import { BannerComponent } from '#/tui/components/chrome/banner';
 import { WelcomeComponent } from '#/tui/components/chrome/welcome';
 import { KimiTUI, type KimiTUIStartupInput, type TUIState } from '#/tui/kimi-tui';
 import { REPLAY_TURN_LIMIT } from '#/tui/utils/message-replay';
 import { copyTextToClipboard } from '#/utils/clipboard/clipboard-text';
+import { openUrl } from '#/utils/open-url';
 import { quoteShellArg } from '#/utils/shell-quote';
 import {
   DISABLE_TERMINAL_THEME_REPORTING,
@@ -26,13 +31,20 @@ import {
 
 vi.mock('#/tui/commands/prompts', async (importOriginal) => {
   const actual = await importOriginal<typeof import('#/tui/commands/prompts')>();
-  return { ...actual, promptPlatformSelection: vi.fn(), promptLogoutProviderSelection: vi.fn() };
+  return {
+    ...actual,
+    promptPlatformSelection: vi.fn(),
+    promptLogoutProviderSelection: vi.fn(),
+    promptModelSelectionForOpenPlatform: vi.fn(),
+  };
 });
 vi.mock('#/utils/clipboard/clipboard-text', () => ({
   copyTextToClipboard: vi.fn(async () => {}),
 }));
+vi.mock('#/utils/open-url', () => ({ openUrl: vi.fn() }));
 
 const copyTextToClipboardMock = vi.mocked(copyTextToClipboard);
+const openUrlMock = vi.mocked(openUrl);
 
 interface StartupDriver {
   state: TUIState;
@@ -193,6 +205,7 @@ function loginRequiredError(): Error & { readonly code: string } {
 }
 
 function makeHarness(session = makeSession(), overrides: Record<string, unknown> = {}) {
+  const authOverrides = overrides['auth'] as Record<string, unknown> | undefined;
   return {
     getConfig: vi.fn(async () => ({
       models: {
@@ -207,13 +220,20 @@ function makeHarness(session = makeSession(), overrides: Record<string, unknown>
     setTelemetryContext: vi.fn(),
     getExperimentalFeatures: vi.fn(async () => []),
     supportsAtomicSectionReplace: vi.fn(() => false),
+    ...overrides,
     auth: {
       status: vi.fn(async () => ({ providers: [] })),
       login: vi.fn(async () => {}),
       logout: vi.fn(),
       getManagedUsage: vi.fn(),
+      getOpenAIStatus: vi.fn(async () => ({
+        providerName: 'openai-codex',
+        authenticated: false,
+      })),
+      loginOpenAI: vi.fn(),
+      logoutOpenAI: vi.fn(),
+      ...authOverrides,
     },
-    ...overrides,
   };
 }
 
@@ -1703,6 +1723,123 @@ describe('KimiTUI startup', () => {
     });
   });
 
+  it('logs into OpenAI from the platform selector and provisions the selected model', async () => {
+    const events: string[] = [];
+    const authorizationUrl =
+      'https://auth.openai.com/oauth/authorize?response_type=code&client_id=example&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback';
+    const session = makeSession();
+    const config = {
+      defaultModel: 'k2',
+      thinking: { enabled: false },
+      providers: {},
+      models: {
+        k2: { provider: 'kimi', model: 'moonshot-v1', maxContextSize: 100 },
+      },
+    };
+    const setConfig = vi.fn(async (next: Record<string, unknown>) => {
+      Object.assign(config, next);
+    });
+    const loginOpenAI = vi.fn(
+      async (options: {
+        onAuthorization?: (info: { url: string; userCode?: string }) => void;
+      }) => {
+        events.push('authentication:start');
+        options.onAuthorization?.({ url: authorizationUrl });
+        events.push('authentication:complete');
+        return {
+          providerName: 'openai-codex',
+          ok: true as const,
+          accountId: 'account-test',
+          expiresAt: 1_800_000_000,
+        };
+      },
+    );
+    const harness = makeHarness(session, {
+      getConfig: vi.fn(async () => config),
+      setConfig,
+      auth: {
+        status: vi.fn(async () => ({ providers: [] })),
+        login: vi.fn(async () => {}),
+        logout: vi.fn(),
+        getManagedUsage: vi.fn(),
+        getOpenAIStatus: vi.fn(async () => ({
+          providerName: 'openai-codex',
+          authenticated: false,
+        })),
+        loginOpenAI,
+        logoutOpenAI: vi.fn(),
+      },
+    });
+    const driver = makeDriver(harness, makeStartupInput());
+
+    await expect(driver.init()).resolves.toBe(false);
+    vi.mocked(promptPlatformSelection).mockResolvedValue('openai-codex');
+    vi.mocked(promptModelSelectionForOpenPlatform).mockImplementation(async () => {
+      events.push('model-selection');
+      return {
+        model: {
+          id: 'gpt-5.6-sol',
+          contextLength: 1_000_000,
+          supportsReasoning: true,
+          supportsImageIn: true,
+          supportsVideoIn: false,
+        },
+        thinking: 'high',
+      };
+    });
+    copyTextToClipboardMock.mockResolvedValue('native');
+
+    await handleLoginCommand(driver as any);
+
+    expect(events).toEqual([
+      'authentication:start',
+      'authentication:complete',
+      'model-selection',
+    ]);
+    expect(loginOpenAI).toHaveBeenCalledWith({
+      signal: expect.any(AbortSignal),
+      onAuthorization: expect.any(Function),
+    });
+    expect(copyTextToClipboardMock).toHaveBeenCalledWith(authorizationUrl);
+    expect(openUrlMock).toHaveBeenCalledWith(authorizationUrl);
+    expect(setConfig).toHaveBeenCalledWith(
+      expect.objectContaining({
+        defaultModel: 'openai-codex/gpt-5.6-sol',
+        thinking: { enabled: true, effort: 'high' },
+      }),
+    );
+    expect(config.providers).toMatchObject({
+      'openai-codex': {
+        type: 'openai-codex',
+        oauth: { storage: 'file', key: 'openai-codex' },
+      },
+    });
+    expect(config.models).toMatchObject({
+      'openai-codex/gpt-5.6-sol': {
+        provider: 'openai-codex',
+        model: 'gpt-5.6-sol',
+      },
+      'openai-codex/gpt-5.6-terra': {
+        provider: 'openai-codex',
+        model: 'gpt-5.6-terra',
+      },
+      'openai-codex/gpt-5.6-luna': {
+        provider: 'openai-codex',
+        model: 'gpt-5.6-luna',
+      },
+    });
+    expect(driver.state.appState.availableModels).toMatchObject({
+      'openai-codex/gpt-5.6-sol': { provider: 'openai-codex' },
+      'openai-codex/gpt-5.6-terra': { provider: 'openai-codex' },
+      'openai-codex/gpt-5.6-luna': { provider: 'openai-codex' },
+    });
+    expect(harness.track).toHaveBeenCalledWith('login', {
+      provider: 'openai-codex',
+      method: 'oauth',
+      already_logged_in: false,
+    });
+  });
+
   it('logs login failures with session context', async () => {
     const warn = vi.spyOn(log, 'warn').mockImplementation(() => {});
     const session = makeSession();
@@ -1782,6 +1919,44 @@ describe('KimiTUI startup', () => {
       sessionTitle: null,
     });
     expect(harness.track).toHaveBeenCalledWith('logout', { provider: 'managed:kimi-code' });
+  });
+
+  it('removes OpenAI OAuth credentials and provider config together', async () => {
+    const session = makeSession();
+    const removeProvider = vi.fn(async () => {});
+    const logoutOpenAI = vi.fn(async () => {});
+    const harness = makeHarness(session, {
+      getConfig: vi.fn(async () => ({
+        models: {
+          k2: { provider: 'openai-codex', model: 'gpt-5.6-sol', maxContextSize: 1_000_000 },
+        },
+        providers: { 'openai-codex': { type: 'openai-codex' } },
+      })),
+      removeProvider,
+      auth: {
+        status: vi.fn(async () => ({ providers: [] })),
+        login: vi.fn(async () => {}),
+        logout: vi.fn(),
+        getManagedUsage: vi.fn(),
+        getOpenAIStatus: vi.fn(async () => ({
+          providerName: 'openai-codex',
+          authenticated: true,
+          accountId: 'account-test',
+        })),
+        loginOpenAI: vi.fn(),
+        logoutOpenAI,
+      },
+    });
+    const driver = makeDriver(harness, makeStartupInput());
+
+    await expect(driver.init()).resolves.toBe(false);
+    vi.mocked(promptLogoutProviderSelection).mockResolvedValue('openai-codex');
+    await handleLogoutCommand(driver as any);
+
+    expect(logoutOpenAI).toHaveBeenCalledOnce();
+    expect(removeProvider).toHaveBeenCalledWith('openai-codex');
+    expect(session.close).toHaveBeenCalledOnce();
+    expect(harness.track).toHaveBeenCalledWith('logout', { provider: 'openai-codex' });
   });
 
   it('keeps the active session when logging out a different provider', async () => {

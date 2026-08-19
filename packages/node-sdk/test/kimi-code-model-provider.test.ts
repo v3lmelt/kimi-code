@@ -9,9 +9,11 @@ import {
   OAuthUnauthorizedError,
   RetryableRefreshError,
 } from '@moonshot-ai/kimi-code-oauth';
+import { APIStatusError } from '@moonshot-ai/kosong';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  applyOpenAICodexConfig,
   ErrorCodes,
   KimiError,
   KimiForCodingProvider,
@@ -20,6 +22,15 @@ import {
 } from '#/index';
 
 import { TEST_IDENTITY } from './test-identity';
+
+function openAICodexJwt(accountId: string, nonce = 'token'): string {
+  const encode = (value: Record<string, unknown>) =>
+    Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${encode({ alg: 'none' })}.${encode({
+    'https://api.openai.com/auth': { chatgpt_account_id: accountId },
+    nonce,
+  })}.signature`;
+}
 
 describe('KimiForCodingProvider OAuth error mapping', () => {
   let homeDir: string;
@@ -82,6 +93,42 @@ describe('KimiForCodingProvider OAuth error mapping', () => {
 });
 
 describe('OpenAIResponsesModelProvider', () => {
+  it('writes a persistent OpenAI Codex provider and built-in model aliases', () => {
+    const config = {
+      providers: {},
+      models: {},
+    };
+
+    const result = applyOpenAICodexConfig(config, {
+      accountId: 'account-test',
+      selectedModel: 'gpt-5.6-terra',
+      thinking: true,
+      effort: 'high',
+    });
+
+    expect(result.defaultModel).toBe('openai-codex/gpt-5.6-terra');
+    expect(config).toMatchObject({
+      defaultModel: 'openai-codex/gpt-5.6-terra',
+      thinking: { enabled: true, effort: 'high' },
+      providers: {
+        'openai-codex': {
+          type: 'openai-codex',
+          baseUrl: 'https://chatgpt.com/backend-api/codex',
+          oauth: { storage: 'file', key: 'openai-codex' },
+          customHeaders: {
+            'chatgpt-account-id': 'account-test',
+            'x-openai-internal-codex-responses-lite': 'true',
+          },
+        },
+      },
+      models: {
+        'openai-codex/gpt-5.6-sol': { provider: 'openai-codex', model: 'gpt-5.6-sol' },
+        'openai-codex/gpt-5.6-terra': { provider: 'openai-codex', model: 'gpt-5.6-terra' },
+        'openai-codex/gpt-5.6-luna': { provider: 'openai-codex', model: 'gpt-5.6-luna' },
+      },
+    });
+  });
+
   it('registers the GPT-5.6 family on the Responses API with official limits', () => {
     const provider = new OpenAIResponsesModelProvider({
       apiKey: 'YOUR_API_KEY',
@@ -114,6 +161,78 @@ describe('OpenAIResponsesModelProvider', () => {
       defaultEffort: 'medium',
       maxOutputSize: 128_000,
       type: 'openai_responses',
+    });
+  });
+
+  it('routes ChatGPT subscription models through the Codex Responses endpoint', () => {
+    const provider = new OpenAIResponsesModelProvider({
+      authentication: 'chatgpt',
+      promptCacheKey: 'session-1',
+      clientVersion: '1.2.3',
+    });
+
+    expect(provider.resolveProviderConfig('gpt-5.6-sol')).toMatchObject({
+      providerName: 'openai-codex',
+      provider: {
+        type: 'openai_responses',
+        model: 'gpt-5.6-sol',
+        apiKey: undefined,
+        baseUrl: 'https://chatgpt.com/backend-api/codex',
+        defaultHeaders: {
+          'OpenAI-Beta': 'responses=experimental',
+          originator: 'kimi-code',
+          version: '1.2.3',
+          'User-Agent': 'kimi-code/1.2.3',
+          conversation_id: 'session-1',
+          session_id: 'session-1',
+          'x-client-request-id': 'session-1',
+          'x-openai-internal-codex-responses-lite': 'true',
+        },
+        codex: { responsesLite: true },
+      },
+      modelCapabilities: { max_context_tokens: 1_000_000 },
+      supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    });
+  });
+
+  it('binds ChatGPT requests to the account encoded in the access token', async () => {
+    const token = openAICodexJwt('account-1');
+    const getAccessToken = vi.fn(async () => token);
+    const provider = new OpenAIResponsesModelProvider({
+      authentication: 'chatgpt',
+      tokenProvider: { getAccessToken },
+    });
+    const auth = provider.resolveAuth('gpt-5.6-sol');
+
+    await expect(auth!((requestAuth) => Promise.resolve(requestAuth))).resolves.toEqual({
+      apiKey: token,
+      headers: { 'chatgpt-account-id': 'account-1' },
+    });
+    expect(getAccessToken).toHaveBeenCalledWith(undefined);
+  });
+
+  it('forces one token refresh after ChatGPT rejects a request', async () => {
+    const staleToken = openAICodexJwt('account-1', 'stale');
+    const freshToken = openAICodexJwt('account-1', 'fresh');
+    const getAccessToken = vi
+      .fn()
+      .mockResolvedValueOnce(staleToken)
+      .mockResolvedValueOnce(freshToken);
+    const provider = new OpenAIResponsesModelProvider({
+      authentication: 'chatgpt',
+      tokenProvider: { getAccessToken },
+    });
+    const auth = provider.resolveAuth('gpt-5.6-sol');
+    const request = vi
+      .fn()
+      .mockRejectedValueOnce(new APIStatusError(401, 'unauthorized'))
+      .mockResolvedValueOnce('ok');
+
+    await expect(auth!(request)).resolves.toBe('ok');
+    expect(getAccessToken).toHaveBeenNthCalledWith(2, { force: true });
+    expect(request).toHaveBeenNthCalledWith(2, {
+      apiKey: freshToken,
+      headers: { 'chatgpt-account-id': 'account-1' },
     });
   });
 

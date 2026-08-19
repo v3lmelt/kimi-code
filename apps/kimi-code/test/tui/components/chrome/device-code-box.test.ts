@@ -11,7 +11,7 @@ function strip(text: string): string {
 const url = 'https://www.kimi.com/code/authorize_device?user_code=N32D-W3YD';
 const code = 'N32D-W3YD';
 const title = 'Sign in to Hasu';
-const hint = 'Press Ctrl-C to cancel';
+const hint = 'Full URL copied to clipboard · Press Ctrl-C to cancel';
 
 describe('DeviceCodeBoxComponent', () => {
   it('renders a rounded border that frames the title, url and code', () => {
@@ -60,6 +60,14 @@ describe('DeviceCodeBoxComponent', () => {
 
     const joined = component.render(80).map(strip).join('\n');
     expect(joined).not.toContain('Press Ctrl-C');
+  });
+
+  it('omits the verification-code row for browser callback login', () => {
+    const component = new DeviceCodeBoxComponent({ title, url, code: '', hint });
+
+    const joined = component.render(80).map(strip).join('\n');
+    expect(joined).toContain(url);
+    expect(joined).not.toContain('Verification code');
   });
 
   it('keeps every line within narrow widths', () => {

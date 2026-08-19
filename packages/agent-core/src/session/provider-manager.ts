@@ -6,7 +6,10 @@ import {
   getModelCapability,
   UNKNOWN_CAPABILITY,
 } from '@moonshot-ai/kosong';
-import { parseKimiCodeCustomHeaders } from '@moonshot-ai/kimi-code-oauth';
+import {
+  OPENAI_CODEX_BASE_URL,
+  parseKimiCodeCustomHeaders,
+} from '@moonshot-ai/kimi-code-oauth';
 import {
   effectiveModelAlias,
   type KimiConfig,
@@ -382,22 +385,29 @@ function toKosongProviderConfig(
         }),
       };
     case 'openai_responses':
+    case 'openai-codex': {
+      const baseUrl =
+        modelBaseUrl ?? providerValue(provider.baseUrl, provider.env, 'OPENAI_BASE_URL');
+      const codexResponsesLite =
+        effectiveType === 'openai-codex' || isOpenAICodexBaseUrl(baseUrl);
       return {
         type: 'openai_responses',
         model,
-        baseUrl:
-          modelBaseUrl ?? providerValue(provider.baseUrl, provider.env, 'OPENAI_BASE_URL'),
+        baseUrl,
         apiKey: providerApiKey(provider),
         offEffort,
+        codex: codexResponsesLite ? { responsesLite: true } : undefined,
         // Session affinity: same `prompt_cache_key` intent as the `openai`
         // branch; the Responses API accepts it as a top-level request field.
         generationKwargs: { prompt_cache_key: promptCacheKey },
         ...defaultHeadersField({
           ...envCustomHeaders,
           ...kimiUserAgentHeader(kimiRequestHeaders),
+          ...codexSessionHeaders(promptCacheKey, codexResponsesLite),
           ...provider.customHeaders,
         }),
       };
+    }
     case 'vertexai': {
       // Resolve the effective endpoint once (config `base_url` or the
       // GOOGLE_VERTEX_BASE_URL env fallback) and use it for BOTH forwarding and
@@ -432,6 +442,32 @@ function toKosongProviderConfig(
   }
 }
 
+function isOpenAICodexBaseUrl(value: string | undefined): boolean {
+  if (value === undefined) return false;
+  try {
+    const actual = new URL(value);
+    const expected = new URL(OPENAI_CODEX_BASE_URL);
+    return (
+      actual.hostname === expected.hostname &&
+      actual.pathname.replace(/\/+$/, '') === `${expected.pathname.replace(/\/+$/, '')}/codex`
+    );
+  } catch {
+    return false;
+  }
+}
+
+function codexSessionHeaders(
+  promptCacheKey: string | undefined,
+  enabled: boolean,
+): Record<string, string> {
+  if (!enabled || promptCacheKey === undefined) return {};
+  return {
+    conversation_id: promptCacheKey,
+    session_id: promptCacheKey,
+    'x-client-request-id': promptCacheKey,
+  };
+}
+
 // Returns a fresh `defaultHeaders` field for a kosong provider config so
 // resolved instances never share a header object. Omits the key entirely when
 // there are no headers — callers and tests rely on `'defaultHeaders' in provider`.
@@ -461,6 +497,7 @@ function providerApiKey(provider: ProviderConfig): string | undefined {
       return providerValue(provider.apiKey, provider.env, 'ANTHROPIC_API_KEY');
     case 'openai':
     case 'openai_responses':
+    case 'openai-codex':
       return providerValue(provider.apiKey, provider.env, 'OPENAI_API_KEY');
     case 'kimi':
       return providerValue(provider.apiKey, provider.env, 'KIMI_API_KEY');

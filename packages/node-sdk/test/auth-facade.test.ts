@@ -44,6 +44,14 @@ function freshToken(): TokenInfo {
   };
 }
 
+function openAICodexJwt(accountId: string): string {
+  const encode = (value: Record<string, unknown>) =>
+    Buffer.from(JSON.stringify(value)).toString('base64url');
+  return `${encode({ alg: 'none' })}.${encode({
+    'https://api.openai.com/auth': { chatgpt_account_id: accountId },
+  })}.signature`;
+}
+
 beforeEach(async () => {
   homeDir = await mkdtemp(join(tmpdir(), 'kimi-sdk-auth-'));
 });
@@ -57,6 +65,53 @@ afterEach(async () => {
 describe('KimiHarness.auth', () => {
   it('can construct auth facade without host identity', () => {
     expect(() => createKimiHarness({ homeDir })).not.toThrow();
+  });
+
+  it('persists a ChatGPT login completed through the device flow', async () => {
+    const accessToken = openAICodexJwt('account-1');
+    const onAuthorization = vi.fn();
+    const fetchMock: FetchMock = async (input) => {
+      const url = fetchInputUrl(input);
+      if (url.endsWith('/deviceauth/usercode')) {
+        return Response.json({ device_auth_id: 'device-1', user_code: 'ABCD-EFGH', interval: 1 });
+      }
+      if (url.endsWith('/deviceauth/token')) {
+        return Response.json({ authorization_code: 'code-1', code_verifier: 'verifier-1' });
+      }
+      if (url.endsWith('/oauth/token')) {
+        return Response.json({
+          access_token: accessToken,
+          refresh_token: 'refresh-1',
+          expires_in: 3600,
+          token_type: 'Bearer',
+        });
+      }
+      throw new Error(`Unexpected URL: ${url}`);
+    };
+    const harness = createKimiHarness({ homeDir, identity: TEST_IDENTITY });
+
+    await expect(
+      harness.auth.loginOpenAI({
+        flow: 'device',
+        onAuthorization,
+        fetch: fetchMock,
+        sleep: async () => {},
+      }),
+    ).resolves.toMatchObject({
+      providerName: 'openai-codex',
+      ok: true,
+      accountId: 'account-1',
+    });
+    await expect(harness.auth.getOpenAIStatus()).resolves.toMatchObject({
+      providerName: 'openai-codex',
+      authenticated: true,
+      accountId: 'account-1',
+    });
+    expect(onAuthorization).toHaveBeenCalledWith({
+      url: 'https://auth.openai.com/codex/device',
+      instructions: 'Enter code: ABCD-EFGH',
+      userCode: 'ABCD-EFGH',
+    });
   });
 
   it('exposes a cached access token without refreshing auth state', async () => {
@@ -96,7 +151,7 @@ describe('KimiHarness.auth', () => {
         const error = await harness.auth
           .resolveOAuthTokenProvider(KIMI_CODE_PROVIDER_NAME)
           .getAccessToken()
-          .catch((caught: unknown) => caught);
+          .catch((error: unknown) => error);
 
         expect(error).toBeInstanceOf(KimiError);
         expect(error).toMatchObject({
