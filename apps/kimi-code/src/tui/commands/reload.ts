@@ -4,6 +4,8 @@ import { currentTheme, lightColors } from '#/tui/theme';
 import { loadTuiConfig, type TuiConfig } from '../config';
 import type { SlashCommandHost } from './dispatch';
 import { setExperimentalFeatures } from './experimental-flags';
+import { configureSpinnerVerbs } from '../constant/spinner-verbs';
+import { setReducedMotionPreference } from '../utils/accessibility';
 
 export async function handleReloadTuiCommand(host: SlashCommandHost): Promise<void> {
   const tuiConfig = await loadTuiConfig(undefined, (message) =>
@@ -55,6 +57,8 @@ export async function applyReloadedTuiConfig(
   host: SlashCommandHost,
   config: TuiConfig,
 ): Promise<void> {
+  setReducedMotionPreference(config.reducedMotion === true);
+  configureSpinnerVerbs(config.spinner?.verbs ?? [], config.spinner?.verbMode ?? 'append');
   const resolved = config.theme === 'auto'
     ? (currentTheme.palette === lightColors ? 'light' : 'dark')
     : undefined;
@@ -65,6 +69,8 @@ export async function applyReloadedTuiConfig(
     disablePasteBurst: config.disablePasteBurst,
     cacheExpiryHint: config.cacheExpiryHint,
     hideThinking: config.hideThinking,
+    reducedMotion: config.reducedMotion,
+    spinner: config.spinner,
     notifications: config.notifications,
     upgrade: config.upgrade,
     statusLine: config.statusLine,

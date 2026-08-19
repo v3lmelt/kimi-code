@@ -1,4 +1,4 @@
-import { Text, visibleWidth } from '@moonshot-ai/pi-tui';
+import { Text, truncateToWidth, visibleWidth } from '@moonshot-ai/pi-tui';
 import type { TUI } from '@moonshot-ai/pi-tui';
 import chalk from 'chalk';
 
@@ -10,7 +10,7 @@ import { interpolateHexColor } from '#/tui/utils/color';
 
 export type SpinnerStyle = 'moon' | 'braille';
 
-/** Activity-pane mode driving per-mode label animation (glimmer vs flash). */
+/** Activity-pane mode driving per-mode animation timing and status treatment. */
 export type LoaderMode = 'waiting' | 'thinking' | 'composing' | 'tool' | 'compacting';
 
 /** Stall input: `lastActivityAtMs` is the last time the model produced output. */
@@ -25,7 +25,6 @@ const STALL_FADE_MS = 10_000;
 // Glimmer sweep: a brighter band travels across the label. Same palette idea as
 // Claude's GlimmerMessage — base dim, highlight strong — but with a simpler
 // ±1-column band driven by wall-clock.
-const GLIMMER_SPEED_MS = 200;
 const GLIMMER_CYCLE_PAD = 20;
 const GLIMMER_BAND = 1;
 
@@ -33,9 +32,6 @@ const GLIMMER_BAND = 1;
 const THINKING_INACTIVE = '#999999';
 const THINKING_SHIMMER = '#b9b9b9';
 const GLOW_PERIOD_S = 2;
-
-// Tool-use flash: whole label pulses base↔strong on a ~2s sine.
-const FLASH_PERIOD_S = 2;
 
 // Long-thinking emphasis: after ~10s of continuous thinking the glow and label
 // start blending toward the palette warning colour, ramping over the next 10s
@@ -48,6 +44,7 @@ const THINKING_INTENSITY_RAMP_MS = 10_000;
 // single thinking run takes (wall-clock thresholds in ms).
 const THINKING_PHRASE_THRESHOLDS = [10_000, 20_000, 30_000, 45_000] as const;
 const THINKING_PHRASES = [
+  'thinking',
   'still thinking',
   'thinking more',
   'thinking some more',
@@ -61,8 +58,19 @@ const GLYPH_SWEEP_MS = 2_000;
 
 // Adaptive clock: the spinner tick runs faster while a request is in flight
 // (`waiting`), and calms to 100ms while the model is streaming/composing.
-const TICK_REQUESTING_MS = 80;
+const TICK_REQUESTING_MS = 50;
 const TICK_CALM_MS = 100;
+
+const COMPACT_PROGRESS_WIDTH = 24;
+const COMPACT_PROGRESS_BLOCK_WIDTH = 5;
+
+export function thinkingPhraseForElapsed(elapsedMs: number): string {
+  let index = 0;
+  for (let i = 0; i < THINKING_PHRASE_THRESHOLDS.length; i++) {
+    if (elapsedMs >= THINKING_PHRASE_THRESHOLDS[i]!) index = i + 1;
+  }
+  return THINKING_PHRASES[index] ?? THINKING_PHRASES[0];
+}
 
 export class MoonLoader extends Text {
   private intervalId: ReturnType<typeof setInterval> | null = null;
@@ -70,6 +78,9 @@ export class MoonLoader extends Text {
   private colorFn: (s: string) => string;
   private label: string;
   private displayText = '';
+  private retryText = '';
+  private progressText = '';
+  private tipText = '';
   // Inline text used when the spinner is embedded into another line (e.g. the
   // agent-swarm progress status line). It intentionally excludes the tip and
   // the random fallback verb: the host row supplies its own status text, and
@@ -182,7 +193,7 @@ export class MoonLoader extends Text {
     this.updateDisplay();
   }
 
-  /** Switch the per-mode label animation: `tool` flashes, others glimmer. */
+  /** Switch the per-mode animation timing and status treatment. */
   setMode(mode: LoaderMode): void {
     if (this.mode === mode) return;
     this.mode = mode;
@@ -222,22 +233,21 @@ export class MoonLoader extends Text {
     return Math.min(Math.max(elapsed / THINKING_INTENSITY_RAMP_MS, 0), 1);
   }
 
-  /** Ladder phrase for the current thinking run, by elapsed thinking time. */
-  private thinkingPhrase(startedAtMs: number): string {
-    const elapsed = Date.now() - startedAtMs;
-    let index = 0;
-    for (let i = 0; i < THINKING_PHRASE_THRESHOLDS.length; i++) {
-      if (elapsed >= THINKING_PHRASE_THRESHOLDS[i]!) index = i;
-    }
-    return THINKING_PHRASES[index]!;
-  }
-
   private stallIntensity(reduced: boolean): number {
     if (reduced) return 0;
     const input = this.stallProvider?.();
     if (input === undefined) return 0;
+    if (
+      input.lastActivityAtMs <= 0 ||
+      input.hasActiveTools ||
+      this.mode === 'thinking' ||
+      this.mode === 'compacting' ||
+      this.thinkingStatusProvider?.() === 'thinking'
+    ) {
+      return 0;
+    }
     const stallMs = Date.now() - input.lastActivityAtMs;
-    if (stallMs <= STALL_THRESHOLD_MS || input.hasActiveTools) return 0;
+    if (stallMs <= STALL_THRESHOLD_MS) return 0;
     return Math.min((stallMs - STALL_THRESHOLD_MS) / STALL_FADE_MS, 1);
   }
 
@@ -251,7 +261,6 @@ export class MoonLoader extends Text {
     if (reduced) return currentTheme.fg('textDim', text);
     if (stall > 0) return this.stallColor(text, stall);
     const intensity = this.thinkingIntensity(reduced);
-    if (this.mode === 'tool') return this.flashText(text, intensity);
     return this.glimmerText(text, intensity);
   }
 
@@ -278,7 +287,9 @@ export class MoonLoader extends Text {
     const width = visibleWidth(text);
     if (width === 0) return text;
     const cycle = width + GLIMMER_CYCLE_PAD;
-    const center = (Math.floor(Date.now() / GLIMMER_SPEED_MS) % cycle) - 10;
+    const stepMs = this.mode === 'waiting' ? 50 : 200;
+    const step = Math.floor(Date.now() / stepMs) % cycle;
+    const center = this.mode === 'waiting' ? step - 10 : cycle - step - 10;
     const strong =
       intensity > 0
         ? interpolateHexColor(currentTheme.color('textStrong'), currentTheme.color('warning'), intensity)
@@ -292,17 +303,6 @@ export class MoonLoader extends Text {
       col += w;
     }
     return intensity > 0.5 ? chalk.bold(out) : out;
-  }
-
-  /** Whole-label sine pulse between primary and strong text. */
-  private flashText(text: string, intensity: number): string {
-    const opacity = (Math.sin((Date.now() / 1000) * Math.PI * 2 * (1 / FLASH_PERIOD_S)) + 1) / 2;
-    let hex = interpolateHexColor(currentTheme.color('primary'), currentTheme.color('textStrong'), opacity);
-    if (intensity > 0) {
-      hex = interpolateHexColor(hex, currentTheme.color('warning'), intensity);
-    }
-    const colored = chalk.hex(hex)(text);
-    return intensity > 0.5 ? chalk.bold(colored) : colored;
   }
 
   /** Status glow while thinking: pulse between two greys, blending toward the
@@ -324,42 +324,96 @@ export class MoonLoader extends Text {
   private updateDisplay(): void {
     const reduced = isReducedMotion();
     const frameChar = reduced ? '●' : SPINNER_FRAMES[this.glyphFrame()]!;
-    // While thinking is active the label climbs the thinking phrase ladder
-    // (still thinking → … → almost done thinking); otherwise the caller's
-    // label wins, falling back to the per-run working verb.
     const thinkingActive =
       this.mode !== 'compacting' && this.thinkingStatusProvider?.() === 'thinking';
     const thinkingStart = this.thinkingStartProvider?.();
     const thinkingPhrase =
-      thinkingActive && thinkingStart !== undefined ? this.thinkingPhrase(thinkingStart) : undefined;
-    const rowLabel = thinkingPhrase ?? (this.label !== '' ? this.label : this.fallbackVerb);
+      thinkingActive && thinkingStart !== undefined
+        ? thinkingPhraseForElapsed(Date.now() - thinkingStart)
+        : undefined;
+    const rowLabel = this.label !== '' ? this.label : this.fallbackVerb;
     const stall = this.stallIntensity(reduced);
 
     const coloredFrame = this.colorFrame(frameChar, stall, reduced);
     this.inlineText = this.label ? `${coloredFrame} ${this.colorFn(this.label)}` : coloredFrame;
 
-    let text = `${coloredFrame} ${this.colorLabel(rowLabel, stall, reduced)}`;
-
-    // A retry/rate-limit line replaces the normal status suffix while a step
-    // is being retried.
-    const retryStatus = this.retryStatusProvider?.();
-    const retrying = retryStatus !== undefined && retryStatus.length > 0;
-    const status = retrying ? retryStatus : this.statusProvider?.();
-    if (status) {
-      text += retrying
-        ? reduced
-          ? currentTheme.fg('textDim', status)
-          : currentTheme.fg('warning', status)
-        : this.colorStatus(status, reduced);
+    const base = `${coloredFrame} ${this.colorLabel(rowLabel, stall, reduced)}`;
+    let status = this.statusProvider?.() ?? '';
+    if (thinkingPhrase !== undefined) {
+      status = replaceThinkingStatus(status, thinkingPhrase);
     }
-    if (this.tip) {
-      const withTip = text + currentTheme.fg('textDim', this.tip);
-      if (this.availableWidth === 0 || visibleWidth(withTip) <= this.availableWidth) {
-        text = withTip;
+
+    const retryStatus = this.retryStatusProvider?.();
+    this.retryText = retryStatus ? `  ${currentTheme.fg('error', retryStatus.trim())}` : '';
+
+    const width = this.availableWidth;
+    const tip = this.tip ? currentTheme.fg('textDim', this.tip) : '';
+    const statusCandidates = compactStatusCandidates(status);
+    let text = base;
+    for (const candidate of statusCandidates) {
+      const coloredStatus = candidate ? this.colorStatus(candidate, reduced) : '';
+      const withStatus = base + coloredStatus;
+      if (width === 0 || visibleWidth(withStatus) <= width) {
+        text = withStatus;
+        break;
       }
     }
+
+    this.tipText = '';
+    if (tip) {
+      const withTip = text + tip;
+      if (width === 0 || visibleWidth(withTip) <= width) text = withTip;
+      else this.tipText = `  ${tip.trimStart()}`;
+    }
+
+    this.progressText =
+      this.mode === 'compacting'
+        ? `  ${renderIndeterminateProgress(width, Date.now(), reduced)}`
+        : '';
     this.displayText = text;
     this.setText(this.displayText);
     this.ui.requestRender();
   }
+
+  override render(width: number): string[] {
+    this.setAvailableWidth(width);
+    const rows = super.render(width);
+    if (this.retryText) rows.push(truncateToWidth(this.retryText, width));
+    if (this.progressText) rows.push(truncateToWidth(this.progressText, width));
+    if (this.tipText) rows.push(truncateToWidth(this.tipText, width));
+    return rows;
+  }
+}
+
+function replaceThinkingStatus(status: string, phrase: string): string {
+  if (/\bthinking\b/.test(status)) return status.replace(/\bthinking\b/, phrase);
+  if (status === '') return ` (${phrase})`;
+  return status.replace(/\)\s*$/, ` · ${phrase})`);
+}
+
+function compactStatusCandidates(status: string): readonly string[] {
+  const match = /^\s*\((.*)\)$/.exec(status);
+  if (match === null) return status ? [status, ''] : [''];
+  const parts = match[1]!.split(' · ');
+  const candidates: string[] = [status];
+  const withoutThinking = parts.filter((part) => !part.includes('thinking'));
+  const withoutTokens = withoutThinking.filter((part) => !/^[↑↓]/.test(part));
+  for (const candidateParts of [withoutThinking, withoutTokens]) {
+    const candidate = candidateParts.length > 0 ? ` (${candidateParts.join(' · ')})` : '';
+    if (!candidates.includes(candidate)) candidates.push(candidate);
+  }
+  candidates.push('');
+  return candidates;
+}
+
+function renderIndeterminateProgress(width: number, now: number, reduced: boolean): string {
+  const cells = Math.max(8, Math.min(COMPACT_PROGRESS_WIDTH, width > 0 ? width - 4 : COMPACT_PROGRESS_WIDTH));
+  const maxStart = Math.max(0, cells - COMPACT_PROGRESS_BLOCK_WIDTH);
+  const start = reduced || maxStart === 0 ? 0 : Math.floor(now / 100) % (maxStart * 2 || 1);
+  const position = start > maxStart ? maxStart * 2 - start : start;
+  let bar = '';
+  for (let index = 0; index < cells; index++) {
+    bar += index >= position && index < position + COMPACT_PROGRESS_BLOCK_WIDTH ? '━' : '─';
+  }
+  return currentTheme.fg('primary', bar);
 }

@@ -101,6 +101,8 @@ import {
 import { ActivityPaneComponent, type ActivityPaneMode } from './components/panes/activity-pane';
 import { QueuePaneComponent } from './components/panes/queue-pane';
 import type { TuiConfig } from './config';
+import { configureSpinnerVerbs } from './constant/spinner-verbs';
+import { setReducedMotionPreference } from './utils/accessibility';
 import {
   isManagedUsageProvider,
   isOpenCodeGoProvider,
@@ -224,6 +226,11 @@ type MutableCreateSessionOptions = {
 };
 
 function createInitialAppState(input: KimiTUIStartupInput): AppState {
+  setReducedMotionPreference(input.tuiConfig.reducedMotion === true);
+  configureSpinnerVerbs(
+    input.tuiConfig.spinner?.verbs ?? [],
+    input.tuiConfig.spinner?.verbMode ?? 'append',
+  );
   const startupPermission: PermissionMode = input.cliOptions.auto
     ? 'auto'
     : input.cliOptions.yolo
@@ -253,6 +260,8 @@ function createInitialAppState(input: KimiTUIStartupInput): AppState {
     disablePasteBurst: input.tuiConfig.disablePasteBurst,
     cacheExpiryHint: input.tuiConfig.cacheExpiryHint,
     hideThinking: input.tuiConfig.hideThinking,
+    reducedMotion: input.tuiConfig.reducedMotion,
+    spinner: input.tuiConfig.spinner,
     notifications: input.tuiConfig.notifications,
     upgrade: input.tuiConfig.upgrade,
     statusLine: input.tuiConfig.statusLine,

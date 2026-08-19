@@ -9,7 +9,12 @@ import type {
   ToolInputDisplay,
 } from '@moonshot-ai/kimi-code-sdk';
 
-import type { NotificationsConfig, StatusLineConfig, UpgradePreferences } from './config';
+import type {
+  NotificationsConfig,
+  SpinnerPreferences,
+  StatusLineConfig,
+  UpgradePreferences,
+} from './config';
 import type { PendingApproval, PendingQuestion } from './reverse-rpc/types';
 import type { ColorToken, ThemeName } from './theme';
 import type { WorkflowRunView } from './utils/workflow-model';
@@ -109,6 +114,10 @@ export interface AppState {
   /** Mirrors the TUI config toggle; true collapses thinking blocks to a single
    * "∴ Thinking…" indicator. Defaults to false when absent from older fixtures. */
   hideThinking?: boolean;
+  /** Persisted accessibility preference for static activity indicators. */
+  reducedMotion?: boolean;
+  /** Custom spinner verbs loaded from tui.toml. */
+  spinner?: SpinnerPreferences;
   notifications: NotificationsConfig;
   upgrade: UpgradePreferences;
   /** Footer status line customization from tui.toml; absent means the default layout. */

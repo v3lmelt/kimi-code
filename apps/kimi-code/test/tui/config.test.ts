@@ -36,6 +36,9 @@ describe('TUI config', () => {
     expect(text).toContain('theme = "claude"');
     expect(text).toContain('cache_expiry_hint = true');
     expect(text).toContain('hide_thinking = false');
+    expect(text).toContain('reduced_motion = false');
+    expect(text).toContain('[spinner]');
+    expect(text).toContain('verb_mode = "append"');
     expect(text).toContain('command = ""');
     expect(text).toContain('[upgrade]');
     expect(text).toContain('auto_install = true');
@@ -65,6 +68,8 @@ auto_install = false
       disablePasteBurst: false,
       cacheExpiryHint: true,
       hideThinking: false,
+      reducedMotion: false,
+      spinner: { verbs: [], verbMode: 'append' },
       editorCommand: 'code --wait',
       notifications: { enabled: false, condition: 'always', system: false },
       upgrade: { autoInstall: false },
@@ -99,6 +104,22 @@ hide_thinking = true
     expect(config.hideThinking).toBe(true);
   });
 
+  it('parses reduced motion and replacement spinner verbs', () => {
+    const config = parseTuiConfig(`
+reduced_motion = true
+
+[spinner]
+verbs = ["Inspecting", "Verifying"]
+verb_mode = "replace"
+`);
+
+    expect(config.reducedMotion).toBe(true);
+    expect(config.spinner).toEqual({
+      verbs: ['Inspecting', 'Verifying'],
+      verbMode: 'replace',
+    });
+  });
+
   it('normalizes an empty editor command to auto-detect', () => {
     const config = parseTuiConfig(`
 [editor]
@@ -110,6 +131,8 @@ command = "   "
       disablePasteBurst: false,
       cacheExpiryHint: true,
       hideThinking: false,
+      reducedMotion: false,
+      spinner: { verbs: [], verbMode: 'append' },
       editorCommand: null,
       notifications: { enabled: true, condition: 'unfocused', system: false },
       upgrade: { autoInstall: true },
@@ -169,6 +192,8 @@ system = true
       disablePasteBurst: false,
       cacheExpiryHint: true,
       hideThinking: true,
+      reducedMotion: false,
+      spinner: { verbs: [], verbMode: 'append' },
       editorCommand: 'vim',
       notifications: { enabled: false, condition: 'always', system: false },
       upgrade: { autoInstall: false },

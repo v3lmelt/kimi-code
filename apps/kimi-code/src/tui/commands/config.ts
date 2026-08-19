@@ -22,7 +22,9 @@ import { SettingsSelectorComponent, type SettingsSelection } from '../components
 import { ThemeSelectorComponent } from '../components/dialogs/theme-selector';
 import { UpdatePreferenceSelectorComponent } from '../components/dialogs/update-preference-selector';
 import { ThinkingDisplaySelectorComponent } from '../components/dialogs/thinking-display-selector';
+import { MotionSelectorComponent } from '../components/dialogs/motion-selector';
 import { DEFAULT_TUI_CONFIG, saveTuiConfig, type TuiConfig } from '../config';
+import { setReducedMotionPreference } from '../utils/accessibility';
 import type { ThemeName } from '#/tui/theme';
 import { currentTheme, isBuiltInTheme, lightColors, loadCustomThemeMerged } from '#/tui/theme';
 import { NO_ACTIVE_SESSION_MESSAGE } from '../constant/kimi-tui';
@@ -60,6 +62,8 @@ export function currentTuiConfig(host: Pick<SlashCommandHost, 'state'>): TuiConf
     disablePasteBurst: host.state.appState.disablePasteBurst ?? DEFAULT_TUI_CONFIG.disablePasteBurst,
     cacheExpiryHint: host.state.appState.cacheExpiryHint ?? DEFAULT_TUI_CONFIG.cacheExpiryHint,
     hideThinking: host.state.appState.hideThinking ?? DEFAULT_TUI_CONFIG.hideThinking,
+    reducedMotion: host.state.appState.reducedMotion ?? DEFAULT_TUI_CONFIG.reducedMotion,
+    spinner: host.state.appState.spinner ?? DEFAULT_TUI_CONFIG.spinner,
     notifications: host.state.appState.notifications,
     upgrade: host.state.appState.upgrade,
     statusLine: host.state.appState.statusLine ?? DEFAULT_TUI_CONFIG.statusLine,
@@ -984,6 +988,42 @@ export async function applyThinkingDisplayChoice(
   );
 }
 
+export function showMotionPicker(host: SlashCommandHost): void {
+  host.mountEditorReplacement(
+    new MotionSelectorComponent({
+      currentValue: host.state.appState.reducedMotion === true,
+      onSelect: (reducedMotion) => {
+        host.restoreEditor();
+        void applyMotionChoice(host, reducedMotion);
+      },
+      onCancel: () => {
+        host.restoreEditor();
+      },
+    }),
+  );
+}
+
+export async function applyMotionChoice(
+  host: SlashCommandHost,
+  reducedMotion: boolean,
+): Promise<void> {
+  if (reducedMotion === (host.state.appState.reducedMotion === true)) {
+    host.showStatus(`Motion setting already ${reducedMotion ? 'reduced' : 'full'}.`);
+    return;
+  }
+
+  try {
+    await saveTuiConfig({ ...currentTuiConfig(host), reducedMotion });
+  } catch (error) {
+    host.showStatus(`Failed to save motion setting: ${formatErrorMessage(error)}`, 'error');
+    return;
+  }
+
+  setReducedMotionPreference(reducedMotion);
+  host.setAppState({ reducedMotion });
+  host.showStatus(`Motion setting changed to ${reducedMotion ? 'reduced' : 'full'}.`);
+}
+
 async function applyPermissionChoice(host: SlashCommandHost, mode: PermissionMode): Promise<void> {
   if (mode === host.state.appState.permissionMode) {
     host.showStatus(`Permission mode unchanged: ${mode}.`);
@@ -1034,6 +1074,7 @@ function handleSettingsSelection(host: SlashCommandHost, value: SettingsSelectio
     case 'experiments': void showExperimentsPanel(host); return;
     case 'upgrade': showUpdatePreferencePicker(host); return;
     case 'thinking': showThinkingDisplayPicker(host); return;
+    case 'motion': showMotionPicker(host); return;
     case 'usage': void showUsage(host); return;
   }
 }

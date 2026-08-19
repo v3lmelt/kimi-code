@@ -83,18 +83,18 @@ describe('formatTurnUsage', () => {
     expect(formatTurnUsage('composing', usage, now, 140)).toBe(' (1s · ↓ 140 tokens)');
   });
 
-  it('prefixes "thinking" while reasoning is in progress', () => {
+  it('places "thinking" after elapsed usage while reasoning is in progress', () => {
     const now = Date.now();
     expect(
       formatTurnUsage('thinking', { input: 0, output: 0, turnStartedAt: now - 12_000 }, now, 0, 'thinking'),
-    ).toBe(' (thinking · 12s)');
+    ).toBe(' (12s · thinking)');
   });
 
   it('shows "thought for Ns" after reasoning completes', () => {
     const now = Date.now();
     expect(
       formatTurnUsage('thinking', { input: 0, output: 0, turnStartedAt: now - 5_000 }, now, 0, 3_400),
-    ).toBe(' (thought for 3s · 5s)');
+    ).toBe(' (5s · thought for 3s)');
   });
 
   it('omits the thinking prefix when thinking status is null', () => {

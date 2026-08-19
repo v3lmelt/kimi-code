@@ -1,7 +1,7 @@
 import chalk from 'chalk';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { FooterComponent } from '#/tui/components/chrome/footer';
+import { advanceTokenDisplayUnits, FooterComponent } from '#/tui/components/chrome/footer';
 import { setRainbowDance, type RainbowDanceController } from '#/tui/easter-eggs/dance';
 import { currentTheme, darkColors, lightColors } from '#/tui/theme';
 import type { ModelAlias } from '@moonshot-ai/kimi-code-sdk';
@@ -21,6 +21,18 @@ function truecolorCodes(text: string): Set<string> {
 // Dark dance colors the footer never uses outside of /dance.
 const RAINBOW_CYAN = '91,192,190';
 const RAINBOW_GREEN = '78,200,126';
+
+describe('advanceTokenDisplayUnits', () => {
+  it('replays every missed 50ms step in quarter-token units', () => {
+    expect(advanceTokenDisplayUnits(0, 500, 1)).toBe(50);
+    expect(advanceTokenDisplayUnits(0, 500, 4)).toBe(200);
+  });
+
+  it('clamps to the provider-backed target without overshooting', () => {
+    expect(advanceTokenDisplayUnits(384, 100, 10)).toBe(400);
+    expect(advanceTokenDisplayUnits(480, 100, 1)).toBe(400);
+  });
+});
 
 function setDanceView(colored: boolean, phase: number): void {
   const dance: RainbowDanceController = {
