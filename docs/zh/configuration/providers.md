@@ -164,7 +164,7 @@ const session = await harness.createSession({ workDir: process.cwd() });
 API 密钥与 ChatGPT 订阅仍是彼此独立的认证方式。
 
 内置条目包括 `gpt-5.6-sol`、`gpt-5.6-terra` 和 `gpt-5.6-luna`。三个模型均使用
-Responses API，提供 1,050,000 token 上下文窗口、128,000 token 最大输出、图片输入、
+Responses API，提供 272,000 token 上下文窗口、128,000 token 最大输出、图片输入、
 函数工具，以及从关闭到 max 的推理等级。默认模型为 `gpt-5.6-sol`。省略凭证或端点时，
 运行时会读取 `OPENAI_API_KEY` 和 `OPENAI_BASE_URL`。
 

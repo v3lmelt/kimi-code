@@ -66,7 +66,7 @@ export const OPENAI_HARNESS_MODELS: readonly OpenAIResponsesHarnessModel[] = [
   {
     id: 'gpt-5.6-sol',
     displayName: 'GPT-5.6 Sol',
-    maxContextTokens: 1_050_000,
+    maxContextTokens: 272_000,
     maxOutputTokens: 128_000,
     supportEfforts: GPT_56_EFFORTS,
     defaultEffort: 'medium',
@@ -74,7 +74,7 @@ export const OPENAI_HARNESS_MODELS: readonly OpenAIResponsesHarnessModel[] = [
   {
     id: 'gpt-5.6-terra',
     displayName: 'GPT-5.6 Terra',
-    maxContextTokens: 1_050_000,
+    maxContextTokens: 272_000,
     maxOutputTokens: 128_000,
     supportEfforts: GPT_56_EFFORTS,
     defaultEffort: 'medium',
@@ -82,7 +82,7 @@ export const OPENAI_HARNESS_MODELS: readonly OpenAIResponsesHarnessModel[] = [
   {
     id: 'gpt-5.6-luna',
     displayName: 'GPT-5.6 Luna',
-    maxContextTokens: 1_050_000,
+    maxContextTokens: 272_000,
     maxOutputTokens: 128_000,
     supportEfforts: GPT_56_EFFORTS,
     defaultEffort: 'medium',

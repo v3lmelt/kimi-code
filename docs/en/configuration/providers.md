@@ -171,7 +171,7 @@ backend, so `OPENAI_API_KEY` is not required. OpenAI Platform API-key usage and
 ChatGPT subscription usage remain separate authentication choices.
 
 The built-in entries are `gpt-5.6-sol`, `gpt-5.6-terra`, and
-`gpt-5.6-luna`. All three use the Responses API with a 1,050,000-token context
+`gpt-5.6-luna`. All three use the Responses API with a 272,000-token context
 window, a 128,000-token output limit, image input, function tools, and reasoning
 levels from off through max. The default is `gpt-5.6-sol`. Omitted credentials
 and endpoints fall back to `OPENAI_API_KEY` and `OPENAI_BASE_URL`.
