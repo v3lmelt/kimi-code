@@ -14,6 +14,7 @@ import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
 import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
 import {
   WorkflowJournal,
+  WorkflowRunAlreadyClaimedError,
   generateWorkflowRunId,
   isWorkflowRunId,
   workflowAgentCacheKey,
@@ -43,6 +44,15 @@ function makeJournal(runId = generateWorkflowRunId()): {
     log,
   });
   return { journal, runId };
+}
+
+function makeJournalWithLog(log: AppendLogStore, runId = generateWorkflowRunId()): WorkflowJournal {
+  return new WorkflowJournal({
+    runId,
+    scope: workflowJournalScope('sessions/s-1', runId),
+    dir: workflowJournalDir('sessions/s-1', runId),
+    log,
+  });
 }
 
 describe('workflowScriptSha256', () => {
@@ -383,5 +393,110 @@ describe('WorkflowJournal', () => {
     expect(summary?.agents.map((agent) => agent.agentId)).toEqual(['b', 'a']);
     expect(summary?.agents[0]).toMatchObject({ ok: true, result: 'b done' });
     expect(summary?.agents[1]).toMatchObject({ ok: undefined });
+  });
+
+  it('rejects a terminal resume while the source journal lease is held', async () => {
+    const log = new AppendLogStore(new InMemoryStorageService());
+    const runId = 'wf_0123456789abcdef' as const;
+    const journal = makeJournalWithLog(log, runId);
+    journal.writeWorkflowStarted({
+      script: SCRIPT,
+      scriptSha256: workflowScriptSha256(SCRIPT),
+      name: 'leased',
+      description: 'leased source',
+      startedAt: '2026-08-14T00:00:00.000Z',
+    });
+    journal.writeWorkflowCompleted({ ok: true, completedAt: '2026-08-14T00:00:01.000Z' });
+    await log.flush();
+
+    const lease = await journal.acquireRunLease();
+    await expect(journal.claimResume('wf_fedcba9876543210')).rejects.toThrow(/already leased/);
+    await expect(journal.readJournal()).resolves.toMatchObject({
+      terminal: 'completed',
+      lease: { held: true },
+    });
+    lease.dispose();
+    await expect(journal.readJournal()).resolves.toMatchObject({ lease: { held: false } });
+    await log.close();
+  });
+
+  it('allows one terminal resume claim and persists the claimed run id after restart', async () => {
+    const log = new AppendLogStore(new InMemoryStorageService());
+    const sourceRunId = 'wf_0123456789abcdef' as const;
+    const claimedRunId = 'wf_fedcba9876543210' as const;
+    const journal = makeJournalWithLog(log, sourceRunId);
+    journal.writeWorkflowStarted({
+      script: SCRIPT,
+      scriptSha256: workflowScriptSha256(SCRIPT),
+      name: 'claim',
+      description: 'claim source',
+      startedAt: '2026-08-14T00:00:00.000Z',
+    });
+    journal.writeWorkflowCompleted({ ok: true, completedAt: '2026-08-14T00:00:01.000Z' });
+    await log.flush();
+
+    await expect(journal.claimResume(claimedRunId)).resolves.toMatchObject({
+      terminal: 'completed',
+      claimedBy: claimedRunId,
+      lease: { held: false },
+    });
+    await expect(journal.claimResume('wf_aaaaaaaaaaaaaaaa')).rejects.toBeInstanceOf(WorkflowRunAlreadyClaimedError);
+    await expect(journal.claimResume('wf_aaaaaaaaaaaaaaaa')).rejects.toThrow(claimedRunId);
+
+    const restarted = makeJournalWithLog(log, sourceRunId);
+    await expect(restarted.readJournal()).resolves.toMatchObject({
+      terminal: 'completed',
+      claimedBy: claimedRunId,
+    });
+    await log.close();
+  });
+
+  it('rejects an active source and releases its temporary lease', async () => {
+    const log = new AppendLogStore(new InMemoryStorageService());
+    const sourceRunId = 'wf_0123456789abcdef' as const;
+    const journal = makeJournalWithLog(log, sourceRunId);
+    journal.writeWorkflowStarted({
+      script: SCRIPT,
+      scriptSha256: workflowScriptSha256(SCRIPT),
+      name: 'active',
+      description: 'active source',
+      startedAt: '2026-08-14T00:00:00.000Z',
+    });
+    await log.flush();
+
+    await expect(journal.claimResume('wf_fedcba9876543210')).rejects.toThrow(/still running/);
+    await expect(journal.readJournal()).resolves.toMatchObject({
+      status: 'running',
+      lease: { held: false },
+    });
+    await log.close();
+  });
+
+  it('serializes concurrent terminal claims so only one resumer succeeds', async () => {
+    const log = new AppendLogStore(new InMemoryStorageService());
+    const sourceRunId = 'wf_0123456789abcdef' as const;
+    const firstRunId = 'wf_fedcba9876543210' as const;
+    const secondRunId = 'wf_aaaaaaaaaaaaaaaa' as const;
+    const journal = makeJournalWithLog(log, sourceRunId);
+    journal.writeWorkflowStarted({
+      script: SCRIPT,
+      scriptSha256: workflowScriptSha256(SCRIPT),
+      name: 'concurrent',
+      description: 'concurrent source',
+      startedAt: '2026-08-14T00:00:00.000Z',
+    });
+    journal.writeWorkflowCompleted({ ok: true, completedAt: '2026-08-14T00:00:01.000Z' });
+    await log.flush();
+
+    const [first, second] = await Promise.allSettled([
+      journal.claimResume(firstRunId),
+      journal.claimResume(secondRunId),
+    ]);
+    expect([first.status, second.status].filter((status) => status === 'fulfilled')).toHaveLength(1);
+    const summary = await journal.readJournal();
+    expect(summary?.claimedBy).toBe(
+      first.status === 'fulfilled' ? firstRunId : secondRunId,
+    );
+    await log.close();
   });
 });

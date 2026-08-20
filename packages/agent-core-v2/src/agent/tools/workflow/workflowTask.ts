@@ -212,9 +212,11 @@ export class WorkflowTask implements AgentTask {
     let journalLease: IDisposable | undefined;
 
     try {
-      runLease = typeof this.journal.acquireRunLease === 'function' ? this.journal.acquireRunLease() : undefined;
+      runLease = typeof this.journal.acquireRunLease === 'function'
+        ? this.journal.acquireRunLease()
+        : undefined;
       if (this.graph !== undefined) {
-        await this.startGraph(sink, controller, runStartedMs);
+        await this.startGraph(sink, controller, runStartedMs, runLease);
         return;
       }
       journalLease = typeof this.journal.acquire === 'function' ? this.journal.acquire() : undefined;
@@ -308,8 +310,8 @@ export class WorkflowTask implements AgentTask {
       }
     } finally {
       sink.signal.removeEventListener('abort', requestAbort);
-      journalLease?.dispose();
       runLease?.dispose();
+      journalLease?.dispose();
       this.resumeLease?.dispose();
     }
   }
@@ -318,6 +320,7 @@ export class WorkflowTask implements AgentTask {
     sink: AgentTaskSink,
     controller: AbortController,
     runStartedMs: number,
+    runLease: IDisposable | undefined,
   ): Promise<void> {
     let journalLease: { dispose(): void } | undefined;
     try {
@@ -379,6 +382,7 @@ export class WorkflowTask implements AgentTask {
       this.telemetry.completed(this.runId, false, message);
       await sink.settle({ status: 'failed', stopReason: message });
     } finally {
+      runLease?.dispose();
       journalLease?.dispose();
     }
   }

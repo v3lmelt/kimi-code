@@ -309,6 +309,29 @@ describe('WorkflowTool', () => {
     expect(String(result.output)).toContain('status: running');
   });
 
+  it('rejects a terminal DAG resume when the source summary still has a lease', async () => {
+    dagEnabled = true;
+    journalRecords = [
+      ...resumeDagRecords(true),
+      {
+        kind: 'workflow.lease.acquired',
+        runId: RESUME_DAG_RUN_ID,
+        leaseId: 'lease-held',
+        at: '2026-08-20T00:00:03.000Z',
+      },
+    ];
+    const tool = ix.createInstance(WorkflowTool);
+
+    const result = await runTool(tool, {
+      graph: RESUME_DAG_GRAPH,
+      resumeFromRunId: RESUME_DAG_RUN_ID,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(String(result.output)).toContain('currently leased');
+    expect(registeredTasks).toHaveLength(0);
+  });
+
   it('rejects a scriptPath that escapes the session directory', () => {
     const tool = ix.createInstance(WorkflowTool);
     expect(() => tool.resolveExecution({ scriptPath: '../outside.js' })).toThrow(/escapes the session directory/);

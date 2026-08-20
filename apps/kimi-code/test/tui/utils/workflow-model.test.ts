@@ -143,7 +143,8 @@ describe('applyWorkflowProgressEvent', () => {
   });
 
   it('returns the same array reference for unknown runs and no-op events', () => {
-    const runs = runningLedger();
+    const event = startedEvent();
+    const runs = applyWorkflowProgressEvent(EMPTY_WORKFLOW_RUNS, event);
     expect(
       applyWorkflowProgressEvent(runs, {
         type: 'workflow.log',
@@ -151,7 +152,7 @@ describe('applyWorkflowProgressEvent', () => {
         message: 'nope',
       }),
     ).toBe(runs);
-    expect(applyWorkflowProgressEvent(runs, startedEvent())).toBe(runs);
+    expect(applyWorkflowProgressEvent(runs, event)).toBe(runs);
   });
 
   it('folds optional node, identity, replay, and isolation fields without changing legacy events', () => {

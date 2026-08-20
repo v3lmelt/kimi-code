@@ -178,6 +178,7 @@ describe('WorkflowTask', () => {
     expect(summary?.agents[0]?.result).toBe('cached-summary');
     expect(summary?.agents[0]?.ok).toBe(true);
     expect(summary?.completedAgentIds).toEqual(['a1']);
+    expect(summary?.lease).toEqual({ state: 'available', held: false });
   });
 
   it('settles failed when the script throws and journals the terminal failure', async () => {

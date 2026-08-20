@@ -6,6 +6,7 @@
 import type { IDisposable } from '#/_base/di/lifecycle';
 import type { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { canonicalWorkflowJson } from '#/agent/workflow/ir/fingerprint';
+import { randomUUID } from 'node:crypto';
 import type {
   WorkflowNodeId,
   WorkflowNodeProvenance,
@@ -26,39 +27,71 @@ export interface WorkflowRunLeaseState {
 export class WorkflowRunAlreadyLeasedError extends Error {
   readonly code = 'workflow.run_locked' as const;
 
-  constructor(readonly scope: string, readonly runId: WorkflowRunId) {
-    super(`Workflow run "${runId}" is already leased for execution.`);
+  constructor(
+    readonly scope: string,
+    readonly runId: WorkflowRunId,
+    readonly owner?: string,
+  ) {
+    super(
+      owner === undefined
+        ? `Workflow run "${runId}" is already leased for execution.`
+        : `Workflow run "${runId}" is already leased for execution by lease "${owner}".`,
+    );
     this.name = 'WorkflowRunAlreadyLeasedError';
   }
 }
 
-const workflowRunLeases = new Map<string, string>();
-let nextWorkflowLeaseId = 0;
+export class WorkflowRunAlreadyClaimedError extends Error {
+  readonly code = 'workflow.resume_claimed' as const;
+
+  constructor(
+    readonly runId: WorkflowRunId,
+    readonly claimedBy: WorkflowRunId,
+  ) {
+    super(`Workflow run "${runId}" has already been claimed for resume by run "${claimedBy}".`);
+    this.name = 'WorkflowRunAlreadyClaimedError';
+  }
+}
+
+export type WorkflowRunLeaseRecord =
+  | {
+      readonly kind: 'workflow.lease.acquired';
+      readonly runId: WorkflowRunId;
+      readonly leaseId: string;
+      readonly at: string;
+    }
+  | {
+      readonly kind: 'workflow.lease.released';
+      readonly runId: WorkflowRunId;
+      readonly leaseId: string;
+      readonly at: string;
+    };
+
+export interface WorkflowResumeClaimRecord {
+  readonly kind: 'workflow.resume_claimed';
+  readonly runId: WorkflowRunId;
+  readonly claimedBy: WorkflowRunId;
+  readonly claimedAt: string;
+}
 
 export interface WorkflowRunLease extends IDisposable {
   readonly leaseId: string;
   readonly state: 'held' | 'released';
 }
 
-export function acquireWorkflowRunLease(scope: string, runId: WorkflowRunId): WorkflowRunLease {
-  const key = `${scope}\n${runId}`;
-  if (workflowRunLeases.has(key)) throw new WorkflowRunAlreadyLeasedError(scope, runId);
-  const leaseId = `workflow-lease-${String(++nextWorkflowLeaseId)}`;
-  workflowRunLeases.set(key, leaseId);
-  let state: WorkflowRunLease['state'] = 'held';
-  return {
-    leaseId,
-    get state() { return state; },
-    dispose: () => {
-      if (state === 'released') return;
-      state = 'released';
-      if (workflowRunLeases.get(key) === leaseId) workflowRunLeases.delete(key);
-    },
-  };
-}
-
-export function workflowRunLeaseState(scope: string, runId: WorkflowRunId): WorkflowRunLeaseState {
-  const owner = workflowRunLeases.get(`${scope}\n${runId}`);
+export function foldWorkflowRunLease(
+  records: readonly WorkflowRunLeaseRecord[],
+  runId: WorkflowRunId,
+): WorkflowRunLeaseState {
+  let owner: string | undefined;
+  for (const record of records) {
+    if (record.runId !== runId) continue;
+    if (record.kind === 'workflow.lease.acquired') {
+      owner = record.leaseId;
+    } else if (owner === record.leaseId) {
+      owner = undefined;
+    }
+  }
   return owner === undefined
     ? { state: 'available', held: false }
     : { state: 'held', held: true, owner };
@@ -169,6 +202,7 @@ export interface WorkflowDagJournalSummary {
   readonly started: boolean;
   readonly terminal: WorkflowRunTerminal | undefined;
   readonly lease: WorkflowRunLeaseState;
+  readonly claimedBy?: WorkflowRunId;
   readonly graphVersion: string | undefined;
   readonly nodes: ReadonlyMap<WorkflowNodeId, WorkflowDagNodeState>;
   readonly checkpoints: readonly WorkflowNodeCheckpoint[];
@@ -182,6 +216,7 @@ export interface FoldWorkflowJournalOptions {
   readonly started?: boolean;
   readonly terminal?: WorkflowRunTerminal;
   readonly lease?: WorkflowRunLeaseState;
+  readonly claimedBy?: WorkflowRunId;
 }
 
 export function foldWorkflowJournal(
@@ -284,6 +319,7 @@ export function foldWorkflowJournal(
     started: options.started ?? false,
     terminal: options.terminal,
     lease: options.lease ?? { state: 'available', held: false },
+    ...(options.claimedBy === undefined ? {} : { claimedBy: options.claimedBy }),
     graphVersion,
     nodes,
     checkpoints,
@@ -307,7 +343,66 @@ export class WorkflowDagJournal {
   acquire(key = 'journal.jsonl'): IDisposable { return this.options.log.acquire(this.options.scope, key); }
 
   acquireRunLease(): WorkflowRunLease {
-    return acquireWorkflowRunLease(this.options.scope, this.runId);
+    const lock = this.takeLeaseLock();
+    const leaseId = `workflow-lease-${randomUUID()}`;
+    this.writeLeaseAcquired(leaseId, new Date().toISOString());
+    return this.createLease(leaseId, lock);
+  }
+
+  private async acquireRunLeaseForResume(): Promise<WorkflowRunLease> {
+    const lock = this.takeLeaseLock();
+    try {
+      const existing = await this.readDagSummary();
+      if (existing.lease.held) {
+        throw new WorkflowRunAlreadyLeasedError(this.options.scope, this.runId, existing.lease.owner);
+      }
+      const leaseId = `workflow-lease-${randomUUID()}`;
+      this.writeLeaseAcquired(leaseId, new Date().toISOString());
+      await this.options.log.flush();
+      return this.createLease(leaseId, lock);
+    } catch (error) {
+      lock?.dispose();
+      throw error;
+    }
+  }
+
+  private takeLeaseLock(): IDisposable | undefined {
+    let lock: IDisposable | undefined;
+    try {
+      lock = this.options.log.acquireExclusive?.(this.options.scope, 'journal.jsonl');
+    } catch {
+      throw new WorkflowRunAlreadyLeasedError(this.options.scope, this.runId);
+    }
+    return lock;
+  }
+
+  async claimResume(claimedBy: WorkflowRunId, at = new Date().toISOString()): Promise<WorkflowDagJournalSummary> {
+    const journalHandle = this.acquire();
+    let lease: WorkflowRunLease | undefined;
+    try {
+      lease = await this.acquireRunLeaseForResume();
+      const summary = await this.readDagSummary();
+      if (summary.terminal === undefined) {
+        throw new Error(`Workflow run "${this.runId}" is still running and cannot be resumed.`);
+      }
+      if (summary.claimedBy !== undefined) {
+        throw new WorkflowRunAlreadyClaimedError(this.runId, summary.claimedBy);
+      }
+      this.writeResumeClaim(claimedBy, at);
+      await this.options.log.flush();
+      return {
+        ...summary,
+        claimedBy,
+        lease: { state: 'available', held: false },
+      };
+    } finally {
+      lease?.dispose();
+      journalHandle.dispose();
+    }
+  }
+
+  writeResumeClaim(claimedBy: WorkflowRunId, at: string): void {
+    this.write({ kind: 'workflow.resume_claimed', runId: this.runId, claimedBy, claimedAt: at });
   }
 
   writeNodePlanned(nodeId: WorkflowNodeId, fingerprint: string, provenance: WorkflowNodeProvenance, at: string): void {
@@ -342,10 +437,34 @@ export class WorkflowDagJournal {
     this.write({ kind: 'checkpoint', runId: this.runId, ...checkpoint });
   }
 
+  private writeLeaseAcquired(leaseId: string, at: string): void {
+    this.write({ kind: 'workflow.lease.acquired', runId: this.runId, leaseId, at });
+  }
+
+  private writeLeaseReleased(leaseId: string, at: string): void {
+    this.write({ kind: 'workflow.lease.released', runId: this.runId, leaseId, at });
+  }
+
+  private createLease(leaseId: string, lock: IDisposable | undefined): WorkflowRunLease {
+    let state: WorkflowRunLease['state'] = 'held';
+    return {
+      leaseId,
+      get state() { return state; },
+      dispose: () => {
+        if (state === 'released') return;
+        state = 'released';
+        this.writeLeaseReleased(leaseId, new Date().toISOString());
+        lock?.dispose();
+      },
+    };
+  }
+
   async readDagSummary(options?: FoldWorkflowJournalOptions): Promise<WorkflowDagJournalSummary> {
     const records: WorkflowNodeJournalRecord[] = [];
+    const leaseRecords: WorkflowRunLeaseRecord[] = [];
     let started = false;
     let terminal: WorkflowRunTerminal | undefined;
+    let claimedBy: WorkflowRunId | undefined;
     for await (const record of this.options.log.read<unknown>(this.options.scope, 'journal.jsonl')) {
       if (isDagRecord(record)) {
         records.push(record);
@@ -353,18 +472,30 @@ export class WorkflowDagJournal {
         throw new WorkflowJournalCorruptionError(`Unknown workflow DAG journal event "${String((record as { kind?: unknown }).kind)}".`);
       } else if (isWorkflowRunLifecycleEvent(record)) {
         if (record.kind === 'workflow.started') started = true;
-        else if (terminal === undefined) terminal = terminalForLifecycleEvent(record);
+        else if (record.kind === 'workflow.resume_claimed') {
+          if (claimedBy === undefined) claimedBy = record.claimedBy;
+          else if (claimedBy !== record.claimedBy) {
+            throw new WorkflowJournalCorruptionError(
+              `Conflicting workflow resume claims for run "${this.runId}".`,
+            );
+          }
+        } else if (isWorkflowRunTerminalEvent(record) && terminal === undefined) {
+          terminal = terminalForLifecycleEvent(record);
+        } else if (isWorkflowRunLeaseRecord(record)) {
+          leaseRecords.push(record);
+        }
       }
     }
     return foldWorkflowJournal(records, {
       ...options,
       started,
       ...(terminal === undefined ? {} : { terminal }),
-      lease: workflowRunLeaseState(this.options.scope, this.runId),
+      lease: foldWorkflowRunLease(leaseRecords, this.runId),
+      ...(claimedBy === undefined ? {} : { claimedBy }),
     });
   }
 
-  private write(record: WorkflowNodeJournalRecord): void {
+  private write(record: WorkflowNodeJournalRecord | WorkflowRunLeaseRecord | WorkflowResumeClaimRecord): void {
     this.options.log.append(this.options.scope, 'journal.jsonl', record, { onError: this.options.onError });
   }
 }
@@ -452,7 +583,9 @@ type WorkflowRunLifecycleRecord =
   | { readonly kind: 'workflow.started'; readonly runId: string }
   | { readonly kind: 'workflow.completed'; readonly runId: string; readonly ok: boolean }
   | { readonly kind: 'workflow.failed'; readonly runId: string }
-  | { readonly kind: 'workflow.cancelled'; readonly runId: string };
+  | { readonly kind: 'workflow.cancelled'; readonly runId: string }
+  | WorkflowResumeClaimRecord
+  | WorkflowRunLeaseRecord;
 
 function isWorkflowRunLifecycleEvent(value: unknown): value is WorkflowRunLifecycleRecord {
   if (!isRecord(value) || typeof value['kind'] !== 'string' || typeof value['runId'] !== 'string') return false;
@@ -461,11 +594,28 @@ function isWorkflowRunLifecycleEvent(value: unknown): value is WorkflowRunLifecy
     case 'workflow.completed': return typeof value['ok'] === 'boolean';
     case 'workflow.failed':
     case 'workflow.cancelled': return true;
+    case 'workflow.resume_claimed':
+      return typeof value['claimedBy'] === 'string' && typeof value['claimedAt'] === 'string';
+    case 'workflow.lease.acquired':
+    case 'workflow.lease.released':
+      return typeof value['leaseId'] === 'string' && typeof value['at'] === 'string';
     default: return false;
   }
 }
 
-function terminalForLifecycleEvent(record: Exclude<WorkflowRunLifecycleRecord, { readonly kind: 'workflow.started' }>): WorkflowRunTerminal {
+function isWorkflowRunTerminalEvent(
+  record: WorkflowRunLifecycleRecord,
+): record is Exclude<WorkflowRunLifecycleRecord, { readonly kind: 'workflow.started' | 'workflow.resume_claimed' | 'workflow.lease.acquired' | 'workflow.lease.released' }> {
+  return record.kind === 'workflow.completed' || record.kind === 'workflow.failed' || record.kind === 'workflow.cancelled';
+}
+
+function isWorkflowRunLeaseRecord(record: WorkflowRunLifecycleRecord): record is WorkflowRunLeaseRecord {
+  return record.kind === 'workflow.lease.acquired' || record.kind === 'workflow.lease.released';
+}
+
+function terminalForLifecycleEvent(
+  record: Exclude<WorkflowRunLifecycleRecord, { readonly kind: 'workflow.started' | 'workflow.resume_claimed' | 'workflow.lease.acquired' | 'workflow.lease.released' }>,
+): WorkflowRunTerminal {
   if (record.kind === 'workflow.cancelled') return 'cancelled';
   if (record.kind === 'workflow.failed') return 'failed';
   return record.ok ? 'completed' : 'failed';

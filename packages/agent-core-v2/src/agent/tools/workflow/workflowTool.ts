@@ -77,7 +77,7 @@ import {
   workflowJournalScope,
   workflowScriptSha256,
 } from '#/agent/workflow/persist/journal';
-import { WorkflowDagJournal, type WorkflowDagJournalSummary } from '#/agent/workflow/persist/dagJournal';
+import type { WorkflowDagJournalSummary } from '#/agent/workflow/persist/dagJournal';
 import { telemetryWorkflowHook } from '#/agent/workflow/progress/workflowProgress';
 import { IWorkflowBudgetService } from '#/agent/workflow/budget/workflowBudget';
 import {
@@ -297,7 +297,7 @@ export class WorkflowTool implements IWorkflowTool {
     const scriptSha256 = workflowScriptSha256(serialized);
     const journal = this.createJournal(runId);
     await this.persistGraph(runId, serialized);
-    const dagResume = await this.loadDagResume(args.resumeFromRunId);
+    const dagResume = await this.loadDagResume(args.resumeFromRunId, runId);
     const meta: WorkflowScriptMeta = {
       name: graph.graph.name ?? 'Workflow DAG',
       description: graph.graph.description ?? 'Verified WorkflowGraph execution',
@@ -348,20 +348,30 @@ export class WorkflowTool implements IWorkflowTool {
     );
   }
 
-  private async loadDagResume(resumeFromRunId: string | undefined): Promise<WorkflowDagJournalSummary | undefined> {
+  private async loadDagResume(
+    resumeFromRunId: string | undefined,
+    claimedBy: WorkflowRunId,
+  ): Promise<WorkflowDagJournalSummary | undefined> {
     if (resumeFromRunId === undefined || resumeFromRunId.trim().length === 0) return undefined;
     const priorRunId = resumeFromRunId.trim();
     if (!isWorkflowRunId(priorRunId)) {
       throw new Error2(ErrorCodes.VALIDATION_FAILED, `Invalid workflow run id: "${priorRunId}"`);
     }
-    const dagJournal = new WorkflowDagJournal({
+    const journal = new WorkflowJournal({
       runId: priorRunId,
+      dir: workflowJournalDir(this.session.sessionDir, priorRunId),
       scope: workflowJournalScope(this.session.scope(), priorRunId),
       log: this.logStore,
     });
-    const summary = await dagJournal.readDagSummary({ recoverRunning: true, lostAt: new Date().toISOString() });
-    if (!summary.started && summary.nodes.size === 0 && summary.graphVersion === undefined) {
+    const summary = await journal.readJournal({ recoverRunning: true, lostAt: new Date().toISOString() });
+    if (summary === undefined) {
       throw new Error2(ErrorCodes.VALIDATION_FAILED, `No workflow run "${priorRunId}" was found to resume.`);
+    }
+    if (summary.lease.held) {
+      throw new Error2(
+        ErrorCodes.VALIDATION_FAILED,
+        `Workflow run "${priorRunId}" is currently leased and cannot be resumed.`,
+      );
     }
     if (summary.terminal === undefined) {
       throw new Error2(
@@ -369,7 +379,19 @@ export class WorkflowTool implements IWorkflowTool {
         `Workflow run "${priorRunId}" is still running and cannot be resumed.`,
       );
     }
-    return summary;
+    const claimed = await journal.claimResume(claimedBy);
+    return {
+      runId: claimed.runId,
+      started: true,
+      terminal: claimed.terminal,
+      lease: claimed.lease,
+      ...(claimed.claimedBy === undefined ? {} : { claimedBy: claimed.claimedBy }),
+      graphVersion: claimed.graphVersion,
+      nodes: claimed.nodes,
+      checkpoints: claimed.checkpoints,
+      spent: claimed.spent,
+      reserved: claimed.reserved,
+    };
   }
 
   private workflowFingerprintContext(): WorkflowGraphCompileOptions {

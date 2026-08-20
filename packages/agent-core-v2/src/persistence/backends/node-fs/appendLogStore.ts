@@ -50,6 +50,7 @@ interface LogState {
   ready: Promise<void>;
   retirement: Promise<void> | undefined;
   onError?: (error: unknown) => void;
+  exclusiveHeld: boolean;
 }
 
 export class AppendLogStore implements IAppendLogStore {
@@ -251,6 +252,17 @@ export class AppendLogStore implements IAppendLogStore {
     });
   }
 
+  acquireExclusive(scope: string, key: string): IDisposable {
+    const state = this.state(scope, key);
+    if (state.exclusiveHeld) {
+      throw new Error(`append-log ${scope}/${key} is already exclusively acquired`);
+    }
+    state.exclusiveHeld = true;
+    return toDisposable(() => {
+      state.exclusiveHeld = false;
+    });
+  }
+
   private state(scope: string, key: string): LogState {
     const id = logId(scope, key);
     let state = this.logs.get(id);
@@ -267,6 +279,7 @@ export class AppendLogStore implements IAppendLogStore {
         retired: false,
         ready,
         retirement: undefined,
+        exclusiveHeld: false,
       };
       this.logs.set(id, state);
     }

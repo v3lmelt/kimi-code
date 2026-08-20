@@ -88,6 +88,15 @@ export interface IAppendLogStore {
   flush(): Promise<void>;
   close(): Promise<void>;
   acquire(scope: string, key: string): IDisposable;
+  /**
+   * Take a short-lived exclusive coordination lock for one log key.
+   *
+   * The lock serializes read/check/append transactions that need to make a
+   * durable journal decision. It does not replace the journal records: the
+   * resulting state must still be represented by the append log so a fresh
+   * process can fold it after restart.
+   */
+  acquireExclusive?(scope: string, key: string): IDisposable;
 }
 
 export const IAppendLogStore: ServiceIdentifier<IAppendLogStore> =

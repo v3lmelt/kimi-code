@@ -25,7 +25,7 @@
  * is being re-run (a changed script invalidates the journal).
  */
 
-import { createHash, randomBytes } from 'node:crypto';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'pathe';
 
 import { BugIndicatingError } from '#/errors';
@@ -37,15 +37,22 @@ import type {
   WorkflowNodeProvenance,
   WorkflowNodeResult,
 } from '#/agent/workflow/types';
-import type { WorkflowNodeJournalRecord, WorkflowNodeJournalRecordError } from './dagJournal';
+import type {
+  FoldWorkflowJournalOptions,
+  WorkflowNodeJournalRecord,
+  WorkflowNodeJournalRecordError,
+} from './dagJournal';
 import {
-  acquireWorkflowRunLease,
-  workflowRunLeaseState,
   type WorkflowRunLease,
   type WorkflowRunLeaseState,
   type WorkflowRunTerminal,
+  type WorkflowRunLeaseRecord,
+  type WorkflowResumeClaimRecord,
   assertWorkflowNodeJournalRecord,
   foldWorkflowJournal,
+  foldWorkflowRunLease,
+  WorkflowRunAlreadyClaimedError,
+  WorkflowRunAlreadyLeasedError,
   WorkflowJournalCorruptionError,
   type WorkflowDagJournalSummary,
 } from './dagJournal';
@@ -168,6 +175,8 @@ export type WorkflowJournalRecord =
       readonly reason?: string;
       readonly cancelledAt: string;
     }
+  | WorkflowRunLeaseRecord
+  | WorkflowResumeClaimRecord
   | WorkflowNodeJournalRecord;
 
 /** Version prefix of the resume cache key; bump when the hashing contract changes. */
@@ -311,6 +320,7 @@ export interface WorkflowJournalSummary {
   readonly status: WorkflowRunStatus;
   readonly terminal: WorkflowRunTerminal | undefined;
   readonly lease: WorkflowRunLeaseState;
+  readonly claimedBy?: WorkflowRunId;
   readonly startedAt: string;
   readonly completedAt?: string;
   readonly ok?: boolean;
@@ -331,6 +341,8 @@ export interface WorkflowJournalSummary {
   readonly spent: number;
   readonly reserved: number;
 }
+
+export type WorkflowJournalReadOptions = Pick<FoldWorkflowJournalOptions, 'recoverRunning' | 'lostAt'>;
 
 /**
  * Fold the agent ledger into the cache-key → completion map used by resume.
@@ -388,7 +400,71 @@ export class WorkflowJournal {
 
   /** Reserve this run while it is being executed or used as a resume source. */
   acquireRunLease(): WorkflowRunLease {
-    return acquireWorkflowRunLease(this.options.scope, this.options.runId);
+    const lock = this.takeLeaseLock();
+    const leaseId = `workflow-lease-${randomUUID()}`;
+    this.writeWorkflowLeaseAcquired(leaseId, new Date().toISOString());
+    return this.createRunLease(leaseId, lock);
+  }
+
+  /** Acquire a run lease after checking the folded durable lease state. */
+  private async acquireRunLeaseForResume(): Promise<WorkflowRunLease> {
+    const lock = this.takeLeaseLock();
+    try {
+      const existing = await this.readJournal({ recoverRunning: true, lostAt: new Date().toISOString() });
+      if (existing?.lease.held) {
+        throw new WorkflowRunAlreadyLeasedError(this.options.scope, this.options.runId, existing.lease.owner);
+      }
+      const leaseId = `workflow-lease-${randomUUID()}`;
+      this.writeWorkflowLeaseAcquired(leaseId, new Date().toISOString());
+      await this.options.log.flush();
+      return this.createRunLease(leaseId, lock);
+    } catch (error) {
+      lock?.dispose();
+      throw error;
+    }
+  }
+
+  private takeLeaseLock(): IDisposable | undefined {
+    let lock: IDisposable | undefined;
+    try {
+      lock = this.options.log.acquireExclusive?.(this.options.scope, WORKFLOW_JOURNAL_KEY);
+    } catch {
+      throw new WorkflowRunAlreadyLeasedError(this.options.scope, this.options.runId);
+    }
+    return lock;
+  }
+
+  /**
+   * Atomically validate a terminal source run and consume its one-shot resume
+   * claim. The returned summary is a snapshot with the lease already released;
+   * the claim remains in the source journal permanently.
+   */
+  async claimResume(claimedBy: WorkflowRunId, at = new Date().toISOString()): Promise<WorkflowJournalSummary> {
+    const journalHandle = this.acquire();
+    let lease: WorkflowRunLease | undefined;
+    try {
+      lease = await this.acquireRunLeaseForResume();
+      const summary = await this.readJournal({ recoverRunning: true, lostAt: at });
+      if (summary === undefined) {
+        throw new Error(`No workflow run "${this.runId}" was found to resume.`);
+      }
+      if (summary.terminal === undefined) {
+        throw new Error(`Workflow run "${this.runId}" is still running and cannot be resumed.`);
+      }
+      if (summary.claimedBy !== undefined) {
+        throw new WorkflowRunAlreadyClaimedError(this.runId, summary.claimedBy);
+      }
+      this.writeWorkflowResumeClaim(claimedBy, at);
+      await this.options.log.flush();
+      return {
+        ...summary,
+        claimedBy,
+        lease: { state: 'available', held: false },
+      };
+    } finally {
+      lease?.dispose();
+      journalHandle.dispose();
+    }
   }
 
   /** Record the run start, pinning the script by `scriptSha256`. */
@@ -418,6 +494,14 @@ export class WorkflowJournal {
   /** Record the terminal run settlement. */
   writeWorkflowCompleted(completed: WorkflowJournalCompletion): void {
     this.write({ kind: 'workflow.completed', runId: this.options.runId, ...completed });
+  }
+
+  writeWorkflowResumeClaim(claimedBy: WorkflowRunId, claimedAt: string): void {
+    this.write({ kind: 'workflow.resume_claimed', runId: this.options.runId, claimedBy, claimedAt });
+  }
+
+  writeResumeClaim(claimedBy: WorkflowRunId, claimedAt: string): void {
+    this.writeWorkflowResumeClaim(claimedBy, claimedAt);
   }
 
   writeNodePlanned(nodeId: WorkflowNodeId, fingerprint: string, provenance: WorkflowNodeProvenance, at: string): void {
@@ -452,18 +536,42 @@ export class WorkflowJournal {
     this.write({ kind: 'checkpoint', runId: this.options.runId, ...checkpoint });
   }
 
+  private writeWorkflowLeaseAcquired(leaseId: string, at: string): void {
+    this.write({ kind: 'workflow.lease.acquired', runId: this.options.runId, leaseId, at });
+  }
+
+  private writeWorkflowLeaseReleased(leaseId: string, at: string): void {
+    this.write({ kind: 'workflow.lease.released', runId: this.options.runId, leaseId, at });
+  }
+
+  private createRunLease(leaseId: string, lock: IDisposable | undefined): WorkflowRunLease {
+    let state: WorkflowRunLease['state'] = 'held';
+    return {
+      leaseId,
+      get state() { return state; },
+      dispose: () => {
+        if (state === 'released') return;
+        state = 'released';
+        this.writeWorkflowLeaseReleased(leaseId, new Date().toISOString());
+        lock?.dispose();
+      },
+    };
+  }
+
   /**
    * Fold the journal back into a summary. Returns `undefined` when the run was
    * never started (no `workflow.started` record), which is how resume
    * distinguishes "no such run" from "run exists but is still running".
    */
-  async readJournal(): Promise<WorkflowJournalSummary | undefined> {
+  async readJournal(options: WorkflowJournalReadOptions = {}): Promise<WorkflowJournalSummary | undefined> {
     let started: Extract<WorkflowJournalRecord, { readonly kind: 'workflow.started' }> | undefined;
     let completed: Extract<WorkflowJournalRecord, { readonly kind: 'workflow.completed' }> | undefined;
     let terminal: WorkflowRunTerminal | undefined;
     const phaseTransitions: string[] = [];
     const agents = new Map<string, WorkflowJournalAgent>();
     const dagRecords: WorkflowNodeJournalRecord[] = [];
+    const leaseRecords: WorkflowRunLeaseRecord[] = [];
+    let claimedBy: WorkflowRunId | undefined;
 
     for await (const rawRecord of this.options.log.read<unknown>(
       this.options.scope,
@@ -527,6 +635,18 @@ export class WorkflowJournal {
         case 'workflow.cancelled':
           terminal ??= 'cancelled';
           break;
+        case 'workflow.resume_claimed':
+          if (claimedBy === undefined) claimedBy = record.claimedBy;
+          else if (claimedBy !== record.claimedBy) {
+            throw new WorkflowJournalCorruptionError(
+              `Conflicting workflow resume claims for run "${this.options.runId}".`,
+            );
+          }
+          break;
+        case 'workflow.lease.acquired':
+        case 'workflow.lease.released':
+          leaseRecords.push(record);
+          break;
         case 'node.planned':
         case 'node.ready':
         case 'node.running':
@@ -545,7 +665,10 @@ export class WorkflowJournal {
     if (started === undefined) return undefined;
 
     const agentList = [...agents.values()];
-    const dag: WorkflowDagJournalSummary = foldWorkflowJournal(dagRecords, { recoverRunning: false });
+    const dag: WorkflowDagJournalSummary = foldWorkflowJournal(dagRecords, {
+      recoverRunning: options.recoverRunning ?? false,
+      lostAt: options.lostAt,
+    });
     return {
       runId: started.runId,
       script: started.script,
@@ -556,7 +679,8 @@ export class WorkflowJournal {
       ...(started.args === undefined ? {} : { args: started.args }),
       status: terminal === undefined ? 'running' : terminal === 'completed' ? 'completed' : 'failed',
       terminal,
-      lease: workflowRunLeaseState(this.options.scope, this.options.runId),
+      lease: foldWorkflowRunLease(leaseRecords, this.options.runId),
+      ...(claimedBy === undefined ? {} : { claimedBy }),
       startedAt: started.startedAt,
       ...(completed === undefined ? {} : { completedAt: completed.completedAt }),
       ...(completed === undefined
@@ -600,6 +724,9 @@ const WORKFLOW_JOURNAL_KINDS = new Set([
   'workflow.completed',
   'workflow.failed',
   'workflow.cancelled',
+  'workflow.lease.acquired',
+  'workflow.lease.released',
+  'workflow.resume_claimed',
   'node.planned',
   'node.ready',
   'node.running',
@@ -621,6 +748,23 @@ function assertWorkflowJournalRecord(value: unknown): WorkflowJournalRecord {
   if (kind.startsWith('node.') || kind === 'checkpoint') {
     assertWorkflowNodeJournalRecord(value);
     return value;
+  }
+  if (kind === 'workflow.resume_claimed') {
+    if (
+      typeof (value as { runId?: unknown }).runId !== 'string' ||
+      typeof (value as { claimedBy?: unknown }).claimedBy !== 'string' ||
+      typeof (value as { claimedAt?: unknown }).claimedAt !== 'string'
+    ) {
+      throw new WorkflowJournalCorruptionError('Invalid workflow resume claim event.');
+    }
+  } else if (kind === 'workflow.lease.acquired' || kind === 'workflow.lease.released') {
+    if (
+      typeof (value as { runId?: unknown }).runId !== 'string' ||
+      typeof (value as { leaseId?: unknown }).leaseId !== 'string' ||
+      typeof (value as { at?: unknown }).at !== 'string'
+    ) {
+      throw new WorkflowJournalCorruptionError('Invalid workflow lease event.');
+    }
   }
   return value as WorkflowJournalRecord;
 }
