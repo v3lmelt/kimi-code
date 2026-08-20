@@ -19,6 +19,25 @@ import type { Agent } from '.';
 import type { LLMRequestLogFields } from '../loop';
 import { fingerprint, toolSignature } from './llm-request-logger';
 
+interface CachePrefixSnapshot {
+  readonly systemPromptHash: string;
+  readonly toolsHash: string;
+  readonly messageHashes: readonly string[];
+}
+
+interface CachePrefixTrace {
+  readonly cachePrefixHash: string;
+  readonly cachePrefixMatchedMessages: number;
+  readonly cachePrefixChange:
+    | 'initial'
+    | 'system-prompt'
+    | 'tools'
+    | 'message'
+    | 'append'
+    | 'truncated'
+    | 'unchanged';
+}
+
 export class LlmRequestRecorder {
   /** Hashes of tool tables already durable in this wire log. */
   private readonly seenToolsHashes = new Set<string>();
@@ -32,6 +51,7 @@ export class LlmRequestRecorder {
   private lastToolsHash: string | undefined;
   private lastSystemPrompt: string | undefined;
   private lastSystemPromptHash: string | undefined;
+  private lastCachePrefix: CachePrefixSnapshot | undefined;
 
   constructor(private readonly agent: Agent) {}
 
@@ -64,6 +84,11 @@ export class LlmRequestRecorder {
     }
 
     const modelAlias = this.agent.config.modelAlias;
+    const systemPromptHash = this.systemPromptHashFor(systemPrompt);
+    const cachePrefixTrace =
+      provider.name === 'openai-responses'
+        ? this.traceCachePrefix(systemPrompt, systemPromptHash, wireTools, toolsHash, messages)
+        : undefined;
     // Mirror the ConfigState.provider pipeline for Kimi-only request params:
     // env sampling overrides and the preserved-thinking keep passthrough
     // reach the wire only for Kimi providers, resolved by the same exported
@@ -97,11 +122,14 @@ export class LlmRequestRecorder {
           ? undefined
           : this.agent.kimiConfig?.models?.[modelAlias]?.betaApi,
       toolSelect: this.agent.toolSelectEnabled,
-      systemPromptHash: this.systemPromptHashFor(systemPrompt),
+      systemPromptHash,
       systemPrompt:
         systemPrompt === this.agent.config.systemPrompt ? undefined : systemPrompt,
       toolsHash,
       messageCount: messages.length,
+      cachePrefixHash: cachePrefixTrace?.cachePrefixHash,
+      cachePrefixMatchedMessages: cachePrefixTrace?.cachePrefixMatchedMessages,
+      cachePrefixChange: cachePrefixTrace?.cachePrefixChange,
       turnStep: fields.turnStep,
       attempt: fields.attempt,
       projection: fields.projection,
@@ -125,6 +153,61 @@ export class LlmRequestRecorder {
       this.lastSystemPromptHash = fingerprint(systemPrompt);
     }
     return this.lastSystemPromptHash;
+  }
+
+  private traceCachePrefix(
+    systemPrompt: string,
+    systemPromptHash: string,
+    wireTools: readonly Tool[],
+    toolsHash: string,
+    messages: readonly Message[],
+  ): CachePrefixTrace {
+    const messageHashes = messages.map((message) => fingerprint(JSON.stringify(message)));
+    const current: CachePrefixSnapshot = { systemPromptHash, toolsHash, messageHashes };
+    const previous = this.lastCachePrefix;
+    this.lastCachePrefix = current;
+
+    let cachePrefixMatchedMessages = 0;
+    if (previous !== undefined) {
+      while (
+        cachePrefixMatchedMessages < previous.messageHashes.length &&
+        cachePrefixMatchedMessages < messageHashes.length &&
+        previous.messageHashes[cachePrefixMatchedMessages] ===
+          messageHashes[cachePrefixMatchedMessages]
+      ) {
+        cachePrefixMatchedMessages += 1;
+      }
+    }
+
+    let cachePrefixChange: CachePrefixTrace['cachePrefixChange'];
+    if (previous === undefined) {
+      cachePrefixChange = 'initial';
+    } else if (previous.systemPromptHash !== systemPromptHash) {
+      cachePrefixChange = 'system-prompt';
+      cachePrefixMatchedMessages = 0;
+    } else if (previous.toolsHash !== toolsHash) {
+      cachePrefixChange = 'tools';
+      cachePrefixMatchedMessages = 0;
+    } else if (
+      cachePrefixMatchedMessages === previous.messageHashes.length &&
+      cachePrefixMatchedMessages === messageHashes.length
+    ) {
+      cachePrefixChange = 'unchanged';
+    } else if (cachePrefixMatchedMessages === previous.messageHashes.length) {
+      cachePrefixChange = 'append';
+    } else if (cachePrefixMatchedMessages === messageHashes.length) {
+      cachePrefixChange = 'truncated';
+    } else {
+      cachePrefixChange = 'message';
+    }
+
+    return {
+      cachePrefixHash: fingerprint(
+        JSON.stringify({ systemPrompt, tools: toolSignature(wireTools), messages }),
+      ),
+      cachePrefixMatchedMessages,
+      cachePrefixChange,
+    };
   }
 }
 

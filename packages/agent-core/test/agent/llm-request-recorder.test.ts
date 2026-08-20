@@ -85,6 +85,31 @@ describe('llm request trace records', () => {
     ]);
   });
 
+  it('records the reusable message prefix for consecutive OpenAI Responses requests', async () => {
+    const persistence = new InMemoryAgentRecordPersistence();
+    const ctx = testAgent({ persistence });
+    ctx.configure({
+      provider: { type: 'openai_responses', model: 'gpt-5.6-sol', apiKey: 'YOUR_API_KEY' },
+    });
+
+    ctx.mockNextResponse({ type: 'text', text: 'one' });
+    await runTurn(ctx, 'first');
+    ctx.mockNextResponse({ type: 'text', text: 'two' });
+    await runTurn(ctx, 'second');
+
+    const requests = recordsOf(persistence, 'llm.request');
+    expect(requests[0]).toMatchObject({
+      cachePrefixChange: 'initial',
+      cachePrefixMatchedMessages: 0,
+      cachePrefixHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+    expect(requests[1]).toMatchObject({
+      cachePrefixChange: 'append',
+      cachePrefixMatchedMessages: requests[0]!.messageCount,
+      cachePrefixHash: expect.stringMatching(/^[0-9a-f]{64}$/),
+    });
+  });
+
   it('does not re-log a durable snapshot after resume', async () => {
     const persistence = new InMemoryAgentRecordPersistence();
     const ctx = testAgent({ persistence });

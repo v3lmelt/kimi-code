@@ -234,6 +234,36 @@ describe('OpenAIResponsesChatProvider', () => {
       ]);
     });
 
+    it('keeps the prior input as an exact prefix when a turn is appended', async () => {
+      const provider = new OpenAIResponsesChatProvider({
+        model: 'gpt-4.1',
+        apiKey: 'YOUR_API_KEY',
+        generationKwargs: { prompt_cache_key: 'stable-session' },
+      });
+      const firstHistory: Message[] = [
+        { role: 'user', content: [{ type: 'text', text: 'First question' }], toolCalls: [] },
+      ];
+      const secondHistory: Message[] = [
+        ...firstHistory,
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'First answer' }],
+          toolCalls: [],
+        },
+        { role: 'user', content: [{ type: 'text', text: 'Second question' }], toolCalls: [] },
+      ];
+
+      const first = await captureRequestBody(provider, 'Stable policy', [ADD_TOOL], firstHistory);
+      const second = await captureRequestBody(provider, 'Stable policy', [ADD_TOOL], secondHistory);
+
+      expect(second['instructions']).toBe(first['instructions']);
+      expect(second['tools']).toEqual(first['tools']);
+      expect(second['prompt_cache_key']).toBe(first['prompt_cache_key']);
+      expect((second['input'] as unknown[]).slice(0, (first['input'] as unknown[]).length)).toEqual(
+        first['input'],
+      );
+    });
+
     it('image url in user message is encoded as input_image', async () => {
       const provider = createProvider();
       const history: Message[] = [
@@ -1545,7 +1575,7 @@ describe('OpenAIResponsesChatProvider', () => {
             usage: {
               input_tokens: 20,
               output_tokens: 10,
-              input_tokens_details: { cached_tokens: 5 },
+              input_tokens_details: { cached_tokens: 5, cache_write_tokens: 7 },
             },
           },
         },
@@ -1578,15 +1608,15 @@ describe('OpenAIResponsesChatProvider', () => {
         { type: 'text', text: ' world' },
         {
           type: 'usage',
-          usage: { inputOther: 15, output: 10, inputCacheRead: 5, inputCacheCreation: 0 },
+          usage: { inputOther: 8, output: 10, inputCacheRead: 5, inputCacheCreation: 7 },
         },
       ]);
 
       expect(stream.usage).toEqual({
-        inputOther: 15,
+        inputOther: 8,
         output: 10,
         inputCacheRead: 5,
-        inputCacheCreation: 0,
+        inputCacheCreation: 7,
       });
     });
 
