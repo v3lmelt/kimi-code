@@ -133,6 +133,7 @@ describe('OpenAIResponsesModelProvider', () => {
     const provider = new OpenAIResponsesModelProvider({
       apiKey: 'YOUR_API_KEY',
       promptCacheKey: 'session-1',
+      nativeToolSearch: true,
     });
 
     expect(OPENAI_HARNESS_MODELS.map((model) => model.id)).toEqual([
@@ -149,6 +150,7 @@ describe('OpenAIResponsesModelProvider', () => {
         apiKey: 'YOUR_API_KEY',
         maxOutputTokens: 128_000,
         offEffort: 'none',
+        nativeToolSearch: true,
         generationKwargs: { prompt_cache_key: 'session-1' },
       },
       modelCapabilities: {
@@ -169,6 +171,7 @@ describe('OpenAIResponsesModelProvider', () => {
       authentication: 'chatgpt',
       promptCacheKey: 'session-1',
       clientVersion: '1.2.3',
+      responsesWebSocket: true,
     });
 
     expect(provider.resolveProviderConfig('gpt-5.6-sol')).toMatchObject({
@@ -188,6 +191,7 @@ describe('OpenAIResponsesModelProvider', () => {
           'x-openai-internal-codex-responses-lite': 'true',
         },
         codex: { responsesLite: true },
+        responsesWebSocket: true,
       },
       modelCapabilities: { max_context_tokens: 272_000 },
       supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],

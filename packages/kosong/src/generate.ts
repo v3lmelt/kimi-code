@@ -113,7 +113,7 @@ export async function generate(
   // request's top-level `tools[]` (their schemas travel via message-level
   // `tools` declarations; the top-level list stays byte-stable for prompt
   // caching). This is the single strip point for every provider call.
-  const wireTools = tools.some((tool) => tool.deferred === true)
+  const wireTools = !provider.preservesDeferredTools && tools.some((tool) => tool.deferred === true)
     ? tools.filter((tool) => tool.deferred !== true)
     : tools;
 

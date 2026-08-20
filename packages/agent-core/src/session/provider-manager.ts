@@ -51,6 +51,7 @@ interface ProviderManagerOptions {
   readonly promptCacheKey?: string;
   readonly codexConversationId?: string;
   readonly codexThreadId?: string;
+  readonly responsesWebSocket?: boolean;
 }
 
 type AuthorizedRequest = <T>(
@@ -156,6 +157,7 @@ export class ProviderManager implements ModelProvider {
       this.options.promptCacheKey,
       this.options.codexConversationId,
       this.options.codexThreadId,
+      this.options.responsesWebSocket,
       effectiveAlias.supportEfforts,
       effectiveAlias.offEffort,
       effectiveAlias.adaptiveThinking,
@@ -287,6 +289,7 @@ function toKosongProviderConfig(
   promptCacheKey: string | undefined,
   codexConversationId: string | undefined,
   codexThreadId: string | undefined,
+  responsesWebSocket: boolean | undefined,
   supportEfforts: readonly string[] | undefined,
   offEffort: string | undefined,
   adaptiveThinking: boolean | undefined,
@@ -415,6 +418,7 @@ function toKosongProviderConfig(
         apiKey: providerApiKey(provider),
         offEffort,
         codex: codexResponsesLite ? { responsesLite: true } : undefined,
+        responsesWebSocket: codexResponsesLite && responsesWebSocket === true ? true : undefined,
         // Session affinity: same `prompt_cache_key` intent as the `openai`
         // branch; the Responses API accepts it as a top-level request field.
         generationKwargs: { prompt_cache_key: promptCacheKey },

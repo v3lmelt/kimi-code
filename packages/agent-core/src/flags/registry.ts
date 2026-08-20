@@ -33,6 +33,15 @@ export const FLAG_DEFINITIONS = [
     surface: 'core',
   },
   {
+    id: 'responses-websocket',
+    title: 'OpenAI Responses WebSocket',
+    description:
+      'Reuse the ChatGPT Responses WebSocket and continue exact request extensions with previous_response_id.',
+    env: 'KIMI_CODE_EXPERIMENTAL_RESPONSES_WEBSOCKET',
+    default: false,
+    surface: 'core',
+  },
+  {
     id: 'secondary-model',
     title: 'Subagent model selection',
     description:

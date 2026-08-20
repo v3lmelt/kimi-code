@@ -47,6 +47,10 @@ export interface OpenAIResponsesModelProviderOptions {
   readonly clientVersion?: string;
   /** Defaults to the Responses Lite request shape used by current Codex models. */
   readonly codexResponsesLite?: boolean;
+  /** Enable hosted Responses tool search for tools marked as deferred. */
+  readonly nativeToolSearch?: boolean;
+  /** Enable incremental continuation over the Responses WebSocket. */
+  readonly responsesWebSocket?: boolean;
 }
 
 export interface ApplyOpenAICodexConfigOptions {
@@ -156,6 +160,8 @@ export class OpenAIResponsesModelProvider implements ModelProvider {
   private readonly authentication: 'api-key' | 'chatgpt';
   private readonly tokenProvider: BearerTokenProvider | undefined;
   private readonly codexResponsesLite: boolean;
+  private readonly nativeToolSearch: boolean;
+  private readonly responsesWebSocket: boolean;
 
   constructor(options: OpenAIResponsesModelProviderOptions = {}) {
     const models = options.models ?? OPENAI_HARNESS_MODELS;
@@ -171,6 +177,8 @@ export class OpenAIResponsesModelProvider implements ModelProvider {
     this.promptCacheKey = normalizeOptionalString(options.promptCacheKey);
     this.promptCacheSessionId = this.promptCacheKey;
     this.codexResponsesLite = options.codexResponsesLite ?? true;
+    this.nativeToolSearch = options.nativeToolSearch === true;
+    this.responsesWebSocket = options.responsesWebSocket === true;
     this.apiKey = this.authentication === 'api-key' ? options.apiKey : undefined;
     this.baseUrl =
       this.authentication === 'chatgpt'
@@ -236,6 +244,10 @@ export class OpenAIResponsesModelProvider implements ModelProvider {
         this.authentication === 'chatgpt'
           ? { responsesLite: this.codexResponsesLite }
           : undefined,
+      responsesWebSocket:
+        this.authentication === 'chatgpt' ? this.responsesWebSocket || undefined : undefined,
+      nativeToolSearch:
+        this.authentication === 'api-key' ? this.nativeToolSearch || undefined : undefined,
       generationKwargs:
         this.promptCacheKey === undefined
           ? undefined
