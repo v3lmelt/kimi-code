@@ -87,6 +87,19 @@ describe('RuntimeCenterApp', () => {
     expect(strip(app.render(120).join('\n'))).toContain('release');
   });
 
+  it('shows page navigation and keeps Enter inert for workflow rows', () => {
+    const onAction = vi.fn();
+    const onActionUnavailable = vi.fn();
+    const app = new RuntimeCenterApp(
+      props({ view: 'workflows', selectedKey: 'workflow:wf-1', onAction, onActionUnavailable }),
+      terminal(20),
+    );
+    expect(strip(app.render(120).join('\n'))).toContain('PgUp/PgDn page');
+    app.handleInput('\r');
+    expect(onAction).not.toHaveBeenCalled();
+    expect(onActionUnavailable).not.toHaveBeenCalled();
+  });
+
   it('routes enabled stop and output actions, and reports unsupported actions', () => {
     const onAction = vi.fn();
     const onActionUnavailable = vi.fn();

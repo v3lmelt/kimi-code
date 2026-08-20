@@ -86,6 +86,18 @@ describe('Workflow DAG journal fold', () => {
     expect(summary.spent).toBe(3);
   });
 
+  it('rejects conflicting duplicate terminal events as journal corruption', () => {
+    const result = {
+      status: 'completed' as const,
+      value: 'ok',
+      provenance: nodeProvenance('a', 'fp-a'),
+    };
+    expect(() => foldWorkflowJournal([
+      { kind: 'node.completed', runId, nodeId: 'a', fingerprint: 'fp-a', attempt: 1, result, at: '1' },
+      { kind: 'node.completed', runId, nodeId: 'a', fingerprint: 'fp-a', attempt: 1, result: { ...result, value: 'different' }, at: '2' },
+    ])).toThrow(WorkflowJournalCorruptionError);
+  });
+
   it('rejects an unknown node event as journal corruption', async () => {
     const log = {
       read: async function* () {

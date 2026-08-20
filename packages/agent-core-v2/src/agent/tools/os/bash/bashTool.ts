@@ -455,6 +455,7 @@ export class BashTool implements IBashTool {
   private assertGitIsolationAccess(argv: readonly string[]): void {
     const workspace = this.workspace;
     if (workspace === undefined) return;
+    let subcommandIndex: number | undefined;
     for (let index = 1; index < argv.length; index += 1) {
       const option = argv[index]!;
       if (option === '--global' || option === '--system') {
@@ -462,36 +463,32 @@ export class BashTool implements IBashTool {
           'Git global and system configuration are outside the workspace isolation boundary.',
         );
       }
-      if (option.startsWith('-C/') || option.startsWith('-C\\')) {
-        assertIsolationPath(workspace, option.slice(2), 'execute');
-        continue;
-      }
-      const separateValue = GIT_PATH_OPTIONS.has(option);
-      const equalsValue = GIT_PATH_OPTIONS_WITH_EQUALS.find((prefix) => option.startsWith(prefix));
-      if (separateValue || equalsValue !== undefined) {
-        const target =
-          equalsValue === undefined ? argv[index + 1] : option.slice(equalsValue.length);
-        if (target === undefined || target.length === 0) {
+      const pathOption = gitPathOptionAt(argv, index);
+      if (pathOption !== undefined) {
+        if (pathOption.target === undefined || pathOption.target.length === 0 || pathOption.target === '--') {
           throw isolationBoundaryError(`Git option '${option}' has no analyzable path.`);
         }
-        assertIsolationPath(workspace, target, 'execute');
-        if (equalsValue === undefined) index += 1;
-      }
-    }
-    if (workspace.isolation?.writable === true) return;
-    let subcommand: string | undefined;
-    for (let index = 1; index < argv.length; index += 1) {
-      const arg = argv[index]!;
-      if (GIT_PATH_OPTIONS.has(arg)) {
-        index += 1;
+        assertIsolationPath(workspace, pathOption.target, 'execute');
+        index = pathOption.nextIndex;
         continue;
       }
-      if (GIT_PATH_OPTIONS_WITH_EQUALS.some((prefix) => arg.startsWith(prefix))) continue;
-      if (arg.startsWith('-')) continue;
-      subcommand = arg;
-      break;
+      if (option === '--') break;
+      if (!option.startsWith('-')) {
+        subcommandIndex = index;
+        break;
+      }
     }
-    if (subcommand === undefined || !READ_ONLY_GIT_COMMANDS.has(subcommand)) {
+    if (subcommandIndex === undefined) {
+      throw isolationBoundaryError('Git command has no analyzable subcommand.');
+    }
+    const subcommand = argv[subcommandIndex]!;
+    const positional = gitPositionalArgs(argv, subcommandIndex);
+    for (const [index, path] of positional.entries()) {
+      if (subcommand === 'clone' && index === 0 && isRemoteGitSource(path)) continue;
+      assertIsolationPath(workspace, path, 'execute');
+    }
+    if (workspace.isolation?.writable === true) return;
+    if (!READ_ONLY_GIT_COMMANDS.has(subcommand)) {
       throw isolationBoundaryError(
         'The active workspace isolation lease is read-only; this git command may write repository state.',
       );
@@ -741,8 +738,32 @@ const UNSAFE_SYNTAX_NODE_TYPES = new Set([
   'coprocess',
   'negated_command',
 ]);
-const GIT_PATH_OPTIONS = new Set(['-C', '--git-dir', '--work-tree', '--file']);
-const GIT_PATH_OPTIONS_WITH_EQUALS = ['--git-dir=', '--work-tree=', '--file=', '-C='];
+const GIT_PATH_OPTIONS = new Set([
+  '-C',
+  '--git-dir',
+  '--work-tree',
+  '--file',
+  '--exec-path',
+  '--separate-git-dir',
+  '--reference',
+  '--reference-if-able',
+  '--template',
+  '--pathspec-from-file',
+  '--output',
+]);
+const GIT_PATH_OPTIONS_WITH_EQUALS = [
+  '--git-dir=',
+  '--work-tree=',
+  '--file=',
+  '--exec-path=',
+  '--separate-git-dir=',
+  '--reference=',
+  '--reference-if-able=',
+  '--template=',
+  '--pathspec-from-file=',
+  '--output=',
+  '-C=',
+];
 const READ_ONLY_GIT_COMMANDS = new Set([
   'status',
   'diff',
@@ -757,6 +778,52 @@ const READ_ONLY_GIT_COMMANDS = new Set([
   'describe',
   'shortlog',
 ]);
+
+interface GitPathOption {
+  readonly target: string | undefined;
+  readonly nextIndex: number;
+}
+
+function gitPathOptionAt(argv: readonly string[], index: number): GitPathOption | undefined {
+  const option = argv[index]!;
+  if (GIT_PATH_OPTIONS.has(option)) {
+    return { target: argv[index + 1], nextIndex: index + 1 };
+  }
+  if (option.startsWith('-C') && !option.startsWith('--') && option.length > 2) {
+    const target = option.slice(2);
+    return { target: target.startsWith('=') ? target.slice(1) : target, nextIndex: index };
+  }
+  const equalsPrefix = GIT_PATH_OPTIONS_WITH_EQUALS.find((prefix) => option.startsWith(prefix));
+  if (equalsPrefix !== undefined) {
+    return { target: option.slice(equalsPrefix.length), nextIndex: index };
+  }
+  return undefined;
+}
+
+function gitPositionalArgs(argv: readonly string[], subcommandIndex: number): readonly string[] {
+  const paths: string[] = [];
+  let afterDoubleDash = false;
+  for (let index = subcommandIndex + 1; index < argv.length; index += 1) {
+    const arg = argv[index]!;
+    if (!afterDoubleDash && arg === '--') {
+      afterDoubleDash = true;
+      continue;
+    }
+    if (!afterDoubleDash && arg.startsWith('-')) {
+      const pathOption = gitPathOptionAt(argv, index);
+      if (pathOption !== undefined) {
+        index = pathOption.nextIndex;
+      }
+      continue;
+    }
+    paths.push(arg);
+  }
+  return paths;
+}
+
+function isRemoteGitSource(value: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value) || /^[^/\\\s@]+@[^/\\\s:]+:/.test(value);
+}
 
 /**
  * Split a bash command into its top-level subcommand argv lists using the

@@ -239,12 +239,13 @@ describe('WorkflowTool', () => {
     expect(() => WorkflowToolInputSchema.parse({})).toThrow(/exactly one/);
     expect(() => WorkflowToolInputSchema.parse({ script: VALID_SCRIPT, scriptPath: 'input.js' })).toThrow(/exactly one/);
     expect(WorkflowToolInputSchema.parse({ scriptPath: 'input.js' })).toMatchObject({ scriptPath: 'input.js' });
-    expect(tool.parameters).toMatchObject({
-      oneOf: [
-        { required: ['script'] },
-        { required: ['scriptPath'] },
-      ],
-    });
+    expect(tool.parameters).toEqual(expect.objectContaining({
+      oneOf: expect.arrayContaining([
+        expect.objectContaining({ required: ['script'] }),
+        expect.objectContaining({ required: ['scriptPath'] }),
+        expect.objectContaining({ required: ['graph'] }),
+      ]),
+    }));
   });
 
   it('fails fast with a compile error for a script that violates the determinism contract', async () => {

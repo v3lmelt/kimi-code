@@ -177,12 +177,16 @@ class GrepTool extends ProductionGrepTool {
     kaos: FakeKaos,
     workspaceConfig: WorkspaceConfig,
     telemetry: ITelemetryService = noopTelemetryService,
+    workspaceContext: ISessionWorkspaceContext = stubWorkspaceContext(
+      workspaceConfig.workspaceDir,
+      workspaceConfig.additionalDirs,
+    ),
   ) {
     super(
       createTestProcessService(kaos),
       createTestFs(kaos),
       createTestEnv(kaos),
-      stubWorkspaceContext(workspaceConfig.workspaceDir, workspaceConfig.additionalDirs),
+      workspaceContext,
       telemetry,
     );
   }
@@ -300,7 +304,12 @@ afterEach(() => {
 
 describe('GrepTool', () => {
   it('rejects a dedicated search outside the leased worktree', () => {
-    const { tool } = makeTool(stubAgentWorkspaceContext('dedicated-worktree'));
+    const tool = new GrepTool(
+      createFakeKaos(),
+      workspace,
+      noopTelemetryService,
+      stubAgentWorkspaceContext('dedicated-worktree'),
+    );
 
     expect(() => tool.resolveExecution({ pattern: 'needle', path: '/workspace/outside' })).toThrow(
       /worktree|workspace/i,

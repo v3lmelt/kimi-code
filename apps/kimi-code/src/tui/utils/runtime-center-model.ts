@@ -1,4 +1,8 @@
+import type { WorkflowProgressEvent } from '@moonshot-ai/agent-core-v2';
+
 import {
+  applyWorkflowProgressEvent,
+  EMPTY_WORKFLOW_RUNS,
   WORKFLOW_LEDGER_LIMITS,
   type WorkflowRunAgentView,
   type WorkflowRunView,
@@ -429,25 +433,51 @@ export function workflowViewFromTask(task: RuntimeCenterTaskInfo): WorkflowRunVi
   if (record?.['kind'] !== 'workflow' || runId === undefined) return undefined;
   const status = task.status === 'completed' ? 'completed' : task.status === 'running' ? 'running' : 'failed';
   const startedAt = new Date(task.startedAt).toISOString();
-  return {
-    runId,
+  const metaRecord = asRecord(record?.['meta']) ?? asRecord(record?.['workflowMeta']);
+  const rawPhases = metaRecord?.['phases'] ?? record?.['phases'];
+  const phases = Array.isArray(rawPhases)
+    ? rawPhases.flatMap((value): { title: string; detail?: string }[] => {
+        const phase = asRecord(value);
+        const title = stringField(phase, 'title', 'name');
+        return title === undefined
+          ? []
+          : [{ title, ...(stringField(phase, 'detail') === undefined ? {} : { detail: stringField(phase, 'detail') }) }];
+      })
+    : undefined;
+  const started: Extract<WorkflowProgressEvent, { type: 'workflow.started' }> = {
+    type: 'workflow.started',
+    runId: runId as Extract<WorkflowProgressEvent, { type: 'workflow.started' }>['runId'],
+    meta: {
+      name: stringField(metaRecord, 'name') ?? stringField(record, 'workflowName', 'workflow_name') ?? 'workflow',
+      description: stringField(metaRecord, 'description') ?? task.description,
+      ...(phases === undefined ? {} : { phases }),
+    },
+    startedAt,
     taskId: stringField(record, 'taskId', 'task_id'),
     taskPath: stringField(record, 'taskPath', 'task_path', 'canonicalTaskPath', 'canonical_task_path'),
     nodeId: stringField(record, 'nodeId', 'node_id', 'dagNodeId', 'dag_node_id'),
-    name: stringField(record, 'workflowName', 'workflow_name') ?? 'workflow',
-    description: task.description,
-    phases: [],
-    status,
-    spawnedAgents: numberField(record, 'agentsSpawned', 'agents_spawned') ?? 0,
-    completedAgents: numberField(record, 'agentsCompleted', 'agents_completed') ?? 0,
-    startedAt,
-    result: undefined,
-    error: task.stopReason,
+    model: stringField(record, 'model'),
+    isolationLease: isolationFields(record).lease,
+    worktreePath: isolationFields(record).worktree,
+  };
+  const startedRun = applyWorkflowProgressEvent(EMPTY_WORKFLOW_RUNS, started)[0];
+  if (startedRun === undefined) return undefined;
+  if (status === 'running') return startedRun;
+  const settled = applyWorkflowProgressEvent([startedRun], {
+    type: 'workflow.completed',
+    runId: started.runId,
+    ok: status === 'completed',
+    ...(task.stopReason === undefined ? {} : { error: task.stopReason }),
+    taskId: started.taskId,
+    taskPath: started.taskPath,
+    nodeId: started.nodeId,
     durationMs: taskDuration(task),
     tokensSpent: numberField(record, 'tokensSpent', 'tokens_spent', 'usageTokens', 'usage_tokens'),
-    agents: [],
-    logLines: [],
-    nodeIds: [],
+  })[0] ?? startedRun;
+  return {
+    ...settled,
+    spawnedAgents: numberField(record, 'agentsSpawned', 'agents_spawned') ?? settled.spawnedAgents,
+    completedAgents: numberField(record, 'agentsCompleted', 'agents_completed') ?? settled.completedAgents,
   };
 }
 

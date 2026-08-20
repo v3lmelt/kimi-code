@@ -47,7 +47,7 @@ import {
   type SkillActivationProjection,
   type PluginCommandProjection,
 } from '../utils/message-replay';
-import { mergeWorkflowTaskSnapshots } from '../utils/runtime-center-model';
+import { mergeWorkflowTaskSnapshots, type RuntimeCenterTaskInfo } from '../utils/runtime-center-model';
 import type { StreamingUIController } from './streaming-ui';
 import type { SessionEventHandler } from './session-event-handler';
 import type { TUIState } from '../tui-state';
@@ -181,7 +181,7 @@ export class SessionReplayRenderer {
     sessionEventHandler.workflowBackgroundTasks.clear();
     for (const info of agent.background) {
       if ((info as unknown as { readonly kind?: unknown }).kind === 'workflow') {
-        sessionEventHandler.workflowBackgroundTasks.set(info.taskId, info);
+        sessionEventHandler.setWorkflowBackgroundTask(info as unknown as RuntimeCenterTaskInfo);
       } else {
         sessionEventHandler.backgroundTasks.set(info.taskId, info);
       }

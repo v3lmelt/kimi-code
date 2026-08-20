@@ -5,6 +5,7 @@
 
 import type { IDisposable } from '#/_base/di/lifecycle';
 import type { IAppendLogStore } from '#/persistence/interface/appendLogStore';
+import { canonicalWorkflowJson } from '#/agent/workflow/ir/fingerprint';
 import type {
   WorkflowNodeId,
   WorkflowNodeProvenance,
@@ -138,7 +139,7 @@ export function foldWorkflowJournal(
   let graphVersion: string | undefined;
   let spent = 0;
   let reserved = 0;
-  const terminalEvents = new Set<string>();
+  const terminalEvents = new Map<string, string>();
   const checkpointIds = new Set<string>();
   for (const record of records) {
     assertWorkflowNodeJournalRecord(record);
@@ -171,8 +172,7 @@ export function foldWorkflowJournal(
         });
         break;
       case 'node.completed':
-        if (terminalEvents.has(terminalIdentity(record))) break;
-        terminalEvents.add(terminalIdentity(record));
+        if (isDuplicateTerminalEvent(terminalEvents, record)) break;
         updateState(nodes, record.nodeId, {
           status: 'completed',
           fingerprint: record.fingerprint,
@@ -183,8 +183,7 @@ export function foldWorkflowJournal(
         spent += usageTotal(record.result.usage);
         break;
       case 'node.failed':
-        if (terminalEvents.has(terminalIdentity(record))) break;
-        terminalEvents.add(terminalIdentity(record));
+        if (isDuplicateTerminalEvent(terminalEvents, record)) break;
         updateState(nodes, {
           nodeId: record.nodeId,
           status: 'failed',
@@ -376,6 +375,31 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function terminalIdentity(record: Extract<WorkflowNodeJournalRecord, { readonly kind: 'node.completed' | 'node.failed' }>): string {
   return `${record.nodeId}:${String(record.attempt)}:${record.kind}`;
+}
+
+function isDuplicateTerminalEvent(
+  terminalEvents: Map<string, string>,
+  record: Extract<WorkflowNodeJournalRecord, { readonly kind: 'node.completed' | 'node.failed' }>,
+): boolean {
+  const identity = terminalIdentity(record);
+  const content = canonicalWorkflowJson({
+    kind: record.kind,
+    nodeId: record.nodeId,
+    fingerprint: record.fingerprint,
+    attempt: record.attempt,
+    ...(record.kind === 'node.completed'
+      ? { result: record.result }
+      : { error: record.error, ...(record.result === undefined ? {} : { result: record.result }) }),
+  });
+  const previous = terminalEvents.get(identity);
+  if (previous === undefined) {
+    terminalEvents.set(identity, content);
+    return false;
+  }
+  if (previous !== content) {
+    throw new WorkflowJournalCorruptionError(`Conflicting duplicate terminal event for node "${record.nodeId}" attempt ${String(record.attempt)}.`);
+  }
+  return true;
 }
 
 function usageTotal(usage: WorkflowNodeResult['usage'] | undefined): number {

@@ -188,12 +188,8 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
   private async doCreate(agentId: string, opts: CreateAgentOptions): Promise<IAgentScopeHandle> {
     const agentScope = this.ctx.scope(`agents/${agentId}`);
     const agentHomedir = join(this.bootstrap.homeDir, agentScope);
-    const lease = await this.acquireIsolation(agentId, opts);
-    const workspaceContext = makeAgentWorkspaceContext(
-      this.sessionWorkspace,
-      lease === undefined ? undefined : isolationInfo(lease),
-    );
-    let handle: IAgentScopeHandle;
+    const workspaceContext = makeAgentWorkspaceContext(this.sessionWorkspace);
+    let handle: IAgentScopeHandle | undefined;
     try {
       handle = createScopedChildHandle(
         this.instantiation,
@@ -207,14 +203,10 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
           ],
         },
       ) as IAgentScopeHandle;
-    } catch (error) {
-      await this.releaseIsolation(agentId);
-      throw error;
-    }
-    this.handles.set(agentId, handle);
-    this.workspaceContexts.set(agentId, workspaceContext);
-    if (lease !== undefined) this.isolationLeases.set(agentId, lease);
-    try {
+      this.handles.set(agentId, handle);
+      this.workspaceContexts.set(agentId, workspaceContext);
+      const lease = this.isolationEnabled() ? await this.acquireIsolation(agentId, opts) : undefined;
+      if (lease !== undefined) workspaceContext.update(isolationInfo(lease));
       const wire = handle.accessor.get(IWireService);
       await wire.seal();
       const labels = await this.depthCheckedLabels(agentId, opts);
@@ -231,12 +223,16 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
       await handle.accessor.get(IAgentToolActivationService).activate();
       return handle;
     } catch (error) {
-      if (this.handles.get(agentId) === handle) this.handles.delete(agentId);
-      try {
-        handle.dispose();
-      } catch { }
-      this.onDidDisposeEmitter.fire(agentId);
+      if (handle !== undefined) {
+        if (this.handles.get(agentId) === handle) this.handles.delete(agentId);
+        try {
+          handle.dispose();
+        } catch { }
+        this.onDidDisposeEmitter.fire(agentId);
+      }
       await this.releaseIsolation(agentId);
+      this.workspaceContexts.delete(agentId);
+      this.isolationLeases.delete(agentId);
       throw error;
     }
   }
@@ -250,15 +246,17 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
       if (!this.isolationEnabled()) return undefined;
       if (this.handles.get(agentId) === undefined) return undefined;
       const current = this.isolationLeases.get(agentId);
-      if (current !== undefined && current.state === 'active') return current;
+      if (current !== undefined && current.state === 'active') {
+        this.workspaceContexts.get(agentId)?.update(isolationInfo(current));
+        return current;
+      }
       const mode = current?.mode ?? this.resolveIsolationMode(agentId, {});
       if (mode === undefined || this.isolation === undefined) return undefined;
       if (current !== undefined && current.state !== 'released') {
         await this.releaseIsolationLocked(agentId, current);
       }
       const next = await this.isolation.acquire({ mode, owner: agentId });
-      this.isolationLeases.set(agentId, next);
-      this.workspaceContexts.get(agentId)?.update(isolationInfo(next));
+      this.setIsolationLease(agentId, next);
       return next;
     });
   }
@@ -287,7 +285,7 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
       const mode = this.resolveIsolationMode(agentId, opts);
       if (mode === undefined) return undefined;
       const lease = await this.isolation.acquire({ mode, owner: agentId });
-      this.isolationLeases.set(agentId, lease);
+      this.setIsolationLease(agentId, lease);
       return lease;
     });
   }
@@ -311,6 +309,11 @@ export class AgentLifecycleService extends Disposable implements IAgentLifecycle
     if (released.state === 'released') this.workspaceContexts.get(agentId)?.update();
     else this.workspaceContexts.get(agentId)?.update(isolationInfo(released));
     return released;
+  }
+
+  private setIsolationLease(agentId: string, lease: WorkspaceIsolationLease): void {
+    this.isolationLeases.set(agentId, lease);
+    this.workspaceContexts.get(agentId)?.update(isolationInfo(lease));
   }
 
   private enqueueIsolationOperation<T>(

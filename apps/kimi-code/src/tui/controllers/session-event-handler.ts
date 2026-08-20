@@ -97,6 +97,7 @@ import { createGoal as startGoalCommand } from '../commands/goal';
 import {
   applyWorkflowProgressEvent,
   extractWorkflowProgressEvent,
+  WORKFLOW_LEDGER_LIMITS,
 } from '../utils/workflow-model';
 import { mergeWorkflowTaskSnapshots, type RuntimeCenterTaskInfo } from '../utils/runtime-center-model';
 
@@ -1387,7 +1388,7 @@ export class SessionEventHandler {
     // only their lifecycle for the footer badge; the background-task browser
     // and transcript cards accept the legacy process/agent/question union.
     if (info.kind === 'workflow') {
-      this.workflowBackgroundTasks.set(info.taskId, info);
+      this.setWorkflowBackgroundTask(info);
       const workflowRuns = mergeWorkflowTaskSnapshots(state.appState.workflowRuns, [info]);
       if (workflowRuns !== state.appState.workflowRuns) this.host.setAppState({ workflowRuns });
       this.syncBackgroundTaskBadge();
@@ -1455,6 +1456,15 @@ export class SessionEventHandler {
       this.syncRunningAgentsFooter();
     }
     this.host.tasksBrowserController.repaint();
+  }
+
+  setWorkflowBackgroundTask(info: RuntimeCenterTaskInfo): void {
+    this.workflowBackgroundTasks.set(info.taskId, info);
+    while (this.workflowBackgroundTasks.size > WORKFLOW_LEDGER_LIMITS.runs) {
+      const oldestTaskId = this.workflowBackgroundTasks.keys().next().value;
+      if (oldestTaskId === undefined) break;
+      this.workflowBackgroundTasks.delete(oldestTaskId);
+    }
   }
 
   private appendBackgroundTaskEntry(info: BackgroundTaskInfo): void {

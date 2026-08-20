@@ -230,6 +230,25 @@ describe('runtime center projection', () => {
     expect(projection.workflows[0]?.actions.retry.reason).toContain('not exposed');
   });
 
+  it('folds task metadata through the real workflow.started shape', () => {
+    const task = {
+      taskId: 'task-wf-meta', kind: 'workflow', runId: RUN_ID, workflowName: 'fallback-name',
+      description: 'fallback description', status: 'running', startedAt: Date.now() - 1000,
+      endedAt: null, meta: {
+        name: 'real-name', description: 'real description',
+        phases: [{ title: 'Plan', detail: 'prepare' }],
+      },
+    } as never;
+    const run = mergeWorkflowTaskSnapshots([], [task])[0];
+    expect(run).toMatchObject({
+      runId: RUN_ID,
+      name: 'real-name',
+      description: 'real description',
+      status: 'running',
+      phases: [{ title: 'Plan', detail: 'prepare' }],
+    });
+  });
+
   it('maps an agent output action to its explicit owning task', () => {
     const run = runningLedger()[0]!;
     const withAgent = applyWorkflowProgressEvent([run], {

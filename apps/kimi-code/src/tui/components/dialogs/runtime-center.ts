@@ -243,6 +243,7 @@ export class RuntimeCenterApp extends Container implements Focusable {
   }
 
   private openPrimaryAction(item: RuntimeCenterItem): void {
+    if (isWorkflow(item)) return;
     // Enter on a task or agent opens the owning background task output. An
     // agent without that mapping remains disabled instead of pretending that
     // a transcript lookup exists.
@@ -282,10 +283,13 @@ export class RuntimeCenterApp extends Container implements Focusable {
   }
 
   private renderFooter(width: number): string {
+    const hintText = this.props.view === 'workflows'
+      ? ' ↑↓ select · PgUp/PgDn page · Tab view · O output · R refresh · Esc cancel'
+      : ' ↑↓ select · PgUp/PgDn page · Tab view · S stop · O/Enter output · R refresh · Esc cancel';
     const hint = currentTheme.fg(
       'textMuted',
       this.pendingStopKey === undefined
-        ? ' ↑↓ select · Tab view · S stop · O/Enter output · R refresh · Esc cancel'
+        ? hintText
         : ` Stop ${this.pendingStopKey}? Y confirm · N/Esc cancel`,
     );
     if (this.props.flashMessage !== undefined && this.props.flashMessage.length > 0) {
@@ -333,7 +337,7 @@ export class RuntimeCenterApp extends Container implements Focusable {
   }
 
   private detailLines(item: RuntimeCenterItem): string[] {
-    const label = (name: string): string => currentTheme.fg('textMuted', `${name.padEnd(15)} `);
+    const label = (name: string): string => currentTheme.fg('textMuted', `${name.padEnd(12)} `);
     const value = (text: string | undefined): string => currentTheme.fg('text', text ?? 'unavailable');
     const lines = [
       `${label('Task ID:')}${value(item.taskId)}`,

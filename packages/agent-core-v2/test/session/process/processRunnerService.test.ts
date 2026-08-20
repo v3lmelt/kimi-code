@@ -176,7 +176,9 @@ describe('SessionProcessRunner', () => {
     );
     expect(() => dedicated.assertAllowed(join(dir, 'outside.txt'), 'read')).toThrow(/worktree/i);
     expect(dedicated.isWithin(join(dir, 'outside.txt'))).toBe(false);
-    expect(readOnly.assertAllowed(join(dir, 'source.txt'), 'read')).toBe(join(dir, 'source.txt'));
+    expect(readOnly.assertAllowed(join(dir, 'source.txt'), 'read')).toBe(
+      readOnly.resolve(join(dir, 'source.txt')),
+    );
     await rm(isolated, { recursive: true, force: true });
   });
 });

@@ -933,6 +933,13 @@ describe('BashTool', () => {
   it.each([
     'git --work-tree=/outside status',
     'git --git-dir=/outside/.git status',
+    'git --work-tree /outside status',
+    'git -C /outside status',
+    'git clone /outside /workspace/.kimi-code/worktrees/lease/repo',
+    'git init /outside',
+    'git worktree add /outside HEAD',
+    'git worktree move /outside /workspace/.kimi-code/worktrees/lease/repo',
+    'git clone --separate-git-dir=/outside /workspace/repository',
   ])('rejects Git equals-path options outside the lease: %s', (command) => {
     const { runner, exec } = createTestRunner(processWithOutput());
     const tool = bashTool(
@@ -947,6 +954,24 @@ describe('BashTool', () => {
     );
 
     expect(() => tool.resolveExecution({ command })).toThrow(/worktree|workspace|outside/i);
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('allows Git repository paths that resolve inside a dedicated lease', () => {
+    const { runner, exec } = createTestRunner(processWithOutput());
+    const tool = bashTool(
+      runner,
+      posixEnv,
+      createTestCtx('/workspace'),
+      undefined,
+      undefined,
+      undefined,
+      new BashParserService(),
+      isolatedWorkspace('dedicated-worktree', true),
+    );
+
+    expect(() => tool.resolveExecution({ command: 'git init /workspace/.kimi-code/worktrees/lease/repo' })).not.toThrow();
+    expect(() => tool.resolveExecution({ command: 'git clone https://example.test/repo.git /workspace/.kimi-code/worktrees/lease/repo' })).not.toThrow();
     expect(exec).not.toHaveBeenCalled();
   });
 

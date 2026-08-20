@@ -285,7 +285,7 @@ export class WorkflowDagScheduler {
     this.writeCheckpoint();
     this.signal.throwIfAborted();
     const values = this.graph.graph.nodes.filter((node) => node.id === this.graph.graph.root).map((node) => this.results.get(node.id)?.value);
-    const failed = [...this.states.values()].some((state) => state.status === 'failed');
+    const failed = this.hasFatalFailure();
     const blocked = [...this.states.values()].some((state) => state.status === 'blocked');
     return {
       status: this.budget.exceeded ? 'budget_exceeded' : failed ? 'failed' : blocked ? 'blocked' : 'completed',
@@ -534,6 +534,29 @@ export class WorkflowDagScheduler {
     });
   }
 
+  private hasFatalFailure(): boolean {
+    const rootId = this.graph.graph.root ?? this.graph.order[this.graph.order.length - 1];
+    if (rootId === undefined) return [...this.states.values()].some((state) => state.status === 'failed');
+
+    const visited = new Set<WorkflowNodeId>();
+    const visit = (nodeId: WorkflowNodeId): boolean => {
+      if (visited.has(nodeId)) return false;
+      visited.add(nodeId);
+      const state = this.states.get(nodeId);
+      if (state?.status === 'failed') return true;
+      const node = this.graph.graph.nodes.find((candidate) => candidate.id === nodeId);
+      if (node === undefined) return false;
+      const dependencies = nodeDependencies(node);
+      if (node.kind === 'join' && (node.strategy === 'any' || node.strategy === 'first')) {
+        const selected = dependencies.find((dependency) => this.states.get(dependency)?.status === 'completed');
+        return selected === undefined ? false : visit(selected);
+      }
+      return dependencies.some((dependency) => visit(dependency));
+    };
+
+    return visit(rootId);
+  }
+
   private setState(state: WorkflowDagNodeStateLike): void {
     this.states.set(state.nodeId, state);
     this.emitState(state);
@@ -585,11 +608,16 @@ function normalizeRetryPolicy(policy: WorkflowRetryPolicy | undefined): Required
 async function retryDelay(policy: ReturnType<typeof normalizeRetryPolicy>, attempt: number, signal: AbortSignal): Promise<void> {
   const delay = Math.floor(policy.backoffMs * Math.pow(policy.backoffMultiplier, Math.max(0, attempt - 1)));
   if (delay <= 0) return;
-  await new Promise<void>((resolve, reject) => {
-    const timer = setTimeout(resolve, delay);
-    const abort = (): void => { clearTimeout(timer); reject(signal.reason); };
-    signal.addEventListener('abort', abort, { once: true });
-  });
+  let abort: (() => void) | undefined;
+  try {
+    await new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(resolve, delay);
+      abort = (): void => { clearTimeout(timer); reject(signal.reason); };
+      signal.addEventListener('abort', abort, { once: true });
+    });
+  } finally {
+    if (abort !== undefined) signal.removeEventListener('abort', abort);
+  }
 }
 
 function estimateBudget(node: WorkflowNode): number {

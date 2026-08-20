@@ -69,6 +69,7 @@ import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import '#/agent/toolActivation/toolActivationService';
 import { IAgentMediaToolsRegistrar } from '#/agent/media/mediaTools';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import { ISessionInteractionService } from '#/session/interaction/interaction';
 import { IFlagService } from '#/app/flag/flag';
 import {
   IWorkspaceIsolationService,
@@ -254,6 +255,17 @@ describe('AgentLifecycleService', () => {
       workDir: '/tmp/kimi-agentLifecycle-work',
       additionalDirs: [],
     } as unknown as ISessionWorkspaceContext);
+    ix.stub(ISessionInteractionService, {
+      _serviceBrand: undefined,
+      request: vi.fn(),
+      enqueue: vi.fn(),
+      respond: vi.fn(),
+      listPending: () => [],
+      isRecentlyResolved: () => false,
+      cancelPendingForTurn: vi.fn(),
+      onDidChangePending: Event.None,
+      onDidResolve: Event.None,
+    } as unknown as ISessionInteractionService);
     ix.stub(IPluginService, pluginServiceStub);
     ix.stub(IConfigService, {
       ready: Promise.resolve(),
@@ -929,7 +941,7 @@ describe('AgentLifecycleService', () => {
     } as unknown as IWorkspaceIsolationService);
 
     const svc = ix.get(IAgentLifecycleService);
-    await svc.create({ agentId: 'agent-race', isolation: 'dedicated-worktree' });
+    const handle = await svc.create({ agentId: 'agent-race', isolation: 'dedicated-worktree' });
     const releasePromise = svc.releaseIsolation!('agent-race');
     await releaseEntered;
 
@@ -941,5 +953,9 @@ describe('AgentLifecycleService', () => {
     await expect(releasePromise).resolves.toMatchObject({ id: 'lease-1', state: 'released' });
     expect(release).toHaveBeenCalledTimes(1);
     expect(acquire).toHaveBeenCalledTimes(2);
+    expect(handle.accessor.get(ISessionWorkspaceContext).isolation).toMatchObject({
+      leaseId: 'lease-2',
+      state: 'active',
+    });
   });
 });
