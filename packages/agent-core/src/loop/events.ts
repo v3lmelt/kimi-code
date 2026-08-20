@@ -1,4 +1,12 @@
-import type { FinishReason, TextPart, ThinkPart, TokenUsage } from '@moonshot-ai/kosong';
+import type {
+  FinishReason,
+  HostedSearchAction,
+  HostedSearchLifecycle,
+  HostedSearchSource,
+  TextPart,
+  ThinkPart,
+  TokenUsage,
+} from '@moonshot-ai/kosong';
 
 import type { ToolInputDisplay } from '../tools/display';
 import type { ExecutableToolResult, LoopStepStopReason, ToolUpdate } from './types';
@@ -72,6 +80,39 @@ export interface LoopContentPartEvent {
   readonly step: number;
   readonly stepUuid: string;
   readonly part: TextPart | ThinkPart;
+}
+
+export interface LoopHostedSearchSource extends HostedSearchSource {
+  readonly snippet?: string;
+  readonly cited?: boolean;
+  readonly citationText?: string;
+  readonly snippetKind?: 'citation' | 'page_extract' | 'unavailable';
+  readonly date?: string;
+  readonly siteName?: string;
+}
+
+export interface LoopHostedSearchCitation {
+  readonly type: 'url_citation';
+  readonly startIndex: number;
+  readonly endIndex: number;
+  readonly title?: string;
+  readonly url: string;
+  readonly citationText?: string;
+}
+
+export interface LoopHostedSearchEvent {
+  readonly type: 'hosted.search';
+  readonly uuid: string;
+  readonly turnId: string;
+  readonly step: number;
+  readonly stepUuid: string;
+  readonly phase: 'started' | 'action' | 'source' | 'completed';
+  readonly callId?: string;
+  readonly query?: string;
+  readonly status?: HostedSearchLifecycle;
+  readonly action?: HostedSearchAction;
+  readonly sources?: readonly LoopHostedSearchSource[];
+  readonly citations?: readonly LoopHostedSearchCitation[];
 }
 
 export interface LoopToolCallEvent {
@@ -148,6 +189,7 @@ export type LoopRecordedEvent =
   | LoopStepBeginEvent
   | LoopStepEndEvent
   | LoopContentPartEvent
+  | LoopHostedSearchEvent
   | LoopToolCallEvent
   | LoopToolResultEvent;
 
@@ -192,6 +234,7 @@ function isRecordedEvent(event: LoopEvent): event is LoopRecordedEvent {
     event.type === 'step.begin' ||
     event.type === 'step.end' ||
     event.type === 'content.part' ||
+    event.type === 'hosted.search' ||
     event.type === 'tool.call' ||
     event.type === 'tool.result'
   );

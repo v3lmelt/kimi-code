@@ -24,4 +24,5 @@ export * from './select-tools';
 export * from './shell/bash';
 export * from './state/todo-list';
 export * from './web/fetch-url';
+export * from './web/normalizer';
 export * from './web/web-search';

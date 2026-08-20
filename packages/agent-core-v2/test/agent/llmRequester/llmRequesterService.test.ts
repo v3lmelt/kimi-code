@@ -24,7 +24,10 @@ import {
   type MediaStripSnapshot,
 } from '#/agent/contextProjector/contextProjector';
 import { AgentContextProjectorService } from '#/agent/contextProjector/contextProjectorService';
-import { AgentLLMRequesterService } from '#/agent/llmRequester/llmRequesterService';
+import {
+  AgentLLMRequesterService,
+  providerVisibleTools,
+} from '#/agent/llmRequester/llmRequesterService';
 import { IAgentLLMRequesterService } from '#/agent/llmRequester/llmRequester';
 import { IAgentTokenCountingService } from '#/agent/tokenCounting/tokenCounting';
 import { IAgentProfileService } from '#/agent/profile/profile';
@@ -76,6 +79,37 @@ const capabilities: ModelCapability = {
 const history: Message[] = [
   { role: 'user', content: [{ type: 'text', text: 'hello' }], toolCalls: [] },
 ];
+
+describe('providerVisibleTools', () => {
+  const ordinarySearch = {
+    name: 'WebSearch',
+    description: 'Search through the configured function provider.',
+    parameters: { type: 'object', properties: {} },
+  };
+  const lookup = {
+    name: 'Lookup',
+    description: 'Look up a value.',
+    parameters: { type: 'object', properties: {} },
+  };
+
+  it.each(['cached', 'indexed', 'live'] as const)(
+    'hides ordinary WebSearch when hosted search mode is %s',
+    (mode) => {
+      expect(providerVisibleTools([ordinarySearch, lookup], mode)).toEqual([lookup]);
+    },
+  );
+
+  it('preserves ordinary WebSearch when hosted search is disabled or unset', () => {
+    expect(providerVisibleTools([ordinarySearch, lookup], 'disabled')).toEqual([
+      ordinarySearch,
+      lookup,
+    ]);
+    expect(providerVisibleTools([ordinarySearch, lookup], undefined)).toEqual([
+      ordinarySearch,
+      lookup,
+    ]);
+  });
+});
 
 function createRequester(
   calls: { value: number },

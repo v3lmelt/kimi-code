@@ -18,6 +18,7 @@
 import {
   emptyUsage,
   generate as kosongGenerate,
+  isHostedSearchPart,
   isRetryableGenerateError,
   isUnknownCapability,
   type ChatProvider,
@@ -158,6 +159,12 @@ export class KosongLLM implements LLM {
         firstChunkAt === undefined
           ? undefined
           : buildStreamTiming(requestStartedAt, requestSentAt, firstChunkAt, streamEndedAt, decodeStats),
+      assistantText: result.message.content
+        .filter((part) => part.type === 'text')
+        .map((part) => part.text)
+        .join(''),
+      hostedSearchMetadata: result.searchMetadata,
+      hostedSearchAnnotations: result.annotations,
       traceId: result.traceId ?? undefined,
     };
 
@@ -222,8 +229,12 @@ function buildKosongCallbacks(
   };
 
   return {
-    onMessagePart: (part: StreamedMessagePart) => {
+    onMessagePart: async (part: StreamedMessagePart) => {
       markStreamOutput();
+      if (isHostedSearchPart(part)) {
+        await params.onHostedSearchPart?.(part);
+        return;
+      }
       if (part.type === 'usage') {
         params.onUsageDelta?.(part.usage);
         return;

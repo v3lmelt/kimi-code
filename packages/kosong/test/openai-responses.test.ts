@@ -157,6 +157,79 @@ describe('OpenAIResponsesChatProvider', () => {
     expect(body['include']).toEqual(['reasoning.encrypted_content']);
   });
 
+  describe('hosted web search request', () => {
+    it.each([
+      ['disabled', undefined],
+      ['cached', { type: 'web_search', external_web_access: false }],
+      [
+        'indexed',
+        { type: 'web_search', external_web_access: true, indexed_web_access: true },
+      ],
+      ['live', { type: 'web_search', external_web_access: true }],
+    ] as const)('maps %s mode to the Responses tool', async (mode, expectedHostedTool) => {
+      const provider = new OpenAIResponsesChatProvider({
+        model: 'gpt-4.1',
+        apiKey: 'test-key',
+        hostedSearch: mode,
+      });
+      const body = await captureRequestBody(
+        provider,
+        '',
+        [ADD_TOOL],
+        [{ role: 'user', content: [{ type: 'text', text: 'Search.' }], toolCalls: [] }],
+      );
+
+      if (expectedHostedTool === undefined) {
+        expect(body).not.toHaveProperty('include');
+        expect(body['tools']).toHaveLength(1);
+        return;
+      }
+
+      expect(body['tools']).toEqual([
+        {
+          type: 'function',
+          name: 'add',
+          description: ADD_TOOL.description,
+          parameters: ADD_TOOL.parameters,
+          strict: false,
+        },
+        expectedHostedTool,
+      ]);
+      expect(body['include']).toEqual(['web_search_call.action.sources']);
+    });
+
+    it('keeps hosted tools top-level for Responses Lite', async () => {
+      const provider = new OpenAIResponsesChatProvider({
+        model: 'gpt-5.6-sol',
+        apiKey: 'test-key',
+        hostedSearch: 'indexed',
+        codex: { responsesLite: true },
+      });
+      const body = await captureRequestBody(
+        provider,
+        '',
+        [ADD_TOOL],
+        [{ role: 'user', content: [{ type: 'text', text: 'Search.' }], toolCalls: [] }],
+      );
+
+      expect(body['tools']).toEqual([
+        { type: 'web_search', external_web_access: true, indexed_web_access: true },
+      ]);
+      expect((body['input'] as Array<Record<string, unknown>>)[0]).toMatchObject({
+        type: 'additional_tools',
+        tools: [
+          {
+            type: 'function',
+            name: 'add',
+            description: ADD_TOOL.description,
+            parameters: ADD_TOOL.parameters,
+            strict: false,
+          },
+        ],
+      });
+    });
+  });
+
   describe('message conversion', () => {
     it('sends system prompt as top-level instructions', async () => {
       const provider = createProvider();
@@ -1263,6 +1336,261 @@ describe('OpenAIResponsesChatProvider', () => {
         inputCacheRead: 0,
         inputCacheCreation: 0,
       });
+    });
+
+    it('preserves hosted search actions, sources, and URL citations in non-stream responses', async () => {
+      const provider = createProvider();
+      (provider as any)._stream = false;
+      ((provider as any)._client.responses as unknown as Record<string, unknown>)['create'] = vi
+        .fn()
+        .mockResolvedValue({
+          id: 'resp_search',
+          status: 'completed',
+          output: [
+            {
+              type: 'web_search_call',
+              id: 'ws_1',
+              status: 'completed',
+              action: {
+                type: 'search',
+                query: 'latest news',
+                sources: [{ type: 'url', url: 'https://example.com/news' }],
+              },
+            },
+            {
+              type: 'message',
+              content: [
+                {
+                  type: 'output_text',
+                  text: 'The answer.',
+                  annotations: [
+                    {
+                      type: 'url_citation',
+                      start_index: 4,
+                      end_index: 10,
+                      title: 'Example',
+                      url: 'https://example.com/news',
+                    },
+                    {
+                      type: 'url_citation',
+                      start_index: 4,
+                      end_index: 10,
+                      title: 'Example',
+                      url: 'https://example.com/news',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        });
+
+      const stream = await provider.generate(
+        '',
+        [],
+        [{ role: 'user', content: [{ type: 'text', text: 'Search.' }], toolCalls: [] }],
+      );
+      const parts: StreamedMessagePart[] = [];
+      for await (const part of stream) parts.push(part);
+
+      expect(parts).toEqual([
+        {
+          type: 'hosted_search_action',
+          callId: 'ws_1',
+          action: {
+            type: 'search',
+            query: 'latest news',
+            sources: [{ type: 'url', url: 'https://example.com/news' }],
+          },
+        },
+        {
+          type: 'hosted_search_source',
+          callId: 'ws_1',
+          source: { type: 'url', url: 'https://example.com/news' },
+        },
+        { type: 'hosted_search_lifecycle', callId: 'ws_1', status: 'completed', sources: [
+          { type: 'url', url: 'https://example.com/news' },
+        ], action: {
+          type: 'search',
+          query: 'latest news',
+          sources: [{ type: 'url', url: 'https://example.com/news' }],
+        } },
+        { type: 'text', text: 'The answer.' },
+        {
+          type: 'url_citation',
+          startIndex: 4,
+          endIndex: 10,
+          title: 'Example',
+          url: 'https://example.com/news',
+        },
+      ]);
+      expect(stream.annotations).toEqual([
+        {
+          type: 'url_citation',
+          startIndex: 4,
+          endIndex: 10,
+          title: 'Example',
+          url: 'https://example.com/news',
+        },
+      ]);
+      expect(stream.searchMetadata).toHaveLength(3);
+    });
+
+    it('forwards hosted search parts through generate and retains original text', async () => {
+      const provider = createProvider();
+      (provider as any)._stream = false;
+      ((provider as any)._client.responses as unknown as Record<string, unknown>)['create'] = vi
+        .fn()
+        .mockResolvedValue({
+          id: 'resp_generate_search',
+          status: 'completed',
+          output: [
+            {
+              type: 'message',
+              content: [
+                {
+                  type: 'output_text',
+                  text: 'Answer with citation.',
+                  annotations: [
+                    {
+                      type: 'url_citation',
+                      start_index: 0,
+                      end_index: 6,
+                      title: 'Example',
+                      url: 'https://example.com',
+                    },
+                  ],
+                },
+              ],
+            },
+          ],
+        });
+      const callbackParts: StreamedMessagePart[] = [];
+
+      const result = await generate(
+        provider,
+        '',
+        [],
+        [{ role: 'user', content: [{ type: 'text', text: 'Search.' }], toolCalls: [] }],
+        { onMessagePart: (part) => { callbackParts.push(part); } },
+      );
+
+      expect(callbackParts).toEqual([
+        { type: 'text', text: 'Answer with citation.' },
+        {
+          type: 'url_citation',
+          startIndex: 0,
+          endIndex: 6,
+          title: 'Example',
+          url: 'https://example.com',
+        },
+      ]);
+      expect(result.message.content).toEqual([{ type: 'text', text: 'Answer with citation.' }]);
+      expect(result.message.annotations).toEqual([
+        {
+          type: 'url_citation',
+          startIndex: 0,
+          endIndex: 6,
+          title: 'Example',
+          url: 'https://example.com',
+        },
+      ]);
+      expect(result.annotations).toEqual(result.message.annotations);
+    });
+
+    it('preserves hosted search lifecycle events and citations in streams', async () => {
+      const events = [
+        { type: 'response.web_search_call.in_progress', item_id: 'ws_stream' },
+        {
+          type: 'response.output_item.added',
+          item: {
+            type: 'web_search_call',
+            id: 'ws_stream',
+            status: 'searching',
+            action: {
+              type: 'search',
+              query: 'streamed query',
+              sources: [{ type: 'url', url: 'https://example.com/stream' }],
+            },
+          },
+        },
+        { type: 'response.web_search_call.searching', item_id: 'ws_stream' },
+        { type: 'response.output_text.delta', delta: 'Streamed answer.' },
+        {
+          type: 'response.output_text.annotation.added',
+          annotation: {
+            type: 'url_citation',
+            start_index: 0,
+            end_index: 8,
+            title: 'Stream',
+            url: 'https://example.com/stream',
+          },
+        },
+        {
+          type: 'response.output_item.done',
+          item: {
+            type: 'web_search_call',
+            id: 'ws_stream',
+            status: 'completed',
+            action: {
+              type: 'open_page',
+              url: 'https://example.com/stream',
+            },
+          },
+        },
+        { type: 'response.web_search_call.completed', item_id: 'ws_stream' },
+        { type: 'response.completed', response: { id: 'resp_stream_search' } },
+      ];
+      const stream = new OpenAIResponsesStreamedMessage(makeAsyncIterable(events), true);
+      const parts: StreamedMessagePart[] = [];
+      for await (const part of stream) parts.push(part);
+
+      expect(parts).toContainEqual({ type: 'text', text: 'Streamed answer.' });
+      expect(parts).toContainEqual({
+        type: 'url_citation',
+        startIndex: 0,
+        endIndex: 8,
+        title: 'Stream',
+        url: 'https://example.com/stream',
+      });
+      expect(parts.some((part) => part.type === 'hosted_search_source')).toBe(true);
+      expect(parts.some((part) => part.type === 'hosted_search_action')).toBe(true);
+      expect(parts.some((part) => part.type === 'hosted_search_lifecycle')).toBe(true);
+      expect(stream.annotations).toHaveLength(1);
+      expect(stream.searchMetadata.length).toBeGreaterThan(0);
+    });
+
+    it('ignores incomplete hosted annotations without failing the response', async () => {
+      const provider = createProvider();
+      (provider as any)._stream = false;
+      ((provider as any)._client.responses as unknown as Record<string, unknown>)['create'] = vi
+        .fn()
+        .mockResolvedValue({
+          id: 'resp_malformed_annotation',
+          status: 'completed',
+          output: [
+            {
+              type: 'message',
+              content: [
+                {
+                  type: 'output_text',
+                  text: 'Safe.',
+                  annotations: [{ type: 'url_citation', url: 'https://example.com' }],
+                },
+              ],
+            },
+          ],
+        });
+      const stream = await provider.generate(
+        '',
+        [],
+        [{ role: 'user', content: [{ type: 'text', text: 'Hi' }], toolCalls: [] }],
+      );
+      const parts: StreamedMessagePart[] = [];
+      for await (const part of stream) parts.push(part);
+
+      expect(parts).toEqual([{ type: 'text', text: 'Safe.' }]);
+      expect(stream.annotations).toEqual([]);
     });
 
     it('yields ToolCall from non-stream response with function_call output item', async () => {

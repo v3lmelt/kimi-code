@@ -145,6 +145,9 @@ export type {
   LoopStepBeginEvent,
   LoopStepEndEvent,
   LoopContentPartEvent,
+  LoopHostedSearchCitation,
+  LoopHostedSearchEvent,
+  LoopHostedSearchSource,
   LoopToolCallEvent,
   LoopToolResultEvent,
 } from './loop';

@@ -29,9 +29,12 @@
 
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
 import type { Event, IWaitUntil } from '#/_base/event';
+import type { HostedSearchMode } from '#/kosong/contract/provider';
 import type { Protocol } from '#/kosong/protocol/protocol';
 
 import type { OAuthRef } from '../provider/provider';
+
+export type WebSearchMode = HostedSearchMode;
 
 export interface ModelOverride {
   maxContextSize?: number;
@@ -44,6 +47,7 @@ export interface ModelOverride {
   supportEfforts?: string[];
   defaultEffort?: string;
   offEffort?: string;
+  webSearch?: WebSearchMode;
 }
 
 export interface ModelRecord {
@@ -71,6 +75,7 @@ export interface ModelRecord {
   supportEfforts?: string[];
   defaultEffort?: string;
   offEffort?: string;
+  webSearch?: WebSearchMode;
 
   overrides?: ModelOverride;
 

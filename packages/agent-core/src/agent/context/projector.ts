@@ -483,6 +483,8 @@ function extractTextOnly(message: Message): string {
 }
 
 function stripContextMetadata(message: ContextMessage): Message {
+  // Hosted-search annotations and metadata belong to transcript/UI replay, not
+  // to the model-visible message history.
   return {
     role: message.role,
     name: message.name,

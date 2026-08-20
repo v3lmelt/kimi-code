@@ -37,6 +37,7 @@ import {
 } from '../../loop/index';
 import type { AgentEvent, TurnEndedEvent, TurnEndReason } from '../../rpc';
 import type { TelemetryPropertyValue } from '../../telemetry';
+import { normalizeHostedSearch } from '../../tools/builtin/web/normalizer';
 import { gateImageFormatParts } from '../../tools/support/image-compress';
 import { abortable, isUserCancellation, userCancellationReason } from '../../utils/abort';
 import { USER_PROMPT_ORIGIN, type PromptOrigin } from '../context';
@@ -846,6 +847,13 @@ export class TurnFlow {
           // is dispatchable on the very next step of the same turn.
           buildTools: () => this.agent.tools.loopTools,
           describeMissingTool: (name) => this.agent.tools.missingToolMessage(name),
+          normalizeHostedSearch: ({ answerText, events, annotations }) =>
+            normalizeHostedSearch({
+              answerText,
+              events,
+              annotations,
+              urlFetcher: this.agent.toolServices?.urlFetcher,
+            }),
           log: this.agent.log,
           maxSteps: maxStepsPerTurn,
           maxRetryAttempts: maxRetriesPerStep,
@@ -1096,6 +1104,7 @@ export class TurnFlow {
     switch (event.type) {
       case 'step.end':
       case 'content.part':
+      case 'hosted.search':
       case 'tool.call':
       case 'text.delta':
       case 'thinking.delta':
@@ -1105,7 +1114,12 @@ export class TurnFlow {
         active.firstRequest.resolve();
         return;
       }
-      default:
+      case 'step.begin':
+      case 'step.retrying':
+      case 'step.usage':
+      case 'tool.progress':
+      case 'tool.result':
+      case 'turn.interrupted':
         return;
     }
   }
@@ -1389,6 +1403,21 @@ function mapLoopEvent(event: LoopEvent, turnId: number): AgentEvent | undefined 
       };
     case 'content.part':
       return undefined;
+    case 'hosted.search':
+      return {
+        type: 'hosted.search',
+        turnId,
+        step: event.step,
+        stepId: event.stepUuid,
+        eventId: event.uuid,
+        phase: event.phase,
+        callId: event.callId,
+        query: event.query,
+        status: event.status,
+        action: event.action,
+        sources: event.sources,
+        citations: event.citations,
+      };
     case 'tool.call':
       return {
         type: 'tool.call.started',

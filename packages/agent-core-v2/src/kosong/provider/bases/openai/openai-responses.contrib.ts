@@ -40,6 +40,7 @@ registerProtocolBase({
         defaultHeaders: traitDefaultHeaders(traits),
         maxOutputTokens: config.providerOptions?.defaultMaxTokens,
         offEffort: config.providerOptions?.offEffort,
+        webSearch: config.providerOptions?.webSearch,
         convertError: traitConvertError(traits),
         buildParams: traitBuildParams(traits),
       }),

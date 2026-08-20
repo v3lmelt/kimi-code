@@ -5,7 +5,12 @@
  * context length while preserving undo/clear semantics. Scope-agnostic.
  */
 
-import { type ContentPart, type ToolCall } from '#/kosong/contract/message';
+import {
+  type ContentPart,
+  type HostedSearchCitation,
+  type HostedSearchEvent,
+  type ToolCall,
+} from '#/kosong/contract/message';
 import type { WireRecord } from '#/wire/record';
 
 import {
@@ -40,6 +45,8 @@ interface MutableMessage {
   toolCallId?: string;
   isError?: boolean;
   origin?: ContextMessage['origin'];
+  annotations?: readonly HostedSearchCitation[];
+  searchMetadata?: readonly HostedSearchEvent[];
 }
 
 interface MutableEntry {
@@ -129,6 +136,38 @@ export function createContextTranscriptReducer(): ContextTranscriptReducer {
       }
       case 'content.part': {
         openSteps.get(event.stepUuid)?.message.content.push(event.part);
+        return;
+      }
+      case 'hosted.search': {
+        const openStep = openSteps.get(event.stepUuid);
+        if (openStep === undefined) return;
+        const metadata: HostedSearchEvent = {
+          callId: event.callId,
+          status: event.status,
+          action: event.action,
+          sources: event.sources === undefined ? undefined : [...event.sources],
+        };
+        const searchMetadata = [...(openStep.message.searchMetadata ?? [])];
+        const metadataKey = JSON.stringify(metadata);
+        if (!searchMetadata.some((candidate) => JSON.stringify(candidate) === metadataKey)) {
+          searchMetadata.push(metadata);
+        }
+        openStep.message.searchMetadata = searchMetadata;
+        const annotations = [...(openStep.message.annotations ?? [])];
+        for (const citation of event.citations ?? []) {
+          const url = citation.url.trim();
+          const key = `${url}\0${citation.startIndex}\0${citation.endIndex}`;
+          if (
+            annotations.some(
+              (candidate) =>
+                `${candidate.url}\0${candidate.startIndex}\0${candidate.endIndex}` === key,
+            )
+          ) {
+            continue;
+          }
+          annotations.push({ ...citation, url });
+        }
+        openStep.message.annotations = annotations.length > 0 ? annotations : undefined;
         return;
       }
       case 'tool.call': {

@@ -139,10 +139,11 @@ export function convertOpenAIError(
     const reqId = error.requestID ?? null;
     const retryAfterMs = parseRetryAfterMs(error.headers);
     const traceId = parseTraceId(error.headers);
+    const message = openAIAPIErrorMessage(error);
     if (isOpenAIInsufficientQuotaError(error)) {
-      return new APIProviderQuotaExhaustedError(error.message, reqId, retryAfterMs, traceId);
+      return new APIProviderQuotaExhaustedError(message, reqId, retryAfterMs, traceId);
     }
-    return normalizeAPIStatusError(error.status, error.message, reqId, retryAfterMs, traceId);
+    return normalizeAPIStatusError(error.status, message, reqId, retryAfterMs, traceId);
   }
   if (
     error instanceof OpenAIAPIError &&
@@ -158,6 +159,16 @@ export function convertOpenAIError(
     return classifyBaseApiError(error.message);
   }
   return new ChatProviderError(`Error: ${String(error)}`);
+}
+
+function openAIAPIErrorMessage(error: OpenAIAPIError): string {
+  if (!error.message.includes('(no body)') || error.error === undefined) return error.message;
+  if (typeof error.error === 'string') return error.error;
+  try {
+    return JSON.stringify(error.error);
+  } catch {
+    return error.message;
+  }
 }
 
 export interface FunctionToolCallShape {

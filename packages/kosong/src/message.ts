@@ -82,6 +82,84 @@ export interface UsagePart {
   usage: TokenUsage;
 }
 
+/** The hosted web-search modes understood by the OpenAI Responses adapter. */
+export type HostedSearchMode = 'disabled' | 'cached' | 'indexed' | 'live';
+
+/** A URL returned by a hosted web search. */
+export interface HostedSearchSource {
+  type?: 'url';
+  url: string;
+  title?: string;
+}
+
+/** An action performed by a hosted web-search call. */
+export type HostedSearchAction =
+  | {
+      type: 'search';
+      query?: string;
+      queries?: string[];
+      sources?: HostedSearchSource[];
+    }
+  | {
+      type: 'open_page';
+      url?: string;
+    }
+  | {
+      type: 'find_in_page';
+      url?: string;
+      pattern?: string;
+    };
+
+export type HostedSearchLifecycle = 'in_progress' | 'searching' | 'completed' | 'failed';
+
+/** A normalized hosted-search event retained on the final message. */
+export interface HostedSearchEvent {
+  callId?: string;
+  status?: HostedSearchLifecycle;
+  action?: HostedSearchAction;
+  sources?: HostedSearchSource[];
+}
+
+/** A hosted-search source surfaced as an independent streamed part. */
+export interface HostedSearchSourcePart {
+  type: 'hosted_search_source';
+  source: HostedSearchSource;
+  callId?: string;
+}
+
+/** A hosted-search action surfaced as an independent streamed part. */
+export interface HostedSearchActionPart {
+  type: 'hosted_search_action';
+  action: HostedSearchAction;
+  callId?: string;
+}
+
+/** A hosted-search lifecycle transition surfaced as an independent streamed part. */
+export interface HostedSearchLifecyclePart {
+  type: 'hosted_search_lifecycle';
+  status: HostedSearchLifecycle;
+  action?: HostedSearchAction;
+  sources?: HostedSearchSource[];
+  callId?: string;
+}
+
+export type HostedSearchPart =
+  | HostedSearchSourcePart
+  | HostedSearchActionPart
+  | HostedSearchLifecyclePart;
+
+/** A citation into the assistant text for a hosted URL source. */
+export interface HostedSearchCitation {
+  type: 'url_citation';
+  startIndex: number;
+  endIndex: number;
+  title?: string;
+  url: string;
+}
+
+/** Streaming citation part; the text itself is never rewritten with markers. */
+export type UrlCitationPart = HostedSearchCitation;
+
 /**
  * A single chunk yielded by {@link StreamedMessage}'s async iterator.
  *
@@ -94,7 +172,13 @@ export interface UsagePart {
  * are responsible for translating their native "done" signals into this
  * shape; they do not emit a separate done event.
  */
-export type StreamedMessagePart = ContentPart | ToolCall | ToolCallPart | UsagePart;
+export type StreamedMessagePart =
+  | ContentPart
+  | ToolCall
+  | ToolCallPart
+  | UsagePart
+  | HostedSearchPart
+  | UrlCitationPart;
 
 /**
  * A single message in a conversation.
@@ -117,6 +201,13 @@ export interface Message {
   readonly toolCallId?: string;
   /** When `true`, indicates the message was not fully received (e.g. stream interrupted). */
   readonly partial?: boolean;
+  /**
+   * URL citations into the text returned by a hosted search provider. The
+   * corresponding text part remains byte-for-byte unchanged.
+   */
+  readonly annotations?: readonly HostedSearchCitation[];
+  /** Hosted-search lifecycle/action/source metadata collected for this message. */
+  readonly searchMetadata?: readonly HostedSearchEvent[];
   /**
    * Full tool definitions carried by this message. Meaningful only on
    * `role: 'system'` messages: it is the append-only primitive for loading a
@@ -168,6 +259,41 @@ export function isToolCallPart(part: StreamedMessagePart): part is ToolCallPart 
 /** Check if a streamed part is a mid-stream UsagePart. */
 export function isUsagePart(part: StreamedMessagePart): part is UsagePart {
   return part.type === 'usage';
+}
+
+/** Check if a streamed part is a hosted URL citation. */
+export function isUrlCitationPart(part: StreamedMessagePart): part is UrlCitationPart {
+  return part.type === 'url_citation';
+}
+
+/** Check if a streamed part contains hosted-search metadata. */
+export function isHostedSearchPart(part: StreamedMessagePart): part is HostedSearchPart {
+  return (
+    part.type === 'hosted_search_source' ||
+    part.type === 'hosted_search_action' ||
+    part.type === 'hosted_search_lifecycle'
+  );
+}
+
+/** Check if a streamed part contains a hosted-search source. */
+export function isHostedSearchSourcePart(
+  part: StreamedMessagePart,
+): part is HostedSearchSourcePart {
+  return part.type === 'hosted_search_source';
+}
+
+/** Check if a streamed part contains a hosted-search action. */
+export function isHostedSearchActionPart(
+  part: StreamedMessagePart,
+): part is HostedSearchActionPart {
+  return part.type === 'hosted_search_action';
+}
+
+/** Check if a streamed part contains a hosted-search lifecycle transition. */
+export function isHostedSearchLifecyclePart(
+  part: StreamedMessagePart,
+): part is HostedSearchLifecyclePart {
+  return part.type === 'hosted_search_lifecycle';
 }
 
 /**

@@ -8,6 +8,9 @@
 
 import type {
   FinishReason,
+  HostedSearchCitation,
+  HostedSearchEvent,
+  HostedSearchPart,
   Message,
   ModelCapability,
   TextPart,
@@ -16,6 +19,8 @@ import type {
   Tool,
   ToolCall,
 } from '@moonshot-ai/kosong';
+
+import type { LoopHostedSearchCitation, LoopHostedSearchSource } from './events';
 
 export interface ToolCallDelta {
   readonly toolCallId: string;
@@ -112,6 +117,8 @@ export interface LLMChatParams {
    * order. Durable transcript writes receive completed blocks only.
    */
   onThinkPart?: ((part: ThinkPart) => Promise<void> | void) | undefined;
+  /** Fires for hosted-search lifecycle/action/source parts as they stream. */
+  onHostedSearchPart?: ((part: HostedSearchPart) => Promise<void> | void) | undefined;
   trace?: LLMRequestTraceState;
 }
 
@@ -122,9 +129,31 @@ export interface LLMChatResponse {
   messageId?: string;
   usage: TokenUsage;
   streamTiming?: LLMStreamTiming;
+  /** Assistant text used to resolve hosted-search citation ranges. */
+  assistantText?: string;
+  /** Final hosted-search metadata collected by the provider adapter. */
+  hostedSearchMetadata?: readonly HostedSearchEvent[];
+  /** Final hosted-search URL annotations collected by the provider adapter. */
+  hostedSearchAnnotations?: readonly HostedSearchCitation[];
   /** Provider trace identifier from the `x-trace-id` response header (Kimi/KFC only). */
   traceId?: string;
 }
+
+export interface HostedSearchNormalizationInput {
+  readonly answerText: string;
+  readonly events: readonly HostedSearchEvent[];
+  readonly annotations: readonly HostedSearchCitation[];
+}
+
+export interface HostedSearchNormalizationResult {
+  readonly query?: string;
+  readonly sources: readonly LoopHostedSearchSource[];
+  readonly citations: readonly LoopHostedSearchCitation[];
+}
+
+export type HostedSearchNormalizer = (
+  input: HostedSearchNormalizationInput,
+) => Promise<HostedSearchNormalizationResult>;
 
 export interface LLM {
   readonly systemPrompt: string;

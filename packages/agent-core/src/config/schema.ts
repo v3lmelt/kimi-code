@@ -16,6 +16,10 @@ export const ProviderTypeSchema = z.enum([
 
 export type ProviderType = z.infer<typeof ProviderTypeSchema>;
 
+export const WebSearchModeSchema = z.enum(['disabled', 'cached', 'indexed', 'live']);
+
+export type WebSearchMode = z.infer<typeof WebSearchModeSchema>;
+
 export const OAuthRefSchema = z.object({
   storage: z.enum(['file', 'keyring']),
   key: z.string().min(1),
@@ -56,6 +60,9 @@ const ModelAliasBaseSchema = z.object({
   // Anthropic Messages, Grok/GPT over OpenAI Responses). When set, takes
   // precedence over the provider wire for transport selection.
   protocol: z.enum(['anthropic', 'openai', 'openai_responses', 'google-genai']).optional(),
+  // Hosted web search policy for the model. Missing keeps the historical
+  // behavior (disabled).
+  webSearch: WebSearchModeSchema.optional(),
   // Explicitly declare adaptive-thinking support, overriding the kosong
   // model-name version inference. Needed for custom-named Anthropic endpoints
   // whose model name does not encode a parseable Claude version.

@@ -15,7 +15,14 @@
 import type { KimiErrorPayload } from '#/_base/errors/serialize';
 import type { PromptOrigin } from '#/agent/contextMemory/types';
 import type { FinishReason } from '#/kosong/contract/provider';
-import type { ContentPart, TextPart } from '#/kosong/contract/message';
+import type {
+  ContentPart,
+  HostedSearchAction,
+  HostedSearchCitation,
+  HostedSearchLifecycle,
+  HostedSearchSource,
+  TextPart,
+} from '#/kosong/contract/message';
 import type { TokenUsage } from '#/kosong/contract/usage';
 
 export type TurnEndReason = 'completed' | 'cancelled' | 'failed' | 'blocked';
@@ -127,6 +134,21 @@ export interface ToolCallDeltaEvent {
   readonly argumentsPart?: string;
 }
 
+export interface HostedSearchDomainEvent {
+  readonly type: 'hosted.search';
+  readonly turnId: number;
+  readonly step: number;
+  readonly stepId?: string;
+  readonly eventId?: string;
+  readonly phase: 'started' | 'action' | 'source' | 'completed';
+  readonly callId?: string;
+  readonly query?: string;
+  readonly status?: HostedSearchLifecycle;
+  readonly action?: HostedSearchAction;
+  readonly sources?: readonly HostedSearchSource[];
+  readonly citations?: readonly HostedSearchCitation[];
+}
+
 declare module '#/app/event/eventBus' {
   interface DomainEventMap {
     'turn.started': TurnStartedEvent;
@@ -138,5 +160,6 @@ declare module '#/app/event/eventBus' {
     'assistant.delta': AssistantDeltaEvent;
     'thinking.delta': ThinkingDeltaEvent;
     'tool.call.delta': ToolCallDeltaEvent;
+    'hosted.search': HostedSearchDomainEvent;
   }
 }

@@ -61,7 +61,7 @@ import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { Error2 } from '#/_base/errors/errors';
 import type { ModelCapability } from '#/kosong/contract/capability';
-import type { ProviderRequestAuth } from '#/kosong/contract/provider';
+import type { HostedSearchMode, ProviderRequestAuth } from '#/kosong/contract/provider';
 import type { TokenUsage } from '#/kosong/contract/usage';
 import {
   IProtocolAdapterRegistry,
@@ -373,6 +373,7 @@ export class ModelCatalog extends Disposable implements IModelCatalog {
         `Model "${id}" must define a positive max_context_size in config.toml.`,
       );
     }
+    validateHostedSearchConfiguration(providerType, protocol, model.webSearch ?? 'disabled', id);
 
     const explainedCapability = this.protocolRegistry.explainCapability(
       protocol,
@@ -423,6 +424,7 @@ export class ModelCatalog extends Disposable implements IModelCatalog {
       alwaysThinking: declared.has('always_thinking'),
       providerType,
       providerName,
+      webSearch: model.webSearch ?? 'disabled',
       authProvider,
       providerOptions,
     };
@@ -606,6 +608,21 @@ function stripTrailingV1(baseUrl: string): string {
   return baseUrl.replace(/\/v1\/?$/, '');
 }
 
+function validateHostedSearchConfiguration(
+  providerType: string,
+  protocol: Protocol,
+  webSearch: HostedSearchMode,
+  modelId: string,
+): void {
+  if (webSearch === 'disabled') return;
+  if (providerType === 'openai-codex' && protocol === 'openai_responses') return;
+  throw new Error2(
+    CONFIG_INVALID_ERROR_CODE,
+    `Model "${modelId}" enables hosted web search mode "${webSearch}", but hosted web search is only supported for openai-codex models using the openai_responses transport.`,
+    { details: { model: modelId, providerType, protocol, webSearch } },
+  );
+}
+
 function buildProtocolProviderOptions(
   model: ModelRecord,
   protocol: Protocol,
@@ -639,6 +656,7 @@ function buildProtocolProviderOptions(
     }
     case 'openai_responses':
       if (model.offEffort !== undefined) options.offEffort = model.offEffort;
+      if (model.webSearch !== undefined) options.webSearch = model.webSearch;
       break;
     default: {
       const exhaustive: never = protocol;

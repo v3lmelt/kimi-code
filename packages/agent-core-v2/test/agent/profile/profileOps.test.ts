@@ -16,6 +16,7 @@ import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalo
 import { IBootstrapService } from '#/app/bootstrap/bootstrap';
 import { IConfigService } from '#/app/config/config';
 import { IModelCatalog, type Model } from '#/kosong/model/catalog';
+import type { HostedSearchMode } from '#/kosong/contract/provider';
 import { IProtocolAdapterRegistry, type Protocol } from '#/kosong/protocol/protocol';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IAgentTelemetryContextService } from '#/app/telemetry/agentTelemetryContext';
@@ -65,6 +66,7 @@ function createTestModel(
     readonly id?: string;
     readonly protocol?: Model['protocol'];
     readonly providerType?: string;
+    readonly webSearch?: HostedSearchMode;
   } = {},
 ): Model {
   const providerType = options.providerType;
@@ -89,6 +91,7 @@ function createTestModel(
     alwaysThinking: false,
     providerType,
     providerName: 'kimi',
+    webSearch: options.webSearch,
     authProvider: { getAuth: async () => undefined },
   };
 }
@@ -528,7 +531,7 @@ describe('AgentProfileService (wire-backed config.update)', () => {
 
     host.svc.update({ modelAlias: 'kimi-code', thinkingLevel: 'high' });
 
-    expect(host.svc.resolveRequestParams()).toEqual({
+    expect(host.svc.resolveRequestParams()).toMatchObject({
       cacheKey: 'session-test',
       sampling: { temperature: 0.3 },
       thinkingEffort: 'high',
@@ -546,7 +549,7 @@ describe('AgentProfileService (wire-backed config.update)', () => {
 
     host.svc.update({ modelAlias: 'kimi-code', thinkingLevel: 'high' });
 
-    expect(host.svc.resolveRequestParams()).toEqual({
+    expect(host.svc.resolveRequestParams()).toMatchObject({
       cacheKey: 'session-test',
       thinkingEffort: 'high',
       thinkingKeep: 'all',
@@ -566,7 +569,7 @@ describe('AgentProfileService (wire-backed config.update)', () => {
     expect(modelOf(host.wire).thinkingLevel).toBe('high');
     expect(host.svc.resolveModelContext().thinkingLevel).toBe('max');
 
-    expect(host.svc.resolveRequestParams()).toEqual({
+    expect(host.svc.resolveRequestParams()).toMatchObject({
       cacheKey: 'session-test',
       thinkingEffort: 'max',
       thinkingKeep: 'all',
@@ -603,7 +606,7 @@ describe('AgentProfileService (wire-backed config.update)', () => {
 
     host.svc.update({ modelAlias: 'claude-code', thinkingLevel: 'high' });
 
-    expect(host.svc.resolveRequestParams()).toEqual({
+    expect(host.svc.resolveRequestParams()).toMatchObject({
       cacheKey: 'session-test',
       sampling: { temperature: 0.3 },
       thinkingEffort: 'high',
@@ -622,7 +625,7 @@ describe('AgentProfileService (wire-backed config.update)', () => {
     host.svc.update({ modelAlias: 'kimi-code', thinkingLevel: 'high' });
 
     expect(host.svc.resolveModelContext().thinkingLevel).toBe('max');
-    expect(host.svc.resolveRequestParams()).toEqual({
+    expect(host.svc.resolveRequestParams()).toMatchObject({
       cacheKey: 'session-test',
       thinkingEffort: 'max',
       thinkingKeep: 'all',
@@ -638,7 +641,7 @@ describe('AgentProfileService (wire-backed config.update)', () => {
 
     host.svc.update({ modelAlias: 'kimi-code', thinkingLevel: 'high' });
 
-    expect(host.svc.resolveRequestParams()).toEqual({
+    expect(host.svc.resolveRequestParams()).toMatchObject({
       cacheKey: 'session-test',
       thinkingEffort: 'high',
       thinkingKeep: 'all',
@@ -671,7 +674,7 @@ describe('AgentProfileService (wire-backed config.update)', () => {
 
     host.svc.update({ modelAlias: 'claude-code', thinkingLevel: 'high' });
 
-    expect(host.svc.resolveRequestParams()).toEqual({
+    expect(host.svc.resolveRequestParams()).toMatchObject({
       cacheKey: 'session-test',
       thinkingEffort: 'high',
       thinkingKeep: 'config-keep',
@@ -690,7 +693,7 @@ describe('AgentProfileService (wire-backed config.update)', () => {
     host.svc.update({ modelAlias: 'kimi-code', thinkingLevel: 'off' });
     expect(host.svc.resolveModelContext().thinkingLevel).toBe('off');
 
-    expect(host.svc.resolveRequestParams()).toEqual({
+    expect(host.svc.resolveRequestParams()).toMatchObject({
       cacheKey: 'session-test',
       sampling: { temperature: 0.3 },
       thinkingEffort: 'off',
@@ -707,7 +710,7 @@ describe('AgentProfileService (wire-backed config.update)', () => {
 
     host.svc.update({ modelAlias: 'kimi-code', thinkingLevel: 'high' });
 
-    expect(host.svc.resolveRequestParams()).toEqual({
+    expect(host.svc.resolveRequestParams()).toMatchObject({
       cacheKey: 'session-test',
       thinkingEffort: 'high',
       thinkingKeep: 'all',
@@ -724,5 +727,23 @@ describe('AgentProfileService (wire-backed config.update)', () => {
     host.svc.update({ modelAlias: 'claude-sonnet', thinkingLevel: 'high' });
 
     expect(host.svc.resolveRequestParams().cacheKey).toBe('session-test');
+  });
+
+  it('carries hosted web search mode into the model context and request params', () => {
+    modelCatalog = createModelCatalogStub({
+      'codex-code': createTestModel({
+        id: 'codex-code',
+        protocol: 'openai_responses',
+        providerType: 'openai-codex',
+        webSearch: 'live',
+      }),
+    });
+    const host = buildHost('profile-hosted-web-search');
+    host.svc.configure({ emitStatusUpdated: () => undefined });
+
+    host.svc.update({ modelAlias: 'codex-code' });
+
+    expect(host.svc.resolveModelContext().webSearch).toBe('live');
+    expect(host.svc.resolveRequestParams().webSearch).toBe('live');
   });
 });

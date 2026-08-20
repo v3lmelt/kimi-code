@@ -21,7 +21,7 @@ import {
   supportsThinkingEffort,
   type ThinkingEffort,
 } from './thinking';
-import type { ModelAlias } from '../../config/schema';
+import type { ModelAlias, WebSearchMode } from '../../config/schema';
 import type { ResolvedRuntimeProvider } from '../../session/provider-manager';
 
 export * from './types';
@@ -284,6 +284,10 @@ export class ConfigState {
 
   get maxOutputSize(): number | undefined {
     return this.tryResolvedProviderConfig()?.maxOutputSize;
+  }
+
+  get webSearch(): WebSearchMode {
+    return this.tryResolvedProviderConfig()?.webSearch ?? 'disabled';
   }
 
   private get resolvedProviderConfig(): ResolvedRuntimeProvider | undefined {

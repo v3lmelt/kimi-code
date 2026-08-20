@@ -50,6 +50,7 @@ import {
   isRetryableGenerateError,
 } from '#/kosong/contract/errors';
 import type { Message } from '#/kosong/contract/message';
+import type { Tool } from '#/kosong/contract/tool';
 import type {
   ChatProvider,
   GenerateOptions,
@@ -649,6 +650,7 @@ async function captureGoogleBody(
 async function captureResponsesBody(
   provider: ChatProvider,
   options?: GenerateOptions,
+  tools: Tool[] = [],
 ): Promise<Record<string, unknown>> {
   let captured: Record<string, unknown> | undefined;
   const client = sdkClient(provider) as { responses: { create: unknown } };
@@ -656,7 +658,7 @@ async function captureResponsesBody(
     captured = params as Record<string, unknown>;
     return Promise.resolve(responsesEventStream());
   });
-  await drain(await provider.generate('', [], PROBE_HISTORY, options));
+  await drain(await provider.generate('', tools, PROBE_HISTORY, options));
   if (captured === undefined) throw new Error('expected responses.create to be called');
   return captured;
 }
@@ -701,7 +703,7 @@ describe('per-turn intent wire encoding (behavior probes)', () => {
       protocol: 'openai_responses',
       providerType: 'openai-codex',
       modelName: 'gpt-5.6-sol',
-      apiKey: 'sk-probe',
+      apiKey: 'YOUR_API_KEY',
     });
 
     const body = await captureResponsesBody(provider, {
@@ -720,6 +722,39 @@ describe('per-turn intent wire encoding (behavior probes)', () => {
     expect(body['parallel_tool_calls']).toBe(false);
     expect(body['tool_choice']).toBe('auto');
     expect(body['reasoning']).toEqual({ effort: 'high', summary: 'auto', context: 'all_turns' });
+  });
+
+  it('uses the non-Lite Responses shape when hosted web search is enabled', async () => {
+    const provider = registry.createChatProvider({
+      protocol: 'openai_responses',
+      providerType: 'openai-codex',
+      modelName: 'gpt-5.6-sol',
+      apiKey: 'sk-probe',
+    });
+    const functionTool: Tool = {
+      name: 'Lookup',
+      description: 'Look up a value.',
+      parameters: { type: 'object', properties: {} },
+    };
+
+    const body = await captureResponsesBody(
+      provider,
+      { webSearch: 'live', maxCompletionTokens: 5000 },
+      [functionTool],
+    );
+
+    expect(body['tools']).toEqual([
+      {
+        type: 'function',
+        name: 'Lookup',
+        description: 'Look up a value.',
+        parameters: { type: 'object', properties: {} },
+        strict: false,
+      },
+      { type: 'web_search', external_web_access: true },
+    ]);
+    expect(body['input']).not.toContainEqual(expect.objectContaining({ type: 'additional_tools' }));
+    expect(body).not.toHaveProperty('max_output_tokens');
   });
 
   it('encodes cacheKey on Anthropic as metadata.user_id', async () => {

@@ -46,6 +46,81 @@ describe('Agent resume', () => {
     expect(persistence.records.filter((record) => record.type === 'metadata')).toHaveLength(1);
   });
 
+  it('replays hosted-search records onto the assistant message without exposing them to the model', async () => {
+    const persistence = new RecordingAgentPersistence([
+      {
+        type: 'context.append_message',
+        message: {
+          role: 'user',
+          content: [{ type: 'text', text: 'historical prompt' }],
+          toolCalls: [],
+          origin: { kind: 'user' },
+        },
+      },
+      {
+        type: 'context.append_loop_event',
+        event: { type: 'step.begin', uuid: 'search-step', turnId: '0', step: 0 },
+      },
+      {
+        type: 'context.append_loop_event',
+        event: {
+          type: 'content.part',
+          uuid: 'search-content',
+          turnId: '0',
+          step: 0,
+          stepUuid: 'search-step',
+          part: { type: 'text', text: 'historical answer' },
+        },
+      },
+      {
+        type: 'context.append_loop_event',
+        event: {
+          type: 'hosted.search',
+          uuid: 'search-completed',
+          turnId: '0',
+          step: 0,
+          stepUuid: 'search-step',
+          phase: 'completed',
+          callId: 'search-call',
+          status: 'completed',
+          sources: [{ url: 'https://example.test/source', title: 'Source' }],
+          citations: [
+            {
+              type: 'url_citation',
+              startIndex: 0,
+              endIndex: 10,
+              url: 'https://example.test/source',
+              citationText: 'historical',
+            },
+          ],
+        },
+      },
+      {
+        type: 'context.append_loop_event',
+        event: { type: 'step.end', uuid: 'search-step', turnId: '0', step: 0 },
+      },
+    ] as AgentRecord[]);
+    const ctx = testAgent({ persistence });
+
+    await ctx.agent.resume();
+
+    const historyMessage = ctx.agent.context.history.find((message) => message.role === 'assistant');
+    expect(historyMessage?.searchMetadata?.[0]).toMatchObject({
+      callId: 'search-call',
+      status: 'completed',
+      sources: [{ url: 'https://example.test/source', title: 'Source' }],
+    });
+    expect(historyMessage?.annotations?.[0]).toMatchObject({
+      url: 'https://example.test/source',
+      startIndex: 0,
+      endIndex: 10,
+      citationText: 'historical',
+    });
+    const projected = ctx.agent.context.messages.find((message) => message.role === 'assistant');
+    expect(projected).not.toHaveProperty('searchMetadata');
+    expect(projected).not.toHaveProperty('annotations');
+  });
+
   it('replays persisted records without restarting turns, compactions, plan turns, or tools', async () => {
     const persistence = new RecordingAgentPersistence(resumeHistory());
     const execWithEnv = vi.fn().mockRejectedValue(new Error('Bash should not execute on resume'));

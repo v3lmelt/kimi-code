@@ -38,7 +38,12 @@ import {
   transformPlainObject,
 } from '#/app/config/toml';
 import { type AssertExact, type Equal } from '#/_base/utils/typeEquality';
-import type { ModelOverride, ModelRecord, ModelsSection } from '#/kosong/model/model';
+import type {
+  ModelOverride,
+  ModelRecord,
+  ModelsSection,
+  WebSearchMode,
+} from '#/kosong/model/model';
 import type { ThinkingConfig } from '#/kosong/model/thinking';
 import type { OAuthRef, ProviderConfig, ProvidersSection } from '#/kosong/provider/provider';
 import { ProtocolSchema } from '#/kosong/protocol/protocol';
@@ -166,6 +171,9 @@ export const MODELS_SECTION = 'models';
 
 export const DEFAULT_MODEL_SECTION = 'defaultModel';
 
+export const WebSearchModeSchema = z.enum(['disabled', 'cached', 'indexed', 'live']);
+type _AssertWebSearchMode = AssertExact<Equal<z.infer<typeof WebSearchModeSchema>, WebSearchMode>>;
+
 const ModelBaseSchema = z.object({
   providerId: z.string().optional(),
 
@@ -191,6 +199,7 @@ const ModelBaseSchema = z.object({
   supportEfforts: z.array(z.string()).optional(),
   defaultEffort: z.string().optional(),
   offEffort: z.string().optional(),
+  webSearch: WebSearchModeSchema.optional(),
 });
 
 export const ModelOverrideSchema = ModelBaseSchema.omit({

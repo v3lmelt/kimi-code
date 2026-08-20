@@ -55,7 +55,12 @@ registerProviderDefinition({
 registerProviderDefinition({
   id: 'openai-codex',
   baseProtocol: 'openai_responses',
-  traits: [{ buildParams: shapeOpenAICodexResponsesLiteParams }],
+  traits: [
+    {
+      provides: () => ({ omitResponsesLiteHeaderWhenHostedSearch: true }),
+      buildParams: shapeOpenAICodexResponsesLiteParams,
+    },
+  ],
   endpoint: { defaultBaseUrl: 'https://chatgpt.com/backend-api/codex' },
   hostHeaders: 'user-agent',
 });
@@ -72,13 +77,17 @@ registerProviderDefinition({
 function shapeOpenAICodexResponsesLiteParams(
   params: Record<string, unknown>,
 ): Record<string, unknown> {
+  const tools = Array.isArray(params['tools']) ? params['tools'] : [];
   delete params['max_output_tokens'];
   delete params['max_completion_tokens'];
+  if (tools.some(isHostedTool)) return params;
 
   const input = Array.isArray(params['input']) ? params['input'] : [];
   stripImageDetails(input);
-  const tools = Array.isArray(params['tools']) ? params['tools'] : [];
-  const prefix: unknown[] = [{ type: 'additional_tools', role: 'developer', tools }];
+  const additionalTools = tools.filter((tool) => !isHostedTool(tool));
+  const prefix: unknown[] = [
+    { type: 'additional_tools', role: 'developer', tools: additionalTools },
+  ];
   const instructions = params['instructions'];
   if (typeof instructions === 'string' && instructions.length > 0) {
     prefix.push({
@@ -96,6 +105,10 @@ function shapeOpenAICodexResponsesLiteParams(
   delete params['instructions'];
   delete params['tools'];
   return params;
+}
+
+function isHostedTool(value: unknown): boolean {
+  return asRecord(value)['type'] === 'web_search';
 }
 
 function stripImageDetails(input: unknown[]): void {

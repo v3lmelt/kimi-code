@@ -79,6 +79,7 @@ export interface Model {
   readonly alwaysThinking: boolean;
   readonly providerType?: string;
   readonly providerName: string;
+  readonly webSearch?: import('./model').WebSearchMode;
 
   readonly authProvider: AuthProvider;
   readonly providerOptions?: ProtocolProviderOptions;

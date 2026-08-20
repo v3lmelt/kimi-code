@@ -1,4 +1,10 @@
-import type { Message, StreamedMessagePart, VideoURLPart } from './message';
+import type {
+  HostedSearchCitation,
+  HostedSearchEvent,
+  Message,
+  StreamedMessagePart,
+  VideoURLPart,
+} from './message';
 import type { Tool } from './tool';
 import type { TokenUsage } from './usage';
 
@@ -118,6 +124,10 @@ export interface StreamedMessage {
    * does not report one.
    */
   readonly traceId?: string | null;
+  /** URL citations emitted by providers that support hosted web search. */
+  readonly annotations?: readonly HostedSearchCitation[];
+  /** Hosted-search lifecycle, action, and source metadata. */
+  readonly searchMetadata?: readonly HostedSearchEvent[];
 }
 
 /**

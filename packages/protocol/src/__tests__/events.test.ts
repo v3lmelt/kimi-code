@@ -8,6 +8,7 @@ import {
   agentEventSchema,
   assistantDeltaEventSchema,
   eventSchema,
+  hostedSearchEventSchema,
   shellCompletedEventSchema,
   toolCallStartedEventSchema,
 } from '../events';
@@ -96,6 +97,25 @@ describe('events / display re-exports', () => {
         taskId: 'task-1',
       }).success,
     ).toBe(true);
+
+    expect(
+      hostedSearchEventSchema.parse({
+        type: 'hosted.search',
+        turnId: 1,
+        step: 2,
+        phase: 'completed',
+        status: 'completed',
+        sources: [
+          {
+            url: 'https://example.test/source',
+            title: 'Source',
+            snippet: 'A cited sentence',
+            cited: true,
+            snippetKind: 'citation',
+          },
+        ],
+      }),
+    ).toMatchObject({ type: 'hosted.search', phase: 'completed' });
   });
 
   it('rejects unknown event types through the full agent event union', () => {

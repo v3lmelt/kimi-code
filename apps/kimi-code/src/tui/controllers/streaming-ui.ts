@@ -1,4 +1,9 @@
-import type { Session } from '@moonshot-ai/kimi-code-sdk';
+import type {
+  HostedSearchCitation,
+  HostedSearchEvent,
+  HostedSearchSource,
+  Session,
+} from '@moonshot-ai/kimi-code-sdk';
 
 import { AgentGroupComponent } from '../components/messages/agent-group';
 import { StreamingPreviewComponent } from '../components/messages/streaming-preview';
@@ -10,11 +15,26 @@ import { ToolCallComponent } from '../components/messages/tool-call';
 import { STREAMING_UI_FIRST_FLUSH_MS, STREAMING_UI_FLUSH_MS } from '../constant/streaming';
 import { hasDispose } from '../utils/component-capabilities';
 import { appendStreamingArgsPreview, parseStreamingArgs } from '../utils/event-payload';
+import {
+  canonicalHostedSearchCallId,
+  canonicalHostedSearchUrl,
+  createHostedSearchTranscriptData,
+  hostedSearchActionKey,
+  hostedSearchEventKey,
+  hostedSearchGroupKey,
+  isValidHostedSearchCitation,
+  filterHostedSearchCitations,
+  mergeHostedSearchEvent,
+  reorderHostedSearchSources,
+  upsertHostedSearchCitation,
+  upsertHostedSearchSource,
+} from '../utils/hosted-search';
 import { notifyTerminalOnce } from '../utils/terminal-notification';
 import { nextTranscriptId } from '../utils/transcript-id';
 import type { TodoItem } from '../components/chrome/todo-panel';
 import type {
   AppState,
+  HostedSearchTranscriptData,
   LivePaneState,
   QueuedMessage,
   ToolCallBlockData,
@@ -27,6 +47,136 @@ const SEARCH_READ_TOOLS = new Set(['Read', 'Grep', 'Glob']);
 
 function isSearchReadTool(name: string): boolean {
   return SEARCH_READ_TOOLS.has(name);
+}
+
+type HostedSearchCard = {
+  readonly data: HostedSearchTranscriptData;
+  readonly entry: TranscriptEntry;
+};
+
+function hostedSearchEventQuery(event: HostedSearchEvent): string | undefined {
+  if (event.query !== undefined) return event.query.trim();
+  return event.action?.type === 'search' ? event.action.query?.trim() : undefined;
+}
+
+function hostedSearchEventUrls(event: HostedSearchEvent): Set<string> {
+  const urls = new Set<string>();
+  const add = (url: string | undefined): void => {
+    const canonical = canonicalHostedSearchUrl(url ?? '');
+    if (canonical.length > 0) urls.add(canonical);
+  };
+  for (const source of event.sources ?? []) add(source.url);
+  for (const citation of event.citations ?? []) add(citation.url);
+  if (event.action?.type === 'search') {
+    for (const source of event.action.sources ?? []) add(source.url);
+  } else if (event.action !== undefined) {
+    add(event.action.url);
+  }
+  return urls;
+}
+
+function hostedSearchCardUrls(card: HostedSearchCard): Set<string> {
+  const urls = new Set<string>();
+  for (const source of card.data.sources) urls.add(canonicalHostedSearchUrl(source.url));
+  for (const citation of card.data.citations) urls.add(canonicalHostedSearchUrl(citation.url));
+  return urls;
+}
+
+function hostedSearchCardIsEmpty(card: HostedSearchCard): boolean {
+  return (
+    card.data.actions.length === 0 &&
+    card.data.query === undefined &&
+    card.data.sources.length === 0 &&
+    card.data.citations.length === 0
+  );
+}
+
+function hostedSearchCardIsTerminal(card: HostedSearchCard): boolean {
+  return (
+    card.data.phase === 'completed' ||
+    card.data.status === 'completed' ||
+    card.data.status === 'failed'
+  );
+}
+
+function hostedSearchEventHasOnlyLateData(event: HostedSearchEvent): boolean {
+  return (
+    event.action === undefined &&
+    hostedSearchEventQuery(event) === undefined &&
+    ((event.sources?.length ?? 0) > 0 || (event.citations?.length ?? 0) > 0)
+  );
+}
+
+/** Return evidence strength; a tie is intentionally treated as ambiguous. */
+function hostedSearchCardMatchScore(event: HostedSearchEvent, card: HostedSearchCard): number {
+  let score = 0;
+  if (
+    event.action !== undefined &&
+    card.data.actions.some((action) => hostedSearchActionKey(action) === hostedSearchActionKey(event.action!))
+  ) {
+    score += 100;
+  }
+  const query = hostedSearchEventQuery(event);
+  if (query !== undefined && card.data.query?.trim() === query) score += 40;
+  const cardUrls = hostedSearchCardUrls(card);
+  for (const url of hostedSearchEventUrls(event)) {
+    if (cardUrls.has(url)) score += 20;
+  }
+  return score;
+}
+
+function selectHostedSearchCard(
+  event: HostedSearchEvent,
+  candidates: readonly HostedSearchCard[],
+): HostedSearchCard | undefined {
+  if (candidates.length === 0) return undefined;
+  let bestScore = 0;
+  let best: HostedSearchCard | undefined;
+  let tied = false;
+  for (const candidate of candidates) {
+    const score = hostedSearchCardMatchScore(event, candidate);
+    if (score > bestScore) {
+      bestScore = score;
+      best = candidate;
+      tied = false;
+    } else if (score > 0 && score === bestScore) {
+      tied = true;
+    }
+  }
+  if (best !== undefined && !tied) return best;
+  const hasSignals =
+    event.action !== undefined ||
+    hostedSearchEventQuery(event) !== undefined ||
+    hostedSearchEventUrls(event).size > 0;
+  const callId = canonicalHostedSearchCallId(event.callId);
+  // The turn-level completion summary has no call id. When it is the only
+  // candidate, its query may be the only signal left after replay normalization
+  // removed the provider-owned action, so keep it on that card.
+  if (callId === undefined && event.phase === 'completed' && candidates.length === 1) {
+    return candidates[0];
+  }
+  // Late source/citation payloads can arrive after a provider has completed a
+  // call and often introduce the first URL evidence. Absorb them into the
+  // only unfinished candidate, or the only candidate even when it is terminal;
+  // with multiple equally plausible cards, keep the conservative new-card path.
+  if (hostedSearchEventHasOnlyLateData(event)) {
+    const unfinished = candidates.filter((candidate) => !hostedSearchCardIsTerminal(candidate));
+    if (unfinished.length === 1) return unfinished[0];
+    if (candidates.length === 1) return candidates[0];
+  }
+
+  // A data-less transition can safely follow a sole card. An explicit call id
+  // also makes a started event an identity update; without one it starts a new
+  // call rather than updating an old card.
+  if (
+    bestScore === 0 &&
+    !hasSignals &&
+    candidates.length === 1 &&
+    (event.phase !== 'started' || callId !== undefined)
+  ) {
+    return candidates[0];
+  }
+  return undefined;
 }
 
 export interface StreamingUIHost {
@@ -66,6 +216,10 @@ export class StreamingUIController {
   private _assistantDraft = '';
   private _thinkingDraft = '';
   private _streamingBlock: { component: StreamingPreviewComponent; entry: TranscriptEntry } | null = null;
+  private _hostedSearchCards = new Map<string, HostedSearchCard>();
+  private _hostedSearchTemporarySequence = new Map<string, number>();
+  private _assistantCitations: HostedSearchCitation[] = [];
+  private _assistantCitationSources: HostedSearchSource[] = [];
   private _activeThinkingComponent: ThinkingComponent | undefined = undefined;
   /** Thinking state for the spinner status row: `'thinking'` while streaming,
    *  a duration in ms after it ends, or `null` when idle. */
@@ -130,6 +284,140 @@ export class StreamingUIController {
 
   hasActiveTurn(): boolean {
     return this._currentTurnId !== undefined;
+  }
+
+  /** Merge one provider-owned hosted-search event into its dedicated card. */
+  handleHostedSearch(event: HostedSearchEvent): void {
+    const callId = canonicalHostedSearchCallId(event.callId);
+    const explicitKey = callId === undefined ? undefined : hostedSearchEventKey(event);
+    let card = explicitKey === undefined ? undefined : this._hostedSearchCards.get(explicitKey);
+    const groupKey = hostedSearchGroupKey(event.turnId, event.step);
+    const groupCards = [...this._hostedSearchCards.values()].filter(
+      (candidate) => candidate.data.turnId === String(event.turnId) && candidate.data.step === event.step,
+    );
+
+    if (card === undefined && callId !== undefined) {
+      card = selectHostedSearchCard(
+        event,
+        groupCards.filter((candidate) => candidate.data.callId === undefined),
+      );
+      if (card !== undefined && explicitKey !== undefined) {
+        for (const [key, candidate] of this._hostedSearchCards) {
+          if (candidate === card) {
+            this._hostedSearchCards.delete(key);
+            break;
+          }
+        }
+        this._hostedSearchCards.set(explicitKey, card);
+      }
+    }
+    if (card === undefined && callId === undefined) {
+      if (event.phase === 'action' && event.action !== undefined) {
+        const emptyCards = groupCards.filter(hostedSearchCardIsEmpty);
+        card = emptyCards.length === 1 ? emptyCards[0] : undefined;
+      } else {
+        card = selectHostedSearchCard(event, groupCards);
+      }
+    }
+
+    if (card === undefined) {
+      const identity =
+        explicitKey ??
+        `${groupKey}:temporary:${String(this._hostedSearchTemporarySequence.get(groupKey) ?? 0)}`;
+      if (explicitKey === undefined) {
+        this._hostedSearchTemporarySequence.set(
+          groupKey,
+          (this._hostedSearchTemporarySequence.get(groupKey) ?? 0) + 1,
+        );
+      }
+      const data = createHostedSearchTranscriptData(event, identity);
+      const entry: TranscriptEntry = {
+        id: nextTranscriptId(),
+        kind: 'status',
+        turnId: String(event.turnId),
+        renderMode: 'plain',
+        content: '',
+        hostedSearchData: data,
+      };
+      card = { data, entry };
+      this._hostedSearchCards.set(explicitKey ?? identity, card);
+      this.host.appendTranscriptEntry(entry);
+    } else {
+      mergeHostedSearchEvent(card.data, event);
+    }
+
+    for (const source of card.data.sources) {
+      upsertHostedSearchSource(this._assistantCitationSources, source);
+    }
+    for (const citation of card.data.citations) {
+      upsertHostedSearchCitation(this._assistantCitations, citation);
+    }
+    if (this._streamingBlock !== null) {
+      this._streamingBlock.entry.assistantCitations = this._assistantCitations;
+      this._streamingBlock.entry.assistantCitationSources = this._assistantCitationSources;
+    }
+    this.host.state.ui.requestRender();
+  }
+
+  /** Apply persisted URL annotations when replay exposes them separately. */
+  addAssistantCitations(citations: readonly HostedSearchCitation[]): void {
+    for (const citation of citations) {
+      if (!isValidHostedSearchCitation(citation)) continue;
+      if (!upsertHostedSearchCitation(this._assistantCitations, citation)) continue;
+      upsertHostedSearchSource(this._assistantCitationSources, {
+        url: citation.url,
+        title: citation.title,
+        cited: true,
+        citationText: citation.citationText,
+        snippet: citation.citationText,
+        snippetKind: 'citation',
+      });
+    }
+    if (this._streamingBlock !== null) {
+      this._streamingBlock.entry.assistantCitations = this._assistantCitations;
+      this._streamingBlock.entry.assistantCitationSources = this._assistantCitationSources;
+    }
+    this.host.state.ui.requestRender();
+  }
+
+  /** Drop citations that cannot be projected into the finished assistant text. */
+  sanitizeHostedSearchCitations(text: string): void {
+    const currentTurnId = this._currentTurnId;
+    const currentStep = this._currentStep;
+    if (currentTurnId === undefined) return;
+
+    const filteredAssistantCitations = filterHostedSearchCitations(text, this._assistantCitations);
+    this._assistantCitations = filteredAssistantCitations;
+    for (const card of this._hostedSearchCards.values()) {
+      if (card.data.turnId !== currentTurnId || card.data.step !== currentStep) continue;
+      const filtered = filterHostedSearchCitations(text, card.data.citations);
+      const changed =
+        filtered.length !== card.data.citations.length ||
+        filtered.some((citation, index) => citation !== card.data.citations[index]);
+      if (!changed) continue;
+      card.data.citations = filtered;
+      reorderHostedSearchSources(card.data);
+      card.data.version += 1;
+    }
+    if (this._streamingBlock !== null) {
+      this._streamingBlock.entry.assistantCitations = this._assistantCitations;
+      this._streamingBlock.entry.assistantCitationSources = this._assistantCitationSources;
+    }
+    this.host.state.ui.requestRender();
+  }
+
+  /** Start a fresh hosted-search citation projection for a new turn. */
+  resetHostedSearchForTurn(): void {
+    this._hostedSearchCards.clear();
+    this._hostedSearchTemporarySequence.clear();
+    this._assistantCitations = [];
+    this._assistantCitationSources = [];
+  }
+
+  /** Keep completed cards while starting a fresh citation projection per step. */
+  resetHostedSearchCitations(): void {
+    this._assistantCitations = [];
+    this._assistantCitationSources = [];
   }
 
   // ---------------------------------------------------------------------------
@@ -467,6 +755,7 @@ export class StreamingUIController {
     this._pendingReadGroup = null;
     this._currentTurnId = undefined;
     this._currentStep = 0;
+    this._hostedSearchCards.clear();
     this._streamingToolCallArguments.clear();
     this.pendingToolCallFlushIds.clear();
     this.host.state.previewContainer.clear();
@@ -588,6 +877,7 @@ export class StreamingUIController {
 
   finalizeAssistantStream(): void {
     this.flushNow();
+    this.sanitizeHostedSearchCitations(this._streamingBlock?.entry.content ?? '');
     if (this._streamingBlock !== null) {
       this.onStreamingTextEnd();
     }
@@ -691,6 +981,8 @@ export class StreamingUIController {
       renderMode: 'markdown' as const,
       content: '',
       modelText: true,
+      assistantCitations: this._assistantCitations,
+      assistantCitationSources: this._assistantCitationSources,
     };
     const component = new StreamingPreviewComponent();
     this._streamingBlock = { component, entry };

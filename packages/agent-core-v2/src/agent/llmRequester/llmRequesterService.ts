@@ -61,7 +61,7 @@ import {
   isRetryableGenerateError,
 } from '#/kosong/contract/errors';
 import { createUserMessage, type Message } from '#/kosong/contract/message';
-import { type ThinkingEffort } from '#/kosong/contract/provider';
+import { type HostedSearchMode, type ThinkingEffort } from '#/kosong/contract/provider';
 import { type Tool } from '#/kosong/contract/tool';
 import { emptyUsage, inputTotal, type TokenUsage } from '#/kosong/contract/usage';
 import { ILogService, type LogContext } from '#/_base/log/log';
@@ -410,7 +410,7 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
           ? request.logFields
           : { ...request.logFields, projection };
       this.warnAboutAnthropicThinkingEffort(request);
-      const wireTools = providerVisibleTools(input.tools);
+      const wireTools = providerVisibleTools(input.tools, request.model.webSearch);
       const toolSignatureArray = toolSignature(wireTools);
       const toolsHash = this.cachedFingerprint(JSON.stringify(toolSignatureArray));
       const logInput: LLMRequestLogInput = {
@@ -441,10 +441,14 @@ export class AgentLLMRequesterService implements IAgentLLMRequesterService {
         onRequestTrace(normalized);
       };
 
-      for await (const event of request.requester.request(input, signal, {
-        ...request.params,
-        onTraceId: setTraceId,
-      })) {
+      for await (const event of request.requester.request(
+        { ...input, tools: wireTools },
+        signal,
+        {
+          ...request.params,
+          onTraceId: setTraceId,
+        },
+      )) {
         switch (event.type) {
           case 'part':
             await onPart(event.part);
@@ -911,9 +915,14 @@ function requestKindForTelemetry(source: AgentLLMRequestSource | undefined): str
   return undefined;
 }
 
-export function providerVisibleTools(tools: readonly Tool[]): readonly Tool[] {
-  if (!tools.some((tool) => tool.deferred === true)) return tools;
-  return tools.filter((tool) => tool.deferred !== true);
+export function providerVisibleTools(
+  tools: readonly Tool[],
+  webSearch: HostedSearchMode | undefined = 'disabled',
+): readonly Tool[] {
+  const withoutOrdinarySearch =
+    webSearch === 'disabled' ? tools : tools.filter((tool) => tool.name !== 'WebSearch');
+  if (!withoutOrdinarySearch.some((tool) => tool.deferred === true)) return withoutOrdinarySearch;
+  return withoutOrdinarySearch.filter((tool) => tool.deferred !== true);
 }
 
 export function toolSignature(tools: readonly Tool[]): readonly LlmRequestToolSchema[] {

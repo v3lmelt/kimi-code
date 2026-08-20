@@ -7,8 +7,9 @@
  *
  *  - A ChatProvider is immutable after construction. The interface has no
  *    `with*` methods; every per-turn intent (prompt-cache key, sampling
- *    overrides, thinking effort/keep, completion-token budget) flows through
- *    `GenerateOptions` on each `generate` call instead of through morphs.
+ *    overrides, thinking effort/keep, hosted web-search mode, completion-token
+ *    budget) flows through `GenerateOptions` on each `generate` call instead of
+ *    through morphs.
  *  - `GenerateOptions` is the per-turn intent carrier. Each wire dialect
  *    decides how — or whether — to encode an intent (e.g. a cache key may
  *    become `prompt_cache_key`, `metadata.user_id`, or be silently dropped).
@@ -16,11 +17,20 @@
  * Pure types only — no other domain, no I/O, no SDKs.
  */
 
-import type { Message, StreamedMessagePart, VideoURLPart } from './message';
+import type {
+  HostedSearchCitation,
+  HostedSearchEvent,
+  Message,
+  StreamedMessagePart,
+  VideoURLPart,
+} from './message';
 import type { Tool } from './tool';
 import type { TokenUsage } from './usage';
 
 export type ThinkingEffort = 'off' | 'on' | (string & {});
+
+/** Hosted web-search policies supported by the OpenAI Responses wire. */
+export type HostedSearchMode = 'disabled' | 'cached' | 'indexed' | 'live';
 
 export type JsonSchemaObject = Record<string, unknown>;
 
@@ -55,6 +65,8 @@ export interface StreamedMessage {
   readonly finishReason: FinishReason | null;
   readonly rawFinishReason: string | null;
   readonly traceId?: string | null;
+  readonly annotations?: readonly HostedSearchCitation[];
+  readonly searchMetadata?: readonly HostedSearchEvent[];
 }
 
 export interface ProviderRequestAuth {
@@ -95,6 +107,8 @@ export interface GenerateOptions {
   cacheKey?: string;
   sampling?: SamplingOptions;
   thinking?: ThinkingRequestOptions;
+  /** Per-request hosted web-search policy; omitted means provider default. */
+  webSearch?: HostedSearchMode;
   maxCompletionTokens?: number;
   usedContextTokens?: number;
   maxContextTokens?: number;

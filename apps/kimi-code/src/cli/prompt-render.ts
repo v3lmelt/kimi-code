@@ -40,6 +40,20 @@ interface RetryingEventLike {
   readonly statusCode?: number;
 }
 
+interface HostedSearchEventLike {
+  readonly turnId: number;
+  readonly step: number;
+  readonly stepId?: string;
+  readonly eventId?: string;
+  readonly phase: 'started' | 'action' | 'source' | 'completed';
+  readonly callId?: string;
+  readonly query?: string;
+  readonly status?: string;
+  readonly action?: unknown;
+  readonly sources?: readonly unknown[];
+  readonly citations?: readonly unknown[];
+}
+
 export interface PromptOutput {
   readonly columns?: number | undefined;
   write(chunk: string): boolean;
@@ -60,6 +74,7 @@ export interface PromptTurnWriter {
   ): void;
   writeToolResult(toolCallId: string, output: unknown): void;
   writeRetrying(event: RetryingEventLike): void;
+  writeHostedSearch(event: HostedSearchEventLike): void;
   flushAssistant(): void;
   discardAssistant(): void;
   finish(): void;
@@ -98,6 +113,22 @@ interface PromptJsonRetryMetaMessage {
   status_code?: number;
 }
 
+interface PromptJsonHostedSearchMetaMessage {
+  role: 'meta';
+  type: 'hosted.search';
+  turn_id: number;
+  step: number;
+  step_id?: string;
+  event_id?: string;
+  phase: HostedSearchEventLike['phase'];
+  call_id?: string;
+  query?: string;
+  status?: string;
+  action?: unknown;
+  sources?: readonly unknown[];
+  citations?: readonly unknown[];
+}
+
 export class PromptTranscriptWriter implements PromptTurnWriter {
   private readonly assistantWriter: PromptBlockWriter;
   private readonly thinkingWriter: PromptBlockWriter;
@@ -133,6 +164,8 @@ export class PromptTranscriptWriter implements PromptTurnWriter {
   // text is discarded (handled by the caller). No human-readable retry line is
   // emitted, matching the prior behavior.
   writeRetrying(): void {}
+
+  writeHostedSearch(): void {}
 
   flushAssistant(): void {
     this.assistantWriter.finish();
@@ -224,6 +257,26 @@ export class PromptJsonWriter implements PromptTurnWriter {
     this.writeJsonLine(message);
   }
 
+  writeHostedSearch(event: HostedSearchEventLike): void {
+    this.flushAssistant();
+    const message: PromptJsonHostedSearchMetaMessage = {
+      role: 'meta',
+      type: 'hosted.search',
+      turn_id: event.turnId,
+      step: event.step,
+      step_id: event.stepId,
+      event_id: event.eventId,
+      phase: event.phase,
+      call_id: event.callId,
+      query: event.query,
+      status: event.status,
+      action: event.action,
+      sources: event.sources,
+      citations: event.citations,
+    };
+    this.writeJsonLine(message);
+  }
+
   flushAssistant(): void {
     if (this.assistantText.length === 0 && this.toolCalls.length === 0) return;
     const message: PromptJsonAssistantMessage = {
@@ -260,7 +313,11 @@ export class PromptJsonWriter implements PromptTurnWriter {
   }
 
   private writeJsonLine(
-    message: PromptJsonAssistantMessage | PromptJsonToolMessage | PromptJsonRetryMetaMessage,
+    message:
+      | PromptJsonAssistantMessage
+      | PromptJsonToolMessage
+      | PromptJsonRetryMetaMessage
+      | PromptJsonHostedSearchMetaMessage,
   ): void {
     this.stdout.write(`${JSON.stringify(message)}\n`);
   }

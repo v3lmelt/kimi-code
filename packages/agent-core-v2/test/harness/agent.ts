@@ -2752,6 +2752,8 @@ async function generateBackedResponse(
       finishReason: result.finishReason,
       rawFinishReason: result.rawFinishReason,
       traceId: result.traceId,
+      annotations: result.annotations ?? result.message.annotations,
+      searchMetadata: result.searchMetadata ?? result.message.searchMetadata,
     },
   );
 }
@@ -2804,7 +2806,13 @@ function createStreamedMessage(
   parts: readonly StreamedMessagePart[],
   meta: Pick<
     Awaited<ReturnType<GenerateFn>>,
-    'id' | 'usage' | 'finishReason' | 'rawFinishReason' | 'traceId'
+    | 'id'
+    | 'usage'
+    | 'finishReason'
+    | 'rawFinishReason'
+    | 'traceId'
+    | 'annotations'
+    | 'searchMetadata'
   >,
 ): StreamedMessage {
   return {
@@ -2813,6 +2821,8 @@ function createStreamedMessage(
     finishReason: meta.finishReason ?? null,
     rawFinishReason: meta.rawFinishReason ?? null,
     traceId: meta.traceId ?? null,
+    annotations: meta.annotations,
+    searchMetadata: meta.searchMetadata,
     async *[Symbol.asyncIterator]() {
       for (const part of parts) {
         yield structuredClone(part);

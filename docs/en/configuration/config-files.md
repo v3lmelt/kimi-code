@@ -125,7 +125,7 @@ Each entry in the `providers` table defines an API provider, keyed by a unique n
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `type` | `string` | Yes | Provider type: `kimi`, `anthropic`, `openai`, `openai_responses`, `google-genai`, `vertexai` |
+| `type` | `string` | Yes | Provider type: `kimi`, `anthropic`, `openai`, `openai_responses`, `openai-codex`, `google-genai`, `vertexai` |
 | `api_key` | `string` | No | API key, written in plain text in the config file |
 | `base_url` | `string` | No | API base URL |
 | `oauth` | `table` | No | OAuth credential reference (`storage` and `key` fields); injected automatically by the login flow — normally no need to write this by hand |
@@ -161,6 +161,33 @@ Each entry in the `models` table defines a model alias (the name used in `defaul
 | `display_name` | `string` | No | Name shown in the UI; falls back to `model` when unset |
 | `reasoning_key` | `string` | No | `openai` provider only. Override the field name used for reasoning content when the gateway returns it under a non-standard name; by default `reasoning_content`, `reasoning_details`, and `reasoning` are auto-detected |
 | `adaptive_thinking` | `boolean` | No | `anthropic` provider only. Force adaptive thinking on or off, overriding the version inference based on the model name. Omit to infer automatically (Claude ≥ 4.6 uses adaptive) |
+| `web_search` | `string` | No | Codex Hosted Search mode: `disabled` (default), `cached`, `indexed`, or `live`. Supported only when the provider is `openai-codex` and the model uses the OpenAI Responses transport (`openai_responses`) |
+
+### Codex Hosted Search
+
+Set `web_search` on a model alias backed by `openai-codex`:
+
+```toml
+[providers."codex"]
+type = "openai-codex"
+
+[models."codex/gpt-5"]
+provider = "codex"
+model = "gpt-5"
+max_context_size = 400000
+web_search = "indexed"
+```
+
+The modes control the provider's web access:
+
+- `disabled`: Do not add Hosted Search. This is the default.
+- `cached`: Allow cached search data; external web access is off.
+- `indexed`: Enable external and indexed web access.
+- `live`: Enable external web access without requesting indexed web access.
+
+The terminal UI renders Hosted Search activity in a search card. Numbered URL markers in the assistant response body match the card's source list. Source snippets can have mixed origins: cited sources show their citation text; uncited sources use the provider's snippet or a short page extract; sources that cannot provide either have no snippet.
+
+Hosted Search and the regular `WebSearch` tool are mutually exclusive for a model. When `web_search` is not `disabled`, the regular tool backed by `[services.moonshot_search]` is not exposed to that model. Set `web_search = "disabled"` to use the regular tool instead.
 
 When an alias contains `.`, use a quoted key:
 
@@ -186,7 +213,7 @@ max_context_size = 131072
 display_name = "Kimi for Coding (custom)"
 ```
 
-`[models."<alias>".overrides]` accepts ordinary model fields such as `max_context_size`, `max_input_size`, `max_output_size`, `capabilities`, `display_name`, `reasoning_key`, `adaptive_thinking`, `support_efforts`, `default_effort`, and `off_effort`. It does not accept identity / routing fields: `provider`, `model`, `protocol`, `beta_api`, and `base_url`.
+`[models."<alias>".overrides]` accepts ordinary model fields such as `max_context_size`, `max_input_size`, `max_output_size`, `capabilities`, `display_name`, `reasoning_key`, `adaptive_thinking`, `support_efforts`, `default_effort`, `off_effort`, and `web_search`. It does not accept identity / routing fields: `provider`, `model`, `protocol`, `beta_api`, and `base_url`.
 
 You can also switch models temporarily without touching the config file — by setting `KIMI_MODEL_*` environment variables, the CLI synthesizes a temporary provider in memory that does not persist after restart. See [Define a model from environment variables](./env-vars.md#define-a-model-from-environment-variables-kimi-model).
 

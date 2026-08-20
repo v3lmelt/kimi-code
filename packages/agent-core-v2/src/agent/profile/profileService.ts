@@ -4,8 +4,9 @@
  * Owns the active agent's model alias, thinking level, system prompt, and
  * active-tool set; reads the bound model's pure data through the App-scope
  * `IModelCatalog` and produces the dialect-free per-turn intent
- * (`resolveRequestParams`: cache key / sampling / thinking effort+keep —
- * wire encoding is each dialect's own hook), persists the profile binding
+ * (`resolveRequestParams`: cache key / sampling / thinking effort+keep /
+ * hosted web-search mode — wire encoding is each dialect's own hook), persists
+ * the profile binding
  * (`cwd` / `modelAlias` / `profileName` / resolved base `thinkingLevel` /
  * `systemPrompt` / injected AGENTS.md paths / `activeToolNames` / profile
  * `disallowedTools` / profile `subagents`) in the `wire` `ProfileModel` through
@@ -688,6 +689,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       maxOutputSize: model.maxOutputSize,
       alwaysThinking: model.alwaysThinking || undefined,
       thinkingLevel: this.resolveThinkingState(model).effective,
+      webSearch: model.webSearch ?? 'disabled',
       reservedContextSize: loopControl?.reservedContextSize,
       compactionTriggerRatio: loopControl?.compactionTriggerRatio,
     };
@@ -712,6 +714,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
         thinkingConfig?.keep,
         thinking.effective,
       ),
+      webSearch: model?.webSearch ?? 'disabled',
     };
   }
 
