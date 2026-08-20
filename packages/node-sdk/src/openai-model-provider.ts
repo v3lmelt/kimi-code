@@ -24,11 +24,21 @@ export interface OpenAIResponsesHarnessModel {
   readonly id: string;
   readonly maxContextTokens: number;
   readonly maxOutputTokens: number;
+  readonly chatgptContext?: OpenAIChatGPTContextProfile;
   readonly displayName?: string;
   readonly supportEfforts?: readonly string[];
   readonly defaultEffort?: string;
   /** Declare support for GPT-5.6-style explicit prompt cache breakpoints. */
   readonly supportsPromptCacheBreakpoints?: boolean;
+}
+
+export interface OpenAIChatGPTContextProfile {
+  /** Raw default input budget advertised by the Codex model catalog. */
+  readonly defaultInputTokens: number;
+  /** Largest input budget accepted by the Codex model catalog. */
+  readonly maxInputTokens: number;
+  /** Share of the default input budget exposed to the active conversation. */
+  readonly effectiveInputPercent: number;
 }
 
 export interface OpenAIResponsesPromptCacheOptions {
@@ -80,13 +90,19 @@ export interface ApplyOpenAICodexConfigResult {
 }
 
 const GPT_56_EFFORTS = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+const GPT_56_CHATGPT_CONTEXT = {
+  defaultInputTokens: 272_000,
+  maxInputTokens: 872_000,
+  effectiveInputPercent: 95,
+} as const;
 
 export const OPENAI_HARNESS_MODELS: readonly OpenAIResponsesHarnessModel[] = [
   {
     id: 'gpt-5.6-sol',
     displayName: 'GPT-5.6 Sol',
-    maxContextTokens: 272_000,
+    maxContextTokens: 1_050_000,
     maxOutputTokens: 128_000,
+    chatgptContext: GPT_56_CHATGPT_CONTEXT,
     supportEfforts: GPT_56_EFFORTS,
     defaultEffort: 'medium',
     supportsPromptCacheBreakpoints: true,
@@ -94,8 +110,9 @@ export const OPENAI_HARNESS_MODELS: readonly OpenAIResponsesHarnessModel[] = [
   {
     id: 'gpt-5.6-terra',
     displayName: 'GPT-5.6 Terra',
-    maxContextTokens: 272_000,
+    maxContextTokens: 1_050_000,
     maxOutputTokens: 128_000,
+    chatgptContext: GPT_56_CHATGPT_CONTEXT,
     supportEfforts: GPT_56_EFFORTS,
     defaultEffort: 'medium',
     supportsPromptCacheBreakpoints: true,
@@ -103,8 +120,9 @@ export const OPENAI_HARNESS_MODELS: readonly OpenAIResponsesHarnessModel[] = [
   {
     id: 'gpt-5.6-luna',
     displayName: 'GPT-5.6 Luna',
-    maxContextTokens: 272_000,
+    maxContextTokens: 1_050_000,
     maxOutputTokens: 128_000,
+    chatgptContext: GPT_56_CHATGPT_CONTEXT,
     supportEfforts: GPT_56_EFFORTS,
     defaultEffort: 'medium',
     supportsPromptCacheBreakpoints: true,
@@ -142,10 +160,12 @@ export function applyOpenAICodexConfig(
     if (model.provider === OPENAI_CODEX_PROVIDER_NAME) delete models[alias];
   }
   for (const model of OPENAI_HARNESS_MODELS) {
+    const capability = capabilityFor(model, 'chatgpt');
     models[`${OPENAI_CODEX_PROVIDER_NAME}/${model.id}`] = {
       provider: OPENAI_CODEX_PROVIDER_NAME,
       model: model.id,
-      maxContextSize: Math.min(model.maxContextTokens, 1_000_000),
+      maxContextSize: capability.max_context_tokens,
+      maxInputSize: capability.max_input_tokens,
       maxOutputSize: model.maxOutputTokens,
       capabilities: ['image_in', 'thinking', 'tool_use'],
       displayName: model.displayName,
@@ -381,16 +401,29 @@ function capabilityFor(
   model: OpenAIResponsesHarnessModel,
   authentication: 'api-key' | 'chatgpt',
 ): ModelCapability {
+  const chatgptContext = authentication === 'chatgpt' ? model.chatgptContext : undefined;
+  const maxContextTokens =
+    chatgptContext === undefined
+      ? Math.min(model.maxContextTokens, 1_000_000)
+      : Math.min(
+          model.maxContextTokens,
+          chatgptContext.maxInputTokens + model.maxOutputTokens,
+        );
+  const maxInputTokens =
+    chatgptContext === undefined
+      ? undefined
+      : Math.floor(
+          (chatgptContext.defaultInputTokens * chatgptContext.effectiveInputPercent) / 100,
+        );
+
   return {
     image_in: true,
     video_in: false,
     audio_in: false,
     thinking: true,
     tool_use: true,
-    max_context_tokens:
-      authentication === 'chatgpt'
-        ? Math.min(model.maxContextTokens, 1_000_000)
-        : model.maxContextTokens,
+    max_context_tokens: authentication === 'chatgpt' ? maxContextTokens : model.maxContextTokens,
+    max_input_tokens: authentication === 'chatgpt' ? maxInputTokens : undefined,
   };
 }
 

@@ -1,3 +1,8 @@
+// Scenarios: OAuth error mapping and OpenAI Responses model provisioning.
+// Responsibilities: expose stable auth failures and authentication-specific model limits.
+// Wiring: real providers with only token and remote request boundaries stubbed.
+// Run: pnpm exec vitest run packages/node-sdk/test/kimi-code-model-provider.test.ts
+
 import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -93,6 +98,48 @@ describe('KimiForCodingProvider OAuth error mapping', () => {
 });
 
 describe('OpenAIResponsesModelProvider', () => {
+  it('publishes the Codex context profile for every built-in GPT-5.6 model', () => {
+    expect(
+      OPENAI_HARNESS_MODELS.map((model) => ({
+        id: model.id,
+        maxContextTokens: model.maxContextTokens,
+        maxOutputTokens: model.maxOutputTokens,
+        chatgptContext: model.chatgptContext,
+      })),
+    ).toEqual([
+      {
+        id: 'gpt-5.6-sol',
+        maxContextTokens: 1_050_000,
+        maxOutputTokens: 128_000,
+        chatgptContext: {
+          defaultInputTokens: 272_000,
+          maxInputTokens: 872_000,
+          effectiveInputPercent: 95,
+        },
+      },
+      {
+        id: 'gpt-5.6-terra',
+        maxContextTokens: 1_050_000,
+        maxOutputTokens: 128_000,
+        chatgptContext: {
+          defaultInputTokens: 272_000,
+          maxInputTokens: 872_000,
+          effectiveInputPercent: 95,
+        },
+      },
+      {
+        id: 'gpt-5.6-luna',
+        maxContextTokens: 1_050_000,
+        maxOutputTokens: 128_000,
+        chatgptContext: {
+          defaultInputTokens: 272_000,
+          maxInputTokens: 872_000,
+          effectiveInputPercent: 95,
+        },
+      },
+    ]);
+  });
+
   it('writes a persistent OpenAI Codex provider and built-in model aliases', () => {
     const config = {
       providers: {},
@@ -122,9 +169,27 @@ describe('OpenAIResponsesModelProvider', () => {
         },
       },
       models: {
-        'openai-codex/gpt-5.6-sol': { provider: 'openai-codex', model: 'gpt-5.6-sol' },
-        'openai-codex/gpt-5.6-terra': { provider: 'openai-codex', model: 'gpt-5.6-terra' },
-        'openai-codex/gpt-5.6-luna': { provider: 'openai-codex', model: 'gpt-5.6-luna' },
+        'openai-codex/gpt-5.6-sol': {
+          provider: 'openai-codex',
+          model: 'gpt-5.6-sol',
+          maxContextSize: 1_000_000,
+          maxInputSize: 258_400,
+          maxOutputSize: 128_000,
+        },
+        'openai-codex/gpt-5.6-terra': {
+          provider: 'openai-codex',
+          model: 'gpt-5.6-terra',
+          maxContextSize: 1_000_000,
+          maxInputSize: 258_400,
+          maxOutputSize: 128_000,
+        },
+        'openai-codex/gpt-5.6-luna': {
+          provider: 'openai-codex',
+          model: 'gpt-5.6-luna',
+          maxContextSize: 1_000_000,
+          maxInputSize: 258_400,
+          maxOutputSize: 128_000,
+        },
       },
     });
   });
@@ -160,7 +225,8 @@ describe('OpenAIResponsesModelProvider', () => {
         image_in: true,
         thinking: true,
         tool_use: true,
-        max_context_tokens: 272_000,
+        max_context_tokens: 1_050_000,
+        max_input_tokens: undefined,
       },
       supportEfforts: ['off', 'low', 'medium', 'high', 'xhigh', 'max'],
       defaultEffort: 'medium',
@@ -196,7 +262,10 @@ describe('OpenAIResponsesModelProvider', () => {
         codex: { responsesLite: true },
         responsesWebSocket: true,
       },
-      modelCapabilities: { max_context_tokens: 272_000 },
+      modelCapabilities: {
+        max_context_tokens: 1_000_000,
+        max_input_tokens: 258_400,
+      },
       supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
     });
   });
