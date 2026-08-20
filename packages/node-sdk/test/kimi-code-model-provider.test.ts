@@ -133,6 +133,8 @@ describe('OpenAIResponsesModelProvider', () => {
     const provider = new OpenAIResponsesModelProvider({
       apiKey: 'YOUR_API_KEY',
       promptCacheKey: 'session-1',
+      promptCache: { mode: 'explicit', ttl: '30m' },
+      nativeToolSearch: true,
     });
 
     expect(OPENAI_HARNESS_MODELS.map((model) => model.id)).toEqual([
@@ -149,6 +151,9 @@ describe('OpenAIResponsesModelProvider', () => {
         apiKey: 'YOUR_API_KEY',
         maxOutputTokens: 128_000,
         offEffort: 'none',
+        nativeToolSearch: true,
+        promptCache: { mode: 'explicit', ttl: '30m' },
+        supportsPromptCacheBreakpoints: true,
         generationKwargs: { prompt_cache_key: 'session-1' },
       },
       modelCapabilities: {
@@ -169,6 +174,7 @@ describe('OpenAIResponsesModelProvider', () => {
       authentication: 'chatgpt',
       promptCacheKey: 'session-1',
       clientVersion: '1.2.3',
+      responsesWebSocket: true,
     });
 
     expect(provider.resolveProviderConfig('gpt-5.6-sol')).toMatchObject({
@@ -185,13 +191,38 @@ describe('OpenAIResponsesModelProvider', () => {
           'User-Agent': 'kimi-code/1.2.3',
           conversation_id: 'session-1',
           session_id: 'session-1',
-          'x-client-request-id': 'session-1',
           'x-openai-internal-codex-responses-lite': 'true',
         },
         codex: { responsesLite: true },
+        responsesWebSocket: true,
       },
       modelCapabilities: { max_context_tokens: 272_000 },
       supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    });
+  });
+
+  it('scopes ChatGPT cache and thread identities per agent', () => {
+    const provider = new OpenAIResponsesModelProvider({
+      authentication: 'chatgpt',
+      promptCacheKey: 'session-1',
+    });
+
+    const main = provider.forAgent('main').resolveProviderConfig('gpt-5.6-sol');
+    const child = provider.forAgent('agent-3').resolveProviderConfig('gpt-5.6-sol');
+
+    expect(main.provider).toMatchObject({
+      generationKwargs: { prompt_cache_key: 'session-1' },
+      defaultHeaders: {
+        conversation_id: 'session-1',
+        session_id: 'session-1:main',
+      },
+    });
+    expect(child.provider).toMatchObject({
+      generationKwargs: { prompt_cache_key: 'session-1:agent-3' },
+      defaultHeaders: {
+        conversation_id: 'session-1',
+        session_id: 'session-1:agent-3',
+      },
     });
   });
 
@@ -242,6 +273,34 @@ describe('OpenAIResponsesModelProvider', () => {
     });
 
     expect(provider.defaultModel).toBe('gpt-example');
+  });
+
+  it('requires custom models to declare support for explicit cache breakpoints', () => {
+    const provider = new OpenAIResponsesModelProvider({
+      models: [{ id: 'gpt-4.1', maxContextTokens: 32_000, maxOutputTokens: 4_000 }],
+      promptCache: {},
+    });
+
+    expect(() => provider.resolveProviderConfig('gpt-4.1')).toThrow(/does not declare support/);
+  });
+
+  it('accepts explicit cache capability declarations on custom model aliases', () => {
+    const provider = new OpenAIResponsesModelProvider({
+      models: [
+        {
+          id: 'gateway.gpt-cache',
+          maxContextTokens: 32_000,
+          maxOutputTokens: 4_000,
+          supportsPromptCacheBreakpoints: true,
+        },
+      ],
+      promptCache: {},
+    });
+
+    expect(provider.resolveProviderConfig('gateway.gpt-cache').provider).toMatchObject({
+      promptCache: {},
+      supportsPromptCacheBreakpoints: true,
+    });
   });
 
   it('rejects an unregistered default model before a session starts', () => {

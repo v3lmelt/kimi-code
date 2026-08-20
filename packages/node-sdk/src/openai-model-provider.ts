@@ -5,6 +5,7 @@ import {
   type KimiConfig,
   type Logger,
   type ModelProvider,
+  promptCacheKeyForAgent,
   type ResolvedRuntimeProvider,
 } from '@moonshot-ai/agent-core';
 import {
@@ -26,6 +27,15 @@ export interface OpenAIResponsesHarnessModel {
   readonly displayName?: string;
   readonly supportEfforts?: readonly string[];
   readonly defaultEffort?: string;
+  /** Declare support for GPT-5.6-style explicit prompt cache breakpoints. */
+  readonly supportsPromptCacheBreakpoints?: boolean;
+}
+
+export interface OpenAIResponsesPromptCacheOptions {
+  /** Defaults to explicit-only caching to avoid writes for changing user input. */
+  readonly mode?: 'implicit' | 'explicit';
+  /** The Responses API currently supports only a 30-minute exact TTL. */
+  readonly ttl?: '30m';
 }
 
 export interface OpenAIResponsesModelProviderOptions {
@@ -40,12 +50,21 @@ export interface OpenAIResponsesModelProviderOptions {
   readonly defaultHeaders?: Record<string, string>;
   /** Defaults to the harness session id. Set an explicit value to share cache affinity. */
   readonly promptCacheKey?: string;
+  /**
+   * Cache the stable system-instruction prefix on GPT-5.6 models. Defaults to
+   * explicit-only mode with a 30-minute TTL when supplied.
+   */
+  readonly promptCache?: OpenAIResponsesPromptCacheOptions;
   /** Token source used by ChatGPT authentication. The harness supplies this automatically. */
   readonly tokenProvider?: BearerTokenProvider;
   readonly originator?: string;
   readonly clientVersion?: string;
   /** Defaults to the Responses Lite request shape used by current Codex models. */
   readonly codexResponsesLite?: boolean;
+  /** Enable hosted Responses tool search for tools marked as deferred. */
+  readonly nativeToolSearch?: boolean;
+  /** Enable incremental continuation over the Responses WebSocket. */
+  readonly responsesWebSocket?: boolean;
 }
 
 export interface ApplyOpenAICodexConfigOptions {
@@ -70,6 +89,7 @@ export const OPENAI_HARNESS_MODELS: readonly OpenAIResponsesHarnessModel[] = [
     maxOutputTokens: 128_000,
     supportEfforts: GPT_56_EFFORTS,
     defaultEffort: 'medium',
+    supportsPromptCacheBreakpoints: true,
   },
   {
     id: 'gpt-5.6-terra',
@@ -78,6 +98,7 @@ export const OPENAI_HARNESS_MODELS: readonly OpenAIResponsesHarnessModel[] = [
     maxOutputTokens: 128_000,
     supportEfforts: GPT_56_EFFORTS,
     defaultEffort: 'medium',
+    supportsPromptCacheBreakpoints: true,
   },
   {
     id: 'gpt-5.6-luna',
@@ -86,6 +107,7 @@ export const OPENAI_HARNESS_MODELS: readonly OpenAIResponsesHarnessModel[] = [
     maxOutputTokens: 128_000,
     supportEfforts: GPT_56_EFFORTS,
     defaultEffort: 'medium',
+    supportsPromptCacheBreakpoints: true,
   },
 ];
 
@@ -148,12 +170,16 @@ export class OpenAIResponsesModelProvider implements ModelProvider {
 
   private readonly apiKey: string | undefined;
   private readonly baseUrl: string | undefined;
-  private readonly defaultHeaders: Record<string, string> | undefined;
-  private readonly promptCacheKey: string | undefined;
+  private defaultHeaders: Record<string, string> | undefined;
+  private promptCacheKey: string | undefined;
+  private readonly promptCacheSessionId: string | undefined;
   private readonly models: ReadonlyMap<string, OpenAIResponsesHarnessModel>;
   private readonly authentication: 'api-key' | 'chatgpt';
   private readonly tokenProvider: BearerTokenProvider | undefined;
   private readonly codexResponsesLite: boolean;
+  private readonly nativeToolSearch: boolean;
+  private readonly responsesWebSocket: boolean;
+  private readonly promptCache: OpenAIResponsesPromptCacheOptions | undefined;
 
   constructor(options: OpenAIResponsesModelProviderOptions = {}) {
     const models = options.models ?? OPENAI_HARNESS_MODELS;
@@ -167,7 +193,11 @@ export class OpenAIResponsesModelProvider implements ModelProvider {
     this.models = new Map(models.map((model) => [model.id, model]));
     this.defaultModel = options.defaultModel ?? models[0]?.id ?? DEFAULT_OPENAI_MODEL;
     this.promptCacheKey = normalizeOptionalString(options.promptCacheKey);
+    this.promptCacheSessionId = this.promptCacheKey;
     this.codexResponsesLite = options.codexResponsesLite ?? true;
+    this.nativeToolSearch = options.nativeToolSearch === true;
+    this.responsesWebSocket = options.responsesWebSocket === true;
+    this.promptCache = options.promptCache === undefined ? undefined : { ...options.promptCache };
     this.apiKey = this.authentication === 'api-key' ? options.apiKey : undefined;
     this.baseUrl =
       this.authentication === 'chatgpt'
@@ -193,12 +223,37 @@ export class OpenAIResponsesModelProvider implements ModelProvider {
     }
   }
 
+  forAgent(agentId: string): ModelProvider {
+    const sessionCacheKey = this.promptCacheSessionId;
+    if (sessionCacheKey === undefined) return this;
+    const clone = Object.assign(
+      Object.create(Object.getPrototypeOf(this) as object) as OpenAIResponsesModelProvider,
+      this,
+    );
+    clone.promptCacheKey = promptCacheKeyForAgent(sessionCacheKey, agentId);
+    if (this.authentication === 'chatgpt') {
+      clone.defaultHeaders = {
+        ...this.defaultHeaders,
+        conversation_id: sessionCacheKey,
+        session_id: `${sessionCacheKey}:${agentId}`,
+      };
+      delete clone.defaultHeaders['x-client-request-id'];
+    }
+    return clone;
+  }
+
   resolveProviderConfig(model: string): ResolvedRuntimeProvider {
     const definition = this.models.get(model);
     if (definition === undefined) {
       throw new KimiError(
         ErrorCodes.CONFIG_INVALID,
         `OpenAI model "${model}" is not registered in the harness model list.`,
+      );
+    }
+    if (this.promptCache !== undefined && definition.supportsPromptCacheBreakpoints !== true) {
+      throw new KimiError(
+        ErrorCodes.CONFIG_INVALID,
+        `OpenAI model "${model}" does not declare support for promptCache breakpoints.`,
       );
     }
 
@@ -214,6 +269,13 @@ export class OpenAIResponsesModelProvider implements ModelProvider {
         this.authentication === 'chatgpt'
           ? { responsesLite: this.codexResponsesLite }
           : undefined,
+      responsesWebSocket:
+        this.authentication === 'chatgpt' ? this.responsesWebSocket || undefined : undefined,
+      nativeToolSearch:
+        this.authentication === 'api-key' ? this.nativeToolSearch || undefined : undefined,
+      promptCache: this.promptCache,
+      supportsPromptCacheBreakpoints:
+        this.promptCache === undefined ? undefined : definition.supportsPromptCacheBreakpoints,
       generationKwargs:
         this.promptCacheKey === undefined
           ? undefined
@@ -305,7 +367,6 @@ function createOpenAICodexHeaders(options: {
   if (options.promptCacheKey !== undefined) {
     headers['conversation_id'] = options.promptCacheKey;
     headers['session_id'] = options.promptCacheKey;
-    headers['x-client-request-id'] = options.promptCacheKey;
   }
   if (options.accountId !== undefined) {
     headers['chatgpt-account-id'] = options.accountId;

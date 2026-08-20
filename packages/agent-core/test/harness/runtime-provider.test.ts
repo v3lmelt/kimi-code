@@ -14,11 +14,13 @@ function resolveRuntimeProvider(input: {
   readonly model?: string;
   readonly kimiRequestHeaders?: Record<string, string>;
   readonly promptCacheKey?: string;
+  readonly responsesWebSocket?: boolean;
 }): ReturnType<ProviderManager['resolveProviderConfig']> {
   const manager = new ProviderManager({
     config: input.config,
     kimiRequestHeaders: input.kimiRequestHeaders,
     promptCacheKey: input.promptCacheKey,
+    responsesWebSocket: input.responsesWebSocket,
   });
   const model = input.model ?? input.config.defaultModel;
   if (model === undefined) {
@@ -891,6 +893,7 @@ describe('resolveRuntimeProvider customHeaders propagation', () => {
   it('maps openai-codex to Responses Lite with session headers', () => {
     const resolved = resolveRuntimeProvider({
       promptCacheKey: 'session-test',
+      responsesWebSocket: true,
       config: {
         defaultModel: 'codex',
         providers: {
@@ -913,10 +916,10 @@ describe('resolveRuntimeProvider customHeaders propagation', () => {
     expect(resolved.provider).toMatchObject({
       type: 'openai_responses',
       codex: { responsesLite: true },
+      responsesWebSocket: true,
       defaultHeaders: {
         conversation_id: 'session-test',
         session_id: 'session-test',
-        'x-client-request-id': 'session-test',
       },
     });
   });
@@ -1000,6 +1003,47 @@ describe('ProviderManager prompt cache key', () => {
         },
       });
     }
+  });
+
+  it('gives each Codex agent a stable cache key and thread identity', () => {
+    const manager = new ProviderManager({
+      promptCacheKey: 'session-test',
+      config: {
+        defaultModel: 'codex',
+        providers: {
+          codex: {
+            type: 'openai-codex',
+            apiKey: 'YOUR_API_KEY',
+            baseUrl: 'https://chatgpt.com/backend-api/codex',
+          },
+        },
+        models: {
+          codex: {
+            provider: 'codex',
+            model: 'gpt-5.6-sol',
+            maxContextSize: 1_000_000,
+          },
+        },
+      },
+    });
+
+    const main = manager.forAgent('main').resolveProviderConfig('codex');
+    const child = manager.forAgent('agent-7').resolveProviderConfig('codex');
+
+    expect(main.provider).toMatchObject({
+      generationKwargs: { prompt_cache_key: 'session-test' },
+      defaultHeaders: {
+        conversation_id: 'session-test',
+        session_id: 'session-test:main',
+      },
+    });
+    expect(child.provider).toMatchObject({
+      generationKwargs: { prompt_cache_key: 'session-test:agent-7' },
+      defaultHeaders: {
+        conversation_id: 'session-test',
+        session_id: 'session-test:agent-7',
+      },
+    });
   });
 
   it('reads the current config when constructed with a function', () => {

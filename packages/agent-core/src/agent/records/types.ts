@@ -209,6 +209,19 @@ export interface AgentRecordEvents {
     systemPrompt?: string;
     toolsHash: string;
     messageCount: number;
+    /** Hash of the logical cacheable request prefix sent to OpenAI Responses. */
+    cachePrefixHash?: string;
+    /** Number of leading messages shared with the preceding Responses request. */
+    cachePrefixMatchedMessages?: number;
+    /** First reason the cacheable prefix differs from the preceding request. */
+    cachePrefixChange?:
+      | 'initial'
+      | 'system-prompt'
+      | 'tools'
+      | 'message'
+      | 'append'
+      | 'truncated'
+      | 'unchanged';
     turnStep?: string;
     attempt?: string;
     /** Set when this request is a fallback resend (strict rebuild,

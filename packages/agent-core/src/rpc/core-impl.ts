@@ -1339,6 +1339,7 @@ export class KimiCore implements PromisableMethods<CoreAPI> {
       kimiRequestHeaders: this.kimiRequestHeaders,
       resolveOAuthTokenProvider: this.resolveOAuthTokenProvider,
       promptCacheKey: sessionId,
+      responsesWebSocket: this.experimentalFlags.enabled('responses-websocket'),
     });
   }
 

@@ -246,6 +246,12 @@ export interface ChatProvider {
    */
   readonly maxCompletionTokens?: number;
   /**
+   * Whether deferred tool declarations must reach this provider so it can use
+   * a native discovery protocol. Providers without this capability continue
+   * to receive only eagerly disclosed tools.
+   */
+  readonly preservesDeferredTools?: boolean;
+  /**
    * Send a conversation to the LLM and return a streamed response.
    *
    * @param systemPrompt - System-level instruction prepended to the request.

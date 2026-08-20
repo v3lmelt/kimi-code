@@ -32,6 +32,7 @@ import type {
 import type { Tool } from '#/tool';
 import type { TokenUsage } from '#/usage';
 import OpenAI from 'openai';
+import { ResponsesWS } from 'openai/resources/responses/ws';
 
 import { usesOpenAIResponsesDeveloperRole } from './capability-registry';
 import {
@@ -507,11 +508,48 @@ export interface OpenAIResponsesOptions {
    * `withGenerationKwargs` morph layers on top of both.
    */
   generationKwargs?: OpenAIResponsesGenerationKwargs | undefined;
+  /** Use the Responses API hosted tool search for deferred function tools. */
+  nativeToolSearch?: boolean | undefined;
+  /** Reuse a Responses WebSocket and send strict input deltas when possible. */
+  responsesWebSocket?: boolean | undefined;
+  /**
+   * Add a stable explicit cache breakpoint after the system instructions.
+   * Intended for GPT-5.6 and later models. The API currently supports a
+   * single 30-minute TTL.
+   */
+  promptCache?: OpenAIResponsesPromptCacheOptions;
+  /** Explicit model capability required when promptCache is configured. */
+  supportsPromptCacheBreakpoints?: boolean;
+  /** Test seam for the Responses WebSocket transport. */
+  responsesWebSocketFactory?: OpenAIResponsesWebSocketFactory | undefined;
   /** ChatGPT Codex wire adjustments layered on top of the Responses API. */
   codex?: {
     readonly responsesLite?: boolean;
   };
 }
+
+export interface OpenAIResponsesPromptCacheOptions {
+  /** Defaults to explicit-only caching to avoid writes for changing user input. */
+  readonly mode?: 'implicit' | 'explicit';
+  /** The Responses API currently supports only a 30-minute exact TTL. */
+  readonly ttl?: '30m';
+}
+
+export type OpenAIResponsesWebSocketMessage =
+  | { readonly type: 'connecting' | 'open' | 'closing' | 'close' }
+  | { readonly type: 'message'; readonly message: Record<string, unknown> }
+  | { readonly type: 'error'; readonly error: unknown };
+
+export interface OpenAIResponsesWebSocket {
+  send(event: Record<string, unknown>): void;
+  close(props?: { readonly code: number; readonly reason: string }): void;
+  stream(): AsyncIterableIterator<OpenAIResponsesWebSocketMessage>;
+}
+
+export type OpenAIResponsesWebSocketFactory = (
+  client: OpenAI,
+  headers: Record<string, string> | undefined,
+) => OpenAIResponsesWebSocket;
 
 export interface OpenAIResponsesGenerationKwargs {
   max_output_tokens?: number | undefined;
@@ -530,6 +568,7 @@ interface ResponseToolParam {
   description: string;
   parameters: Record<string, unknown>;
   strict: boolean;
+  defer_loading?: true;
 }
 
 function responseFormatToResponsesText(format: ResponseFormat): Record<string, unknown> {
@@ -761,14 +800,16 @@ function convertMessage(
   return result;
 }
 
-function convertTool(tool: Tool): ResponseToolParam {
-  return {
+function convertTool(tool: Tool, nativeToolSearch: boolean): ResponseToolParam {
+  const converted: ResponseToolParam = {
     type: 'function',
     name: tool.name,
     description: tool.description,
     parameters: tool.parameters,
     strict: false,
   };
+  if (nativeToolSearch && tool.deferred === true) converted.defer_loading = true;
+  return converted;
 }
 
 function hostedSearchTool(mode: HostedSearchMode): RawObject | undefined {
@@ -987,11 +1028,12 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
     const outputTokens = readNumberField(usage, 'output_tokens') ?? 0;
     const details = readObjectField(usage, 'input_tokens_details');
     const cached = details ? (readNumberField(details, 'cached_tokens') ?? 0) : 0;
+    const cacheWrite = details ? (readNumberField(details, 'cache_write_tokens') ?? 0) : 0;
     this._usage = {
-      inputOther: inputTokens - cached,
+      inputOther: Math.max(0, inputTokens - cached - cacheWrite),
       output: outputTokens,
       inputCacheRead: cached,
-      inputCacheCreation: 0,
+      inputCacheCreation: cacheWrite,
     };
   }
 
@@ -1392,6 +1434,35 @@ function shapeOpenAICodexRequest(body: Record<string, unknown>, responsesLite: b
   }
 }
 
+function configureOpenAIResponsesPromptCache(
+  body: Record<string, unknown>,
+  systemPrompt: string,
+  promptCache: OpenAIResponsesPromptCacheOptions,
+): void {
+  body['prompt_cache_options'] = {
+    mode: promptCache.mode ?? 'explicit',
+    ttl: promptCache.ttl ?? '30m',
+  };
+  if (systemPrompt.length === 0) return;
+
+  const input = Array.isArray(body['input']) ? body['input'] : [];
+  body['input'] = [
+    {
+      type: 'message',
+      role: 'developer',
+      content: [
+        {
+          type: 'input_text',
+          text: systemPrompt,
+          prompt_cache_breakpoint: { mode: 'explicit' },
+        },
+      ],
+    },
+    ...input,
+  ];
+  delete body['instructions'];
+}
+
 function stripOpenAICodexImageDetails(input: unknown[]): void {
   for (const item of input) {
     const itemRecord = asRawObject(item);
@@ -1408,8 +1479,262 @@ function stripOpenAICodexImageDetails(input: unknown[]): void {
   }
 }
 
+interface CompletedResponsesRequest {
+  readonly request: RawObject;
+  readonly responseId: string;
+  readonly outputItems: readonly unknown[];
+}
+
+function responseRequestProperties(request: RawObject): string {
+  const properties = { ...request };
+  delete properties['input'];
+  delete properties['previous_response_id'];
+  delete properties['client_metadata'];
+  delete properties['type'];
+  return JSON.stringify(properties);
+}
+
+function normalizeResponseOutputForReplay(value: unknown): unknown | undefined {
+  const item = asRawObject(value);
+  if (item === null) return undefined;
+  switch (item['type']) {
+    case 'message': {
+      const content = readObjectArrayField(item, 'content')?.map((part) => {
+        if (part['type'] !== 'output_text') return part;
+        return {
+          type: 'output_text',
+          text: readStringField(part, 'text') ?? '',
+          annotations: Array.isArray(part['annotations']) ? part['annotations'] : [],
+        };
+      });
+      return {
+        content: content ?? [],
+        role: readStringField(item, 'role') ?? 'assistant',
+        type: 'message',
+      };
+    }
+    case 'function_call':
+      return {
+        arguments: readStringField(item, 'arguments') ?? '{}',
+        call_id: readStringField(item, 'call_id') ?? '',
+        name: readStringField(item, 'name') ?? '',
+        type: 'function_call',
+      };
+    case 'reasoning':
+      return {
+        summary: readObjectArrayField(item, 'summary') ?? [],
+        type: 'reasoning',
+        encrypted_content: readStringField(item, 'encrypted_content'),
+      };
+    default:
+      return undefined;
+  }
+}
+
+function prepareIncrementalResponsesEvent(
+  request: RawObject,
+  previous: CompletedResponsesRequest | undefined,
+): { readonly event: RawObject; readonly incremental: boolean } {
+  const fullEvent = { ...request, type: 'response.create' };
+  if (previous === undefined) return { event: fullEvent, incremental: false };
+  if (responseRequestProperties(previous.request) !== responseRequestProperties(request)) {
+    return { event: fullEvent, incremental: false };
+  }
+
+  const previousInput = Array.isArray(previous.request['input']) ? previous.request['input'] : [];
+  const currentInput = Array.isArray(request['input']) ? request['input'] : [];
+  const baseline = [...previousInput, ...previous.outputItems];
+  if (currentInput.length <= baseline.length) return { event: fullEvent, incremental: false };
+  for (let index = 0; index < baseline.length; index += 1) {
+    if (JSON.stringify(currentInput[index]) !== JSON.stringify(baseline[index])) {
+      return { event: fullEvent, incremental: false };
+    }
+  }
+  return {
+    event: {
+      ...fullEvent,
+      input: currentInput.slice(baseline.length),
+      previous_response_id: previous.responseId,
+    },
+    incremental: true,
+  };
+}
+
+function webSocketErrorCode(error: unknown): string | undefined {
+  const value = asRawObject(error);
+  const direct = value === null ? undefined : readStringField(value, 'code');
+  if (direct !== undefined) return direct;
+  const event = value === null ? undefined : readObjectField(value, 'error');
+  return event === undefined ? undefined : readStringField(event, 'code');
+}
+
+class OpenAIResponsesWebSocketSession {
+  private connection: OpenAIResponsesWebSocket | undefined;
+  private iterator: AsyncIterableIterator<OpenAIResponsesWebSocketMessage> | undefined;
+  private connectionKey: string | undefined;
+  private active = false;
+  private previous: CompletedResponsesRequest | undefined;
+
+  constructor(private readonly factory: OpenAIResponsesWebSocketFactory) {}
+
+  async request(
+    client: OpenAI,
+    headers: Record<string, string> | undefined,
+    request: RawObject,
+    signal: AbortSignal | undefined,
+  ): Promise<AsyncIterable<RawObject> | undefined> {
+    if (this.active) return undefined;
+    this.active = true;
+    const key = JSON.stringify([client.apiKey, headers]);
+    try {
+      await this.ensureConnection(client, headers, key);
+      const connection = this.connection;
+      if (connection === undefined) {
+        this.active = false;
+        return undefined;
+      }
+      const transportRequest = {
+        ...request,
+        client_metadata: {
+          session_id: headers?.['conversation_id'],
+          thread_id: headers?.['session_id'],
+          turn_id: crypto.randomUUID(),
+        },
+      };
+      const prepared = prepareIncrementalResponsesEvent(transportRequest, this.previous);
+      connection.send(prepared.event);
+      return this.readResponse(transportRequest, prepared.incremental, signal);
+    } catch (error: unknown) {
+      this.resetConnection();
+      if (signal?.aborted === true) throw signal.reason ?? error;
+      return undefined;
+    }
+  }
+
+  private async ensureConnection(
+    client: OpenAI,
+    headers: Record<string, string> | undefined,
+    key: string,
+  ): Promise<void> {
+    if (this.connection !== undefined && this.connectionKey === key) return;
+    this.resetConnection(true);
+    const connection = this.factory(client, {
+      ...headers,
+      'OpenAI-Beta': 'responses_websockets=2026-02-06',
+      'x-client-request-id': crypto.randomUUID(),
+    });
+    const iterator = connection.stream();
+    this.connection = connection;
+    this.iterator = iterator;
+    this.connectionKey = key;
+    while (true) {
+      const result = await iterator.next();
+      if (result.done) throw new ChatProviderError('OpenAI Responses WebSocket closed during setup.');
+      const envelope = result.value;
+      if (envelope.type === 'open') return;
+      if (envelope.type === 'error') throw envelope.error;
+      if (envelope.type === 'close' || envelope.type === 'closing') {
+        throw new ChatProviderError('OpenAI Responses WebSocket closed during setup.');
+      }
+    }
+  }
+
+  private async *readResponse(
+    fullRequest: RawObject,
+    usedIncrementalRequest: boolean,
+    signal: AbortSignal | undefined,
+  ): AsyncGenerator<RawObject> {
+    const connection = this.connection;
+    const iterator = this.iterator;
+    if (connection === undefined || iterator === undefined) return;
+    const outputItems: unknown[] = [];
+    let terminal = false;
+    let incremental = usedIncrementalRequest;
+    let replayable = true;
+    const abort = (): void => this.resetConnection();
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      while (true) {
+        const result = await iterator.next();
+        if (result.done) throw new ChatProviderError('OpenAI Responses WebSocket closed.');
+        const envelope = result.value;
+        if (envelope.type === 'error') {
+          if (incremental && webSocketErrorCode(envelope.error) === 'previous_response_not_found') {
+            this.previous = undefined;
+            outputItems.length = 0;
+            connection.send({ ...fullRequest, type: 'response.create' });
+            incremental = false;
+            continue;
+          }
+          throw envelope.error;
+        }
+        if (envelope.type === 'close' || envelope.type === 'closing') {
+          throw new ChatProviderError('OpenAI Responses WebSocket closed.');
+        }
+        if (envelope.type !== 'message') continue;
+        const event = envelope.message;
+        if (
+          event['type'] === 'error' &&
+          incremental &&
+          webSocketErrorCode(event) === 'previous_response_not_found'
+        ) {
+          this.previous = undefined;
+          outputItems.length = 0;
+          connection.send({ ...fullRequest, type: 'response.create' });
+          incremental = false;
+          continue;
+        }
+        if (event['type'] === 'response.output_item.done') {
+          const normalized = normalizeResponseOutputForReplay(event['item']);
+          if (normalized === undefined) replayable = false;
+          else outputItems.push(normalized);
+        }
+        yield event;
+        if (event['type'] === 'response.completed') {
+          const response = readObjectField(event, 'response');
+          const responseId = response === undefined ? undefined : readStringField(response, 'id');
+          if (responseId !== undefined && replayable) {
+            this.previous = { request: fullRequest, responseId, outputItems };
+          } else {
+            this.previous = undefined;
+          }
+          terminal = true;
+          return;
+        }
+        if (event['type'] === 'response.incomplete') {
+          this.previous = undefined;
+          terminal = true;
+          return;
+        }
+        if (event['type'] === 'response.failed' || event['type'] === 'error') {
+          this.previous = undefined;
+          return;
+        }
+      }
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      this.active = false;
+      if (!terminal) this.resetConnection();
+    }
+  }
+
+  private resetConnection(preserveActive = false): void {
+    this.connection?.close({ code: 1000, reason: 'Resetting Responses transport' });
+    void this.iterator?.return?.();
+    this.connection = undefined;
+    this.iterator = undefined;
+    this.connectionKey = undefined;
+    if (!preserveActive) this.active = false;
+    this.previous = undefined;
+  }
+}
+
 export class OpenAIResponsesChatProvider implements ChatProvider {
   readonly name: string = 'openai-responses';
+
+  get preservesDeferredTools(): boolean {
+    return this._nativeToolSearch;
+  }
 
   /** See {@link ChatProvider.maxCompletionTokens}. */
   get maxCompletionTokens(): number | undefined {
@@ -1429,8 +1754,17 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
   private _clientFactory: ((auth: ProviderRequestAuth) => OpenAI) | undefined;
   private _codex: OpenAIResponsesOptions['codex'];
   private _hostedSearchMode: HostedSearchMode;
+  private _nativeToolSearch: boolean;
+  private _responsesWebSocket: boolean;
+  private _promptCache: OpenAIResponsesPromptCacheOptions | undefined;
+  private _responsesWebSocketSession: OpenAIResponsesWebSocketSession;
 
   constructor(options: OpenAIResponsesOptions) {
+    if (options.promptCache !== undefined && options.supportsPromptCacheBreakpoints !== true) {
+      throw new ChatProviderError(
+        `OpenAI Responses model "${options.model}" does not declare support for explicit prompt cache breakpoints.`,
+      );
+    }
     const apiKey = options.apiKey ?? process.env['OPENAI_API_KEY'];
     this._apiKey = apiKey === undefined || apiKey.length === 0 ? undefined : apiKey;
     this._baseUrl = options.baseUrl ?? 'https://api.openai.com/v1';
@@ -1448,6 +1782,15 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
         options.hostedSearchMode ??
         options.webSearch ??
         options.webSearchMode,
+    );
+    this._nativeToolSearch = options.nativeToolSearch === true;
+    this._responsesWebSocket = options.responsesWebSocket === true;
+    this._promptCache =
+      options.promptCache === undefined ? undefined : { ...options.promptCache };
+    this._responsesWebSocketSession = new OpenAIResponsesWebSocketSession(
+      options.responsesWebSocketFactory ??
+        ((client, headers) =>
+          new ResponsesWS(client, { headers }) as unknown as OpenAIResponsesWebSocket),
     );
 
     if (options.maxOutputTokens !== undefined) {
@@ -1522,7 +1865,9 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
       }
     }
 
-    const requestTools: unknown[] = tools.map((t) => convertTool(t));
+    const requestTools: unknown[] = tools.map((tool) =>
+      convertTool(tool, this._nativeToolSearch),
+    );
     if (hostedSearch !== undefined) {
       requestTools.push(hostedSearch);
     }
@@ -1537,8 +1882,14 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
         stream: this._stream,
         ...kwargs,
       };
+      if (this._nativeToolSearch && tools.some((tool) => tool.deferred === true)) {
+        (createParams['tools'] as unknown[]).push({ type: 'tool_search', execution: 'server' });
+      }
       if (systemPrompt) {
         createParams['instructions'] = systemPrompt;
+      }
+      if (this._promptCache !== undefined) {
+        configureOpenAIResponsesPromptCache(createParams, systemPrompt, this._promptCache);
       }
       if (options?.responseFormat !== undefined) {
         createParams['text'] = {
@@ -1560,11 +1911,32 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
       }
 
       options?.onRequestSent?.();
+      if (this._responsesWebSocket) {
+        const webSocketResponse = await this._responsesWebSocketSession.request(
+          client,
+          mergeRequestHeaders(this._defaultHeaders, options?.auth?.headers),
+          createParams,
+          options?.signal,
+        );
+        if (webSocketResponse !== undefined) {
+          return new OpenAIResponsesStreamedMessage(webSocketResponse, true);
+        }
+      }
+      const requestOptions =
+        options?.signal === undefined && this._codex === undefined
+          ? undefined
+          : {
+              signal: options?.signal,
+              headers:
+                this._codex === undefined
+                  ? undefined
+                  : { 'x-client-request-id': crypto.randomUUID() },
+            };
       const response = await (
         client.responses as {
           create(params: unknown, opts?: unknown): Promise<unknown>;
         }
-      ).create(createParams, options?.signal ? { signal: options.signal } : undefined);
+      ).create(createParams, requestOptions);
       return new OpenAIResponsesStreamedMessage(response, this._stream);
     } catch (error: unknown) {
       throw convertOpenAIError(error);

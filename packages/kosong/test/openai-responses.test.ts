@@ -11,6 +11,8 @@ import type { ContentPart, Message, StreamedMessagePart, ToolCall } from '#/mess
 import {
   OpenAIResponsesChatProvider,
   OpenAIResponsesStreamedMessage,
+  type OpenAIResponsesWebSocket,
+  type OpenAIResponsesWebSocketMessage,
 } from '#/providers/openai-responses';
 import type { GenerateOptions } from '#/provider';
 import type { Tool } from '#/tool';
@@ -97,6 +99,104 @@ const MUL_TOOL: Tool = {
     required: ['a', 'b'],
   },
 };
+
+class FakeResponsesWebSocket implements OpenAIResponsesWebSocket {
+  readonly sent: Array<Record<string, unknown>> = [];
+  failNextIncremental = false;
+  errorAsMessage = false;
+  nextStatus: 'completed' | 'incomplete' = 'completed';
+  includeUnknownOutput = false;
+  private readonly queue: OpenAIResponsesWebSocketMessage[] = [];
+  private wake: (() => void) | undefined;
+  private responseNumber = 0;
+  private closed = false;
+
+  send(event: Record<string, unknown>): void {
+    this.sent.push(structuredClone(event));
+    if (this.failNextIncremental && event['previous_response_id'] !== undefined) {
+      this.failNextIncremental = false;
+      if (this.errorAsMessage) {
+        this.push({
+          type: 'message',
+          message: {
+            type: 'error',
+            code: 'previous_response_not_found',
+            message: 'Previous response is unavailable.',
+            param: null,
+          },
+        });
+      } else {
+        this.push({
+          type: 'error',
+          error: { error: { code: 'previous_response_not_found' } },
+        });
+      }
+      return;
+    }
+    this.responseNumber += 1;
+    const responseId = `resp-ws-${this.responseNumber}`;
+    const answer = this.responseNumber === 1 ? 'First answer' : 'Next answer';
+    if (this.includeUnknownOutput) {
+      this.includeUnknownOutput = false;
+      this.push({
+        type: 'message',
+        message: {
+          type: 'response.output_item.done',
+          item: { type: 'tool_search_call', call_id: 'search-1', arguments: '{}' },
+        },
+      });
+    }
+    this.push({
+      type: 'message',
+      message: {
+        type: 'response.output_item.done',
+        item: {
+          type: 'message',
+          role: 'assistant',
+          content: [{ type: 'output_text', text: answer, annotations: [] }],
+        },
+      },
+    });
+    const status = this.nextStatus;
+    this.nextStatus = 'completed';
+    this.push({
+      type: 'message',
+      message: {
+        type: status === 'completed' ? 'response.completed' : 'response.incomplete',
+        response: {
+          id: responseId,
+          status,
+          usage: { input_tokens: 10, output_tokens: 2 },
+        },
+      },
+    });
+  }
+
+  close(): void {
+    this.closed = true;
+    this.wake?.();
+  }
+
+  async *stream(): AsyncIterableIterator<OpenAIResponsesWebSocketMessage> {
+    yield { type: 'open' };
+    while (!this.closed) {
+      if (this.queue.length === 0) {
+        await new Promise<void>((resolve) => {
+          this.wake = resolve;
+        });
+        this.wake = undefined;
+      }
+      const message = this.queue.shift();
+      if (message !== undefined) yield message;
+    }
+    yield { type: 'close' };
+  }
+
+  private push(message: OpenAIResponsesWebSocketMessage): void {
+    this.queue.push(message);
+    this.wake?.();
+  }
+}
 
 describe('OpenAIResponsesChatProvider', () => {
   it('shapes ChatGPT requests for the Codex Responses Lite wire contract', async () => {
@@ -230,6 +330,367 @@ describe('OpenAIResponsesChatProvider', () => {
     });
   });
 
+  it('marks the stable Codex instruction prefix for explicit-only caching', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5.6-sol',
+      apiKey: 'YOUR_API_KEY',
+      codex: { responsesLite: true },
+      promptCache: {},
+      supportsPromptCacheBreakpoints: true,
+    });
+    const history: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'Changing request' }], toolCalls: [] },
+    ];
+
+    const body = await captureRequestBody(provider, 'Stable harness policy', [ADD_TOOL], history);
+
+    expect(body['prompt_cache_options']).toEqual({ mode: 'explicit', ttl: '30m' });
+    expect(body['input']).toEqual([
+      {
+        type: 'additional_tools',
+        role: 'developer',
+        tools: [
+          {
+            type: 'function',
+            name: 'add',
+            description: 'Add two integers.',
+            parameters: ADD_TOOL.parameters,
+            strict: false,
+          },
+        ],
+      },
+      {
+        type: 'message',
+        role: 'developer',
+        content: [
+          {
+            type: 'input_text',
+            text: 'Stable harness policy',
+            prompt_cache_breakpoint: { mode: 'explicit' },
+          },
+        ],
+      },
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Changing request' }],
+      },
+    ]);
+  });
+
+  it('supports an explicit prefix breakpoint alongside implicit conversation caching', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5.6-luna',
+      apiKey: 'YOUR_API_KEY',
+      promptCache: { mode: 'implicit', ttl: '30m' },
+      supportsPromptCacheBreakpoints: true,
+    });
+    const history: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'Changing request' }], toolCalls: [] },
+    ];
+
+    const body = await captureRequestBody(provider, 'Stable harness policy', [], history);
+
+    expect(body).not.toHaveProperty('instructions');
+    expect(body['prompt_cache_options']).toEqual({ mode: 'implicit', ttl: '30m' });
+    expect(body['input']).toEqual([
+      {
+        type: 'message',
+        role: 'developer',
+        content: [
+          {
+            type: 'input_text',
+            text: 'Stable harness policy',
+            prompt_cache_breakpoint: { mode: 'explicit' },
+          },
+        ],
+      },
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Changing request' }],
+      },
+    ]);
+  });
+
+  it('requires an explicit model capability before enabling cache breakpoints', () => {
+    expect(
+      () =>
+        new OpenAIResponsesChatProvider({
+          model: 'gpt-4.1',
+          apiKey: 'YOUR_API_KEY',
+          promptCache: {},
+        }),
+    ).toThrow(/does not declare support/);
+  });
+
+  it('uses a fresh client request id for every Codex request', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5.6-sol',
+      apiKey: 'YOUR_API_KEY',
+      codex: { responsesLite: true },
+    });
+    (provider as any)._stream = false;
+    const create = vi.fn().mockResolvedValue(makeResponsesAPIResponse());
+    ((provider as any)._client.responses as unknown as Record<string, unknown>)['create'] = create;
+
+    for (const prompt of ['first', 'second']) {
+      const stream = await provider.generate(
+        '',
+        [],
+        [{ role: 'user', content: [{ type: 'text', text: prompt }], toolCalls: [] }],
+      );
+      for await (const part of stream) void part;
+    }
+
+    const firstHeaders = create.mock.calls[0]![1].headers as Record<string, string>;
+    const secondHeaders = create.mock.calls[1]![1].headers as Record<string, string>;
+    expect(firstHeaders['x-client-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(secondHeaders['x-client-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(secondHeaders['x-client-request-id']).not.toBe(firstHeaders['x-client-request-id']);
+  });
+
+  it('reuses a Responses WebSocket only for an exact request extension', async () => {
+    const socket = new FakeResponsesWebSocket();
+    let handshakeHeaders: Record<string, string> | undefined;
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5.6-luna',
+      apiKey: 'YOUR_API_KEY',
+      promptCache: {},
+      supportsPromptCacheBreakpoints: true,
+      responsesWebSocket: true,
+      responsesWebSocketFactory: (_client, headers) => {
+        handshakeHeaders = headers;
+        return socket;
+      },
+    });
+    const firstHistory: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'First question' }], toolCalls: [] },
+    ];
+    const secondHistory: Message[] = [
+      ...firstHistory,
+      { role: 'assistant', content: [{ type: 'text', text: 'First answer' }], toolCalls: [] },
+      { role: 'user', content: [{ type: 'text', text: 'Second question' }], toolCalls: [] },
+    ];
+
+    for (const [instructions, history] of [
+      ['Stable policy', firstHistory],
+      ['Stable policy', secondHistory],
+      ['Changed policy', secondHistory],
+    ] as const) {
+      const stream = await provider.generate(instructions, [ADD_TOOL], [...history]);
+      for await (const part of stream) void part;
+    }
+
+    expect(socket.sent[0]).not.toHaveProperty('previous_response_id');
+    expect(socket.sent[0]).toMatchObject({
+      prompt_cache_options: { mode: 'explicit', ttl: '30m' },
+      input: [
+        {
+          type: 'message',
+          role: 'developer',
+          content: [
+            {
+              type: 'input_text',
+              text: 'Stable policy',
+              prompt_cache_breakpoint: { mode: 'explicit' },
+            },
+          ],
+        },
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'First question' }],
+        },
+      ],
+    });
+    expect(socket.sent[1]).toMatchObject({
+      type: 'response.create',
+      previous_response_id: 'resp-ws-1',
+      input: [
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'Second question' }],
+        },
+      ],
+    });
+    expect(socket.sent[2]).not.toHaveProperty('previous_response_id');
+    expect(socket.sent[2]!['input']).toHaveLength(4);
+    expect(socket.sent[2]!['input']).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'developer',
+          content: [
+            expect.objectContaining({
+              text: 'Changed policy',
+              prompt_cache_breakpoint: { mode: 'explicit' },
+            }),
+          ],
+        }),
+      ]),
+    );
+    expect(handshakeHeaders).toMatchObject({
+      'OpenAI-Beta': 'responses_websockets=2026-02-06',
+      'x-client-request-id': expect.stringMatching(/^[0-9a-f-]{36}$/),
+    });
+  });
+
+  it('retries a missing previous response with the full request', async () => {
+    const socket = new FakeResponsesWebSocket();
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5.6-luna',
+      apiKey: 'YOUR_API_KEY',
+      promptCache: {},
+      supportsPromptCacheBreakpoints: true,
+      responsesWebSocket: true,
+      responsesWebSocketFactory: () => socket,
+    });
+    const firstHistory: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'First question' }], toolCalls: [] },
+    ];
+    const first = await provider.generate('Stable policy', [], firstHistory);
+    for await (const part of first) void part;
+
+    socket.failNextIncremental = true;
+    socket.errorAsMessage = true;
+    const second = await provider.generate('Stable policy', [], [
+      ...firstHistory,
+      { role: 'assistant', content: [{ type: 'text', text: 'First answer' }], toolCalls: [] },
+      { role: 'user', content: [{ type: 'text', text: 'Second question' }], toolCalls: [] },
+    ]);
+    for await (const part of second) void part;
+
+    expect(socket.sent[1]).toHaveProperty('previous_response_id', 'resp-ws-1');
+    expect(socket.sent[2]).not.toHaveProperty('previous_response_id');
+    expect(socket.sent[2]!['input']).toHaveLength(4);
+    expect(socket.sent[2]!['input']).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'developer',
+          content: [
+            expect.objectContaining({
+              text: 'Stable policy',
+              prompt_cache_breakpoint: { mode: 'explicit' },
+            }),
+          ],
+        }),
+      ]),
+    );
+  });
+
+  it('forces a full request after an incomplete response', async () => {
+    const socket = new FakeResponsesWebSocket();
+    socket.nextStatus = 'incomplete';
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5.6-luna',
+      apiKey: 'YOUR_API_KEY',
+      responsesWebSocket: true,
+      responsesWebSocketFactory: () => socket,
+    });
+    const firstHistory: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'First question' }], toolCalls: [] },
+    ];
+    const first = await provider.generate('Stable policy', [], firstHistory);
+    for await (const part of first) void part;
+
+    const equalHistory: Message[] = [
+      ...firstHistory,
+      { role: 'assistant', content: [{ type: 'text', text: 'First answer' }], toolCalls: [] },
+    ];
+    const second = await provider.generate('Stable policy', [], equalHistory);
+    for await (const part of second) void part;
+
+    expect(socket.sent[1]).not.toHaveProperty('previous_response_id');
+    expect(socket.sent[1]!['input']).toHaveLength(2);
+  });
+
+  it('requires the next input to strictly extend the completed response', async () => {
+    const socket = new FakeResponsesWebSocket();
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5.6-luna',
+      apiKey: 'YOUR_API_KEY',
+      responsesWebSocket: true,
+      responsesWebSocketFactory: () => socket,
+    });
+    const firstHistory: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'First question' }], toolCalls: [] },
+    ];
+    const first = await provider.generate('Stable policy', [], firstHistory);
+    for await (const part of first) void part;
+
+    const second = await provider.generate('Stable policy', [], [
+      ...firstHistory,
+      { role: 'assistant', content: [{ type: 'text', text: 'First answer' }], toolCalls: [] },
+    ]);
+    for await (const part of second) void part;
+
+    expect(socket.sent[1]).not.toHaveProperty('previous_response_id');
+    expect(socket.sent[1]!['input']).toHaveLength(2);
+  });
+
+  it('forces a full request after an unsupported output item', async () => {
+    const socket = new FakeResponsesWebSocket();
+    socket.includeUnknownOutput = true;
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5.6-luna',
+      apiKey: 'YOUR_API_KEY',
+      responsesWebSocket: true,
+      responsesWebSocketFactory: () => socket,
+    });
+    const firstHistory: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'First question' }], toolCalls: [] },
+    ];
+    const first = await provider.generate('Stable policy', [], firstHistory);
+    for await (const part of first) void part;
+
+    const second = await provider.generate('Stable policy', [], [
+      ...firstHistory,
+      { role: 'assistant', content: [{ type: 'text', text: 'First answer' }], toolCalls: [] },
+      { role: 'user', content: [{ type: 'text', text: 'Continue' }], toolCalls: [] },
+    ]);
+    for await (const part of second) void part;
+
+    expect(socket.sent[1]).not.toHaveProperty('previous_response_id');
+  });
+
+  it('falls back to HTTP when another WebSocket request is active', async () => {
+    const socket = new FakeResponsesWebSocket();
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5.6-luna',
+      apiKey: 'YOUR_API_KEY',
+      responsesWebSocket: true,
+      responsesWebSocketFactory: () => socket,
+    });
+    const httpCreate = vi.fn().mockResolvedValue(
+      (async function* () {
+        yield {
+          type: 'response.completed',
+          response: { id: 'resp-http', status: 'completed' },
+        };
+      })(),
+    );
+    ((provider as any)._client.responses as { create: typeof httpCreate }).create = httpCreate;
+    const history: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'Question' }], toolCalls: [] },
+    ];
+
+    const firstPromise = provider.generate('Stable policy', [], history);
+    const secondPromise = provider.generate('Stable policy', [], history);
+    const [first, second] = await Promise.all([firstPromise, secondPromise]);
+    await Promise.all([
+      (async () => {
+        for await (const part of first) void part;
+      })(),
+      (async () => {
+        for await (const part of second) void part;
+      })(),
+    ]);
+
+    expect(socket.sent).toHaveLength(1);
+    expect(httpCreate).toHaveBeenCalledTimes(1);
+  });
+
   describe('message conversion', () => {
     it('sends system prompt as top-level instructions', async () => {
       const provider = createProvider();
@@ -305,6 +766,36 @@ describe('OpenAIResponsesChatProvider', () => {
           type: 'message',
         },
       ]);
+    });
+
+    it('keeps the prior input as an exact prefix when a turn is appended', async () => {
+      const provider = new OpenAIResponsesChatProvider({
+        model: 'gpt-4.1',
+        apiKey: 'YOUR_API_KEY',
+        generationKwargs: { prompt_cache_key: 'stable-session' },
+      });
+      const firstHistory: Message[] = [
+        { role: 'user', content: [{ type: 'text', text: 'First question' }], toolCalls: [] },
+      ];
+      const secondHistory: Message[] = [
+        ...firstHistory,
+        {
+          role: 'assistant',
+          content: [{ type: 'text', text: 'First answer' }],
+          toolCalls: [],
+        },
+        { role: 'user', content: [{ type: 'text', text: 'Second question' }], toolCalls: [] },
+      ];
+
+      const first = await captureRequestBody(provider, 'Stable policy', [ADD_TOOL], firstHistory);
+      const second = await captureRequestBody(provider, 'Stable policy', [ADD_TOOL], secondHistory);
+
+      expect(second['instructions']).toBe(first['instructions']);
+      expect(second['tools']).toEqual(first['tools']);
+      expect(second['prompt_cache_key']).toBe(first['prompt_cache_key']);
+      expect((second['input'] as unknown[]).slice(0, (first['input'] as unknown[]).length)).toEqual(
+        first['input'],
+      );
     });
 
     it('image url in user message is encoded as input_image', async () => {
@@ -813,6 +1304,30 @@ describe('OpenAIResponsesChatProvider', () => {
           },
           strict: false,
         },
+      ]);
+    });
+
+    it('uses native tool search without stripping deferred tools when enabled', async () => {
+      const provider = new OpenAIResponsesChatProvider({
+        model: 'gpt-5.6-luna',
+        apiKey: 'YOUR_API_KEY',
+        nativeToolSearch: true,
+      });
+      const create = vi.fn().mockResolvedValue(makeResponsesAPIResponse());
+      (provider as any)._stream = false;
+      ((provider as any)._client.responses as { create: typeof create }).create = create;
+
+      await generate(
+        provider,
+        '',
+        [ADD_TOOL, { ...MUL_TOOL, deferred: true }],
+        [{ role: 'user', content: [{ type: 'text', text: 'Use the right tool.' }], toolCalls: [] }],
+      );
+
+      expect(create.mock.calls[0]![0]['tools']).toEqual([
+        expect.objectContaining({ type: 'function', name: 'add' }),
+        expect.objectContaining({ type: 'function', name: 'multiply', defer_loading: true }),
+        { type: 'tool_search', execution: 'server' },
       ]);
     });
 
@@ -1873,7 +2388,7 @@ describe('OpenAIResponsesChatProvider', () => {
             usage: {
               input_tokens: 20,
               output_tokens: 10,
-              input_tokens_details: { cached_tokens: 5 },
+              input_tokens_details: { cached_tokens: 5, cache_write_tokens: 7 },
             },
           },
         },
@@ -1906,15 +2421,15 @@ describe('OpenAIResponsesChatProvider', () => {
         { type: 'text', text: ' world' },
         {
           type: 'usage',
-          usage: { inputOther: 15, output: 10, inputCacheRead: 5, inputCacheCreation: 0 },
+          usage: { inputOther: 8, output: 10, inputCacheRead: 5, inputCacheCreation: 7 },
         },
       ]);
 
       expect(stream.usage).toEqual({
-        inputOther: 15,
+        inputOther: 8,
         output: 10,
         inputCacheRead: 5,
-        inputCacheCreation: 0,
+        inputCacheCreation: 7,
       });
     });
 
