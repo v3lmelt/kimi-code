@@ -5,6 +5,7 @@ import {
   type KimiConfig,
   type Logger,
   type ModelProvider,
+  promptCacheKeyForAgent,
   type ResolvedRuntimeProvider,
 } from '@moonshot-ai/agent-core';
 import {
@@ -148,8 +149,9 @@ export class OpenAIResponsesModelProvider implements ModelProvider {
 
   private readonly apiKey: string | undefined;
   private readonly baseUrl: string | undefined;
-  private readonly defaultHeaders: Record<string, string> | undefined;
-  private readonly promptCacheKey: string | undefined;
+  private defaultHeaders: Record<string, string> | undefined;
+  private promptCacheKey: string | undefined;
+  private readonly promptCacheSessionId: string | undefined;
   private readonly models: ReadonlyMap<string, OpenAIResponsesHarnessModel>;
   private readonly authentication: 'api-key' | 'chatgpt';
   private readonly tokenProvider: BearerTokenProvider | undefined;
@@ -167,6 +169,7 @@ export class OpenAIResponsesModelProvider implements ModelProvider {
     this.models = new Map(models.map((model) => [model.id, model]));
     this.defaultModel = options.defaultModel ?? models[0]?.id ?? DEFAULT_OPENAI_MODEL;
     this.promptCacheKey = normalizeOptionalString(options.promptCacheKey);
+    this.promptCacheSessionId = this.promptCacheKey;
     this.codexResponsesLite = options.codexResponsesLite ?? true;
     this.apiKey = this.authentication === 'api-key' ? options.apiKey : undefined;
     this.baseUrl =
@@ -191,6 +194,25 @@ export class OpenAIResponsesModelProvider implements ModelProvider {
         `OpenAI default model "${this.defaultModel}" is not registered in the harness model list.`,
       );
     }
+  }
+
+  forAgent(agentId: string): ModelProvider {
+    const sessionCacheKey = this.promptCacheSessionId;
+    if (sessionCacheKey === undefined) return this;
+    const clone = Object.assign(
+      Object.create(Object.getPrototypeOf(this) as object) as OpenAIResponsesModelProvider,
+      this,
+    );
+    clone.promptCacheKey = promptCacheKeyForAgent(sessionCacheKey, agentId);
+    if (this.authentication === 'chatgpt') {
+      clone.defaultHeaders = {
+        ...this.defaultHeaders,
+        conversation_id: sessionCacheKey,
+        session_id: `${sessionCacheKey}:${agentId}`,
+      };
+      delete clone.defaultHeaders['x-client-request-id'];
+    }
+    return clone;
   }
 
   resolveProviderConfig(model: string): ResolvedRuntimeProvider {
@@ -305,7 +327,6 @@ function createOpenAICodexHeaders(options: {
   if (options.promptCacheKey !== undefined) {
     headers['conversation_id'] = options.promptCacheKey;
     headers['session_id'] = options.promptCacheKey;
-    headers['x-client-request-id'] = options.promptCacheKey;
   }
   if (options.accountId !== undefined) {
     headers['chatgpt-account-id'] = options.accountId;

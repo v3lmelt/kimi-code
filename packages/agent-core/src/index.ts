@@ -106,7 +106,7 @@ export {
   sessionMediaOriginalsDir,
 } from './tools/support/image-originals';
 export type { PersistOriginalImageOptions } from './tools/support/image-originals';
-export { SingleModelProvider } from './session/provider-manager';
+export { promptCacheKeyForAgent, SingleModelProvider } from './session/provider-manager';
 export type {
   BearerTokenProvider,
   ModelProvider,

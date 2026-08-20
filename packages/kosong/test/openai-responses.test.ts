@@ -157,6 +157,32 @@ describe('OpenAIResponsesChatProvider', () => {
     expect(body['include']).toEqual(['reasoning.encrypted_content']);
   });
 
+  it('uses a fresh client request id for every Codex request', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5.6-sol',
+      apiKey: 'YOUR_API_KEY',
+      codex: { responsesLite: true },
+    });
+    (provider as any)._stream = false;
+    const create = vi.fn().mockResolvedValue(makeResponsesAPIResponse());
+    ((provider as any)._client.responses as unknown as Record<string, unknown>)['create'] = create;
+
+    for (const prompt of ['first', 'second']) {
+      const stream = await provider.generate(
+        '',
+        [],
+        [{ role: 'user', content: [{ type: 'text', text: prompt }], toolCalls: [] }],
+      );
+      for await (const part of stream) void part;
+    }
+
+    const firstHeaders = create.mock.calls[0]![1].headers as Record<string, string>;
+    const secondHeaders = create.mock.calls[1]![1].headers as Record<string, string>;
+    expect(firstHeaders['x-client-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(secondHeaders['x-client-request-id']).toMatch(/^[0-9a-f-]{36}$/);
+    expect(secondHeaders['x-client-request-id']).not.toBe(firstHeaders['x-client-request-id']);
+  });
+
   describe('message conversion', () => {
     it('sends system prompt as top-level instructions', async () => {
       const provider = createProvider();

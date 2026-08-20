@@ -41,6 +41,25 @@ afterEach(async () => {
 });
 
 describe('Session.init', () => {
+  it('scopes the model provider to each agent identity', async () => {
+    const providerManager = testProviderManager();
+    const forAgent = vi.spyOn(providerManager, 'forAgent');
+    const session = new Session({
+      id: 'test-provider-scope',
+      kaos: testKaos,
+      homedir: await makeTempDir(),
+      rpc: createSessionRpc(),
+      providerManager,
+      initializeMainAgent: false,
+    });
+
+    await session.createAgent({ type: 'main' });
+    await session.createAgent({ type: 'sub' }, { parentAgentId: 'main' });
+
+    expect(forAgent).toHaveBeenNthCalledWith(1, 'main');
+    expect(forAgent).toHaveBeenNthCalledWith(2, 'agent-0');
+  });
+
   it('runs an isolated system-trigger turn and records the latest AGENTS as a system reminder', async () => {
     const workDir = await makeTempDir();
     const sessionDir = await makeTempDir();

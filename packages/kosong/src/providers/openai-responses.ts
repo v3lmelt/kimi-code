@@ -1215,11 +1215,21 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
       }
 
       options?.onRequestSent?.();
+      const requestOptions =
+        options?.signal === undefined && this._codex === undefined
+          ? undefined
+          : {
+              signal: options?.signal,
+              headers:
+                this._codex === undefined
+                  ? undefined
+                  : { 'x-client-request-id': crypto.randomUUID() },
+            };
       const response = await (
         client.responses as {
           create(params: unknown, opts?: unknown): Promise<unknown>;
         }
-      ).create(createParams, options?.signal ? { signal: options.signal } : undefined);
+      ).create(createParams, requestOptions);
       return new OpenAIResponsesStreamedMessage(response, this._stream);
     } catch (error: unknown) {
       throw convertOpenAIError(error);

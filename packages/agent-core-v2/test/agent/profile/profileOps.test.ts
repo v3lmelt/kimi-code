@@ -181,7 +181,7 @@ let svc: IAgentProfileService;
 let configValues: Record<string, unknown>;
 let modelCatalog: IModelCatalog;
 
-function buildHost(key: string): {
+function buildHost(key: string, agentId = 'main'): {
   ix: TestInstantiationService;
   wire: IWireService;
   svc: IAgentProfileService;
@@ -191,7 +191,6 @@ function buildHost(key: string): {
   host.stub(IFileSystemStorageService, new InMemoryStorageService());
   host.set(IAppendLogStore, new SyncDescriptor(AppendLogStore));
   host.stub(ITelemetryService, createTelemetryStub());
-  host.stub(IAgentScopeContext, makeAgentScopeContext({ agentId: 'main', agentScope: '' }));
   host.stub(
     IAgentTelemetryContextService,
     new AgentTelemetryContextService(),
@@ -244,6 +243,7 @@ function buildHost(key: string): {
   const wire = registerTestAgentWire(host, testWireScope(SCOPE, key), {
     log: host.get(IAppendLogStore),
   });
+  host.stub(IAgentScopeContext, makeAgentScopeContext({ agentId, agentScope: '' }));
   return {
     ix: host,
     wire,
@@ -724,5 +724,16 @@ describe('AgentProfileService (wire-backed config.update)', () => {
     host.svc.update({ modelAlias: 'claude-sonnet', thinkingLevel: 'high' });
 
     expect(host.svc.resolveRequestParams().cacheKey).toBe('session-test');
+  });
+
+  it('uses a stable agent-specific cache key for subagents', () => {
+    modelCatalog = createModelCatalogStub({
+      'kimi-code': createTestModel({ providerType: 'kimi' }),
+    });
+    const host = buildHost('profile-subagent-cache-key', 'agent-4');
+    host.svc.configure({ emitStatusUpdated: () => undefined });
+    host.svc.update({ modelAlias: 'kimi-code', thinkingLevel: 'high' });
+
+    expect(host.svc.resolveRequestParams().cacheKey).toBe('session-test:agent-4');
   });
 });
