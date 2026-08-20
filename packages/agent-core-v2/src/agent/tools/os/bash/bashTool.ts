@@ -397,6 +397,9 @@ export class BashTool implements IBashTool {
   ): void {
     const workspace = this.workspace;
     if (workspace?.isolation === undefined) return;
+    if (workspace.isolation.state === 'active' && /(?:^|[\s;&|()])git(?:\s|$)/i.test(args.command)) {
+      throw unsupportedIsolatedGitError();
+    }
     if (args.cwd !== undefined) workspace.assertAllowed(args.cwd, 'execute');
     if (subcommands === undefined || subcommands.length === 0) {
       throw isolationBoundaryError(
@@ -409,6 +412,9 @@ export class BashTool implements IBashTool {
         throw isolationBoundaryError(
           "A shell command without a command name cannot be safely analyzed inside an isolated workspace.",
         );
+      }
+      if (name === 'git' && workspace.isolation.state === 'active') {
+        throw unsupportedIsolatedGitError();
       }
       if (DYNAMIC_COMMANDS.has(name)) {
         throw isolationBoundaryError(
@@ -618,7 +624,6 @@ const PATH_ARG_COMMANDS = new Set([
   'wc',
   'stat',
   'file',
-  'du',
   'grep',
   'rg',
   'mkdir',
@@ -640,7 +645,6 @@ const READ_PATH_COMMANDS = new Set([
   'wc',
   'stat',
   'file',
-  'du',
   'grep',
   'rg',
 ]);
@@ -654,7 +658,6 @@ const ISOLATION_SAFE_COMMANDS = new Set([
   'pwd',
   'true',
   'false',
-  'git',
 ]);
 const DYNAMIC_COMMANDS = new Set([
   'bash',
@@ -757,31 +760,31 @@ const NO_VALUE_SPEC = (flags: ReadonlySet<string>, positional: PositionalKind): 
 });
 
 const COMMAND_OPTION_SPECS: Readonly<Record<string, IsolationOptionSpec>> = {
-  ls: NO_VALUE_SPEC(setOf('-1', '-A', '-a', '-B', '-C', '-d', '-F', '-G', '-h', '-i', '-l', '-L', '-n', '-p', '-q', '-r', '-R', '-S', '-t', '-U', '-X', '--all', '--almost-all', '--classify', '--directory', '--group-directories-first', '--human-readable', '--inode', '--long', '--numeric-uid-gid', '--reverse', '--recursive', '--sort', '--time-style'), 'paths'),
+  ls: NO_VALUE_SPEC(setOf('-1', '-A', '-a', '-B', '-C', '-d', '-F', '-G', '-h', '-i', '-l', '-n', '-p', '-q', '-r', '-S', '-t', '-U', '-X', '--all', '--almost-all', '--classify', '--directory', '--group-directories-first', '--human-readable', '--inode', '--long', '--numeric-uid-gid', '--reverse', '--sort', '--time-style'), 'paths'),
   cat: NO_VALUE_SPEC(setOf('-A', '-b', '-e', '-E', '-n', '-s', '-t', '-T', '-v', '--number', '--show-all', '--show-nonprinting', '--show-tabs', '--squeeze-blank'), 'paths'),
   head: { ...NO_VALUE_SPEC(setOf('-q', '-v', '--quiet', '--silent', '--verbose'), 'paths'), values: setOf('-c', '-n', '--bytes', '--lines') },
   tail: { ...NO_VALUE_SPEC(setOf('-f', '-F', '-q', '-v', '--follow', '--quiet', '--retry', '--silent', '--verbose'), 'paths'), values: setOf('-c', '-n', '--bytes', '--lines', '--pid') },
   less: NO_VALUE_SPEC(setOf('-E', '-F', '-X', '-R', '-S', '-M', '-N', '-q', '-Q', '-s'), 'paths'),
   more: NO_VALUE_SPEC(setOf('-d', '-f', '-l', '-p', '-c', '-s'), 'paths'),
   wc: { ...NO_VALUE_SPEC(setOf('-c', '-m', '-l', '-L', '-w', '--bytes', '--chars', '--lines', '--max-line-length', '--words'), 'paths'), pathValues: setOf('--files0-from') },
-  stat: { ...NO_VALUE_SPEC(setOf('-L', '-f', '--dereference', '--filesystem', '--terse'), 'paths'), values: setOf('-c', '--format', '--printf') },
-  file: NO_VALUE_SPEC(setOf('-b', '-c', '-C', '-h', '-i', '-k', '-L', '-n', '-N', '-p', '-r', '-s', '-z', '--brief', '--checking-printout', '--dereference', '--exclude', '--keep-going', '--mime', '--mime-type', '--mime-encoding', '--no-pad', '--print0', '--preserve-date', '--raw', '--special-files', '--uncompress'), 'paths'),
-  du: { ...NO_VALUE_SPEC(setOf('-a', '-b', '-c', '-h', '-k', '-L', '-m', '-P', '-s', '-x', '-D', '-H', '--all', '--bytes', '--count-links', '--dereference', '--human-readable', '--summarize', '--one-file-system'), 'paths'), values: setOf('-d', '--max-depth') },
+  stat: { ...NO_VALUE_SPEC(setOf('-f', '--filesystem', '--terse'), 'paths'), values: setOf('-c', '--format', '--printf') },
+  file: NO_VALUE_SPEC(setOf('-b', '-c', '-C', '-h', '-i', '-k', '-n', '-N', '-p', '-r', '-s', '-z', '--brief', '--checking-printout', '--exclude', '--keep-going', '--mime', '--mime-type', '--mime-encoding', '--no-pad', '--print0', '--preserve-date', '--raw', '--special-files', '--uncompress'), 'paths'),
+  du: { ...NO_VALUE_SPEC(setOf('-a', '-b', '-c', '-h', '-k', '-m', '-P', '-s', '-x', '--all', '--bytes', '--human-readable', '--summarize', '--one-file-system'), 'paths'), values: setOf('-d', '--max-depth') },
   rmdir: NO_VALUE_SPEC(setOf('-p', '-v', '--ignore-fail-on-non-empty', '--parents', '--verbose'), 'paths'),
-  rm: NO_VALUE_SPEC(setOf('-d', '-f', '-i', '-I', '-r', '-R', '-v', '--dir', '--force', '--interactive', '--one-file-system', '--preserve-root', '--no-preserve-root', '--recursive', '--verbose'), 'paths'),
-  cp: NO_VALUE_SPEC(setOf('-a', '-f', '-H', '-i', '-L', '-n', '-p', '-P', '-r', '-R', '-T', '-u', '-v', '--archive', '--attributes-only', '--backup', '--dereference', '--force', '--interactive', '--link', '--no-clobber', '--no-dereference', '--no-target-directory', '--parents', '--recursive', '--reflink', '--remove-destination', '--sparse', '--symbolic-link', '--update', '--verbose'), 'paths'),
+  rm: NO_VALUE_SPEC(setOf('-d', '-f', '-i', '-I', '-v', '--dir', '--force', '--interactive', '--one-file-system', '--preserve-root', '--no-preserve-root', '--verbose'), 'paths'),
+  cp: NO_VALUE_SPEC(setOf('-f', '-i', '-n', '-p', '-P', '-T', '-u', '-v', '--attributes-only', '--backup', '--force', '--interactive', '--link', '--no-clobber', '--no-dereference', '--no-target-directory', '--parents', '--reflink', '--remove-destination', '--sparse', '--update', '--verbose'), 'paths'),
   mv: NO_VALUE_SPEC(setOf('-b', '-f', '-i', '-n', '-S', '-T', '-u', '-v', '--backup', '--force', '--interactive', '--no-clobber', '--no-target-directory', '--strip-trailing-slashes', '--update', '--verbose'), 'paths'),
-  ln: NO_VALUE_SPEC(setOf('-b', '-d', '-f', '-i', '-L', '-n', '-P', '-r', '-s', '-T', '-v', '--backup', '--directory', '--force', '--interactive', '--logical', '--no-dereference', '--no-target-directory', '--relative', '--symbolic', '--verbose'), 'paths'),
+  ln: NO_VALUE_SPEC(setOf('-b', '-d', '-f', '-i', '-n', '-P', '-T', '-v', '--backup', '--directory', '--force', '--interactive', '--no-dereference', '--no-target-directory', '--verbose'), 'paths'),
   touch: { ...NO_VALUE_SPEC(setOf('-a', '-c', '-m', '--no-create'), 'paths'), values: setOf('-d', '-t', '--date', '--time'), pathValues: setOf('-r', '--reference') },
   mkdir: { ...NO_VALUE_SPEC(setOf('-p', '-v', '--parents', '--verbose'), 'paths'), values: setOf('-m', '--mode'), pathValues: setOf('--parent', '--target-directory') },
   install: { ...NO_VALUE_SPEC(setOf('-D', '-d', '-p', '-s', '-T', '-v', '--compare', '--directory', '--no-target-directory', '--preserve-timestamps', '--strip', '--verbose'), 'paths'), values: setOf('-g', '-m', '-o', '--backup', '--context', '--group', '--mode', '--owner', '--suffix'), pathValues: setOf('-t', '--target-directory', '--parent') },
-  chmod: { ...NO_VALUE_SPEC(setOf('-c', '-f', '-R', '-v', '--changes', '--no-preserve-root', '--preserve-root', '--quiet', '--recursive', '--silent', '--verbose'), 'mode-paths'), pathValues: setOf('--reference') },
-  chown: { ...NO_VALUE_SPEC(setOf('-c', '-f', '-h', '-R', '-v', '--changes', '--dereference', '--from', '--no-dereference', '--no-preserve-root', '--preserve-root', '--quiet', '--recursive', '--silent', '--verbose'), 'owner-paths'), pathValues: setOf('--reference') },
+  chmod: { ...NO_VALUE_SPEC(setOf('-c', '-f', '-v', '--changes', '--no-preserve-root', '--preserve-root', '--quiet', '--silent', '--verbose'), 'mode-paths'), pathValues: setOf('--reference') },
+  chown: { ...NO_VALUE_SPEC(setOf('-c', '-f', '-h', '-v', '--changes', '--from', '--no-dereference', '--no-preserve-root', '--preserve-root', '--quiet', '--silent', '--verbose'), 'owner-paths'), pathValues: setOf('--reference') },
   truncate: { ...NO_VALUE_SPEC(setOf('-c', '--no-create'), 'paths'), values: setOf('-s', '--size'), pathValues: setOf('-r', '--reference') },
   tee: NO_VALUE_SPEC(setOf('-a', '-i', '--append', '--ignore-interrupts'), 'paths'),
-  grep: { ...NO_VALUE_SPEC(setOf('-E', '-F', '-G', '-P', '-R', '-r', '-a', '-b', '-c', '-h', '-H', '-i', '-l', '-n', '-o', '-q', '-s', '-v', '-w', '-x', '--binary-files', '--color', '--directories', '--exclude', '--exclude-dir', '--extended-regexp', '--fixed-strings', '--help', '--ignore-case', '--include', '--line-number', '--only-matching', '--quiet', '--recursive', '--silent', '--text', '--word-regexp'), 'pattern-paths'), values: setOf('-A', '-B', '-C', '-e', '-m', '--after-context', '--before-context', '--context', '--max-count', '--regexp'), pathValues: setOf('-f', '--file') },
-  rg: { ...NO_VALUE_SPEC(setOf('-E', '-F', '-G', '-I', '-L', '-M', '-N', '-P', '-R', '-a', '-b', '-c', '-g', '-h', '-H', '-i', '-l', '-n', '-o', '-q', '-r', '-s', '-v', '-w', '-x', '--binary-files', '--color', '--count', '--files', '--files-with-matches', '--hidden', '--ignore-case', '--ignore-file', '--json', '--line-number', '--no-ignore', '--no-ignore-vcs', '--null', '--only-matching', '--quiet', '--regexp', '--text', '--type', '--type-add', '--type-not', '--word-regexp'), 'pattern-paths'), values: setOf('-A', '-B', '-C', '-e', '-M', '--after-context', '--before-context', '--context', '--max-count', '--regexp', '--type'), pathValues: setOf('-f', '--file', '--ignore-file') },
-  tar: { ...NO_VALUE_SPEC(setOf('-c', '-j', '-J', '-k', '-O', '-p', '-t', '-v', '-x', '-z', '--anchored', '--atime-preserve', '--create', '--dereference', '--extract', '--keep-old-files', '--list', '--no-anchored', '--no-recursion', '--no-same-owner', '--no-overwrite-dir', '--no-unquote', '--one-file-system', '--preserve-permissions', '--same-owner', '--skip-old-files', '--to-stdout', '--verbose'), 'tar'), values: setOf('--exclude', '--files-from', '--listed-incremental', '--null', '--occurrence', '--warning'), pathValues: setOf('-C', '-f', '--directory', '--exclude-from', '--file', '--listed-incremental') },
+  grep: { ...NO_VALUE_SPEC(setOf('-E', '-F', '-G', '-P', '-a', '-b', '-c', '-h', '-H', '-i', '-l', '-n', '-o', '-q', '-s', '-v', '-w', '-x', '--binary-files', '--color', '--directories', '--exclude', '--exclude-dir', '--extended-regexp', '--fixed-strings', '--help', '--ignore-case', '--include', '--line-number', '--only-matching', '--quiet', '--silent', '--text', '--word-regexp'), 'pattern-paths'), values: setOf('-A', '-B', '-C', '-e', '-m', '--after-context', '--before-context', '--context', '--max-count', '--regexp'), pathValues: setOf('-f', '--file') },
+  rg: { ...NO_VALUE_SPEC(setOf('-E', '-F', '-G', '-I', '-M', '-N', '-P', '-a', '-b', '-c', '-g', '-h', '-H', '-i', '-l', '-n', '-o', '-q', '-r', '-s', '-v', '-w', '-x', '--binary-files', '--color', '--count', '--files', '--files-with-matches', '--hidden', '--ignore-case', '--ignore-file', '--json', '--line-number', '--no-ignore', '--no-ignore-vcs', '--null', '--only-matching', '--quiet', '--regexp', '--text', '--type', '--type-add', '--type-not', '--word-regexp'), 'pattern-paths'), values: setOf('-A', '-B', '-C', '-e', '-M', '--after-context', '--before-context', '--context', '--max-count', '--regexp', '--type'), pathValues: setOf('-f', '--file', '--ignore-file') },
+  tar: { ...NO_VALUE_SPEC(setOf('-c', '-j', '-J', '-k', '-O', '-p', '-t', '-v', '-x', '-z', '--anchored', '--atime-preserve', '--create', '--extract', '--keep-old-files', '--list', '--no-anchored', '--no-recursion', '--no-same-owner', '--no-overwrite-dir', '--no-unquote', '--one-file-system', '--preserve-permissions', '--same-owner', '--skip-old-files', '--to-stdout', '--verbose'), 'tar'), values: setOf('--exclude', '--null', '--occurrence', '--warning'), pathValues: setOf('-C', '-f', '--directory', '--exclude-from', '--file') },
 };
 
 const GIT_READ_ONLY_COMMANDS = new Set(['status', 'diff', 'log', 'show', 'branch', 'rev-parse', 'ls-files', 'grep', 'cat-file', 'remote', 'describe', 'shortlog']);
@@ -1025,6 +1028,11 @@ function analyzeTarCommand(parsed: ParsedIsolationArguments): IsolationCommandAn
   if (hasExtract) {
     throw isolationBoundaryError(
       'Tar extraction is not allowed in an isolated workspace because archive entries cannot be verified before execution.',
+    );
+  }
+  if (hasCreate && !parsed.flags.has('--no-recursion')) {
+    throw isolationBoundaryError(
+      'Tar directory recursion is not allowed in an isolated workspace; use --no-recursion with explicit file paths.',
     );
   }
   if ((hasCreate ? 1 : 0) + (hasList ? 1 : 0) !== 1) {
@@ -1388,6 +1396,12 @@ function assertIsolationPath(
 
 function isolationBoundaryError(message: string): Error2 {
   return new Error2(ErrorCodes.FS_PATH_ESCAPES, message);
+}
+
+function unsupportedIsolatedGitError(): Error2 {
+  return isolationBoundaryError(
+    'The Git CLI is not supported while a workspace isolation lease is active; isolated agents must not run Git commands.',
+  );
 }
 
 function formatTimeoutLabel(timeoutMs: number): string {

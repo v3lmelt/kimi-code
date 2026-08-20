@@ -7,7 +7,9 @@ import {
   type TasksBrowserProps,
   type TasksFilter,
 } from '@/tui/components/dialogs/tasks-browser';
+import { getTaskInfoForOutput } from '@/tui/controllers/tasks-browser';
 import { darkColors } from '@/tui/theme/colors';
+import type { RuntimeCenterTaskInfo } from '@/tui/utils/runtime-center-model';
 
 const ANSI_SGR = /\[[0-9;]*m/g;
 function strip(text: string): string {
@@ -322,6 +324,25 @@ describe('TasksBrowserApp — full-screen rendering', () => {
   it('falls back to a single line when the terminal is too small', () => {
     const out = strip(makeApp({}, 5, 30).render(30).join('\n'));
     expect(out).toContain('too small');
+  });
+});
+
+describe('TasksBrowserController — output metadata lookup', () => {
+  it('uses workflow background task metadata when the legacy task map has no entry', () => {
+    const workflowInfo: RuntimeCenterTaskInfo = {
+      taskId: 'workflow-task-1',
+      kind: 'workflow',
+      description: 'Review the release plan',
+      status: 'running',
+      detached: true,
+      startedAt: 1,
+      endedAt: null,
+    };
+    const workflowBackgroundTasks = new Map([[workflowInfo.taskId, workflowInfo]]);
+
+    expect(
+      getTaskInfoForOutput('workflow-task-1', new Map(), workflowBackgroundTasks),
+    ).toBe(workflowInfo);
   });
 });
 

@@ -121,7 +121,7 @@ Runtime Center 是一个实时 TUI 面板，用于查看当前会话中的任务
 
 选中条目后可查看右侧详情面板。面板显示状态和当前活动，并在有数据时补充模型、token 用量、耗时、缓存与隔离信息。按 `Tab` 切换视图，按 `R` 刷新，按 `Esc` 关闭。对 task 条目，以及拥有后台任务的 Agent 或 workflow，按 `O` 可打开 output；对 task 和 Agent 条目按 `Enter` 也可打开 output。
 
-要停止可停止的后台任务，请选中对应的 task 条目并按 `S`；随后按 `Y` 确认，其他按键会取消。前台任务和已结束任务不能通过 Runtime Center 停止。
+要停止可停止的后台任务，请选中对应的 task 条目并按 `S`；随后按 `Y` 确认，其他按键会取消。前台任务和处于终止状态的任务不能通过 Runtime Center 停止。
 
 当前底层 SDK 未提供 `resume`、`retry`、`message`、`followup`、`interrupt` 或 `transcript` 操作。Runtime Center 会将这些操作标记为 `unavailable`，不会宣称已经执行。
 

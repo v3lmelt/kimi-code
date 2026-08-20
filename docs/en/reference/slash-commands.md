@@ -123,7 +123,7 @@ The Runtime Center is a live TUI panel for inspecting tasks, agents, and workflo
 
 Select an item to inspect its detail pane. The pane shows status and activity, and adds model, token usage, duration, cache, and isolation details when they are available. Press `Tab` to cycle views, `R` to refresh, and `Esc` to close. Press `O` to open output for a task, or for an agent or workflow with an owning background task; `Enter` opens output for task and agent entries.
 
-To stop a stoppable background task, select its task entry and press `S`; press `Y` to confirm, and any other key cancels. Foreground and terminal tasks cannot be stopped from the Runtime Center.
+To stop a stoppable background task, select its task entry and press `S`; press `Y` to confirm, and any other key cancels. Foreground tasks and tasks in a terminal state cannot be stopped from the Runtime Center.
 
 The current SDK does not expose `resume`, `retry`, `message`, `followup`, `interrupt`, or `transcript` actions. Runtime Center marks these actions as `unavailable` and does not claim to execute them.
 

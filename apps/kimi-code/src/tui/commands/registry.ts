@@ -199,7 +199,7 @@ export const BUILTIN_SLASH_COMMANDS = [
   {
     name: 'workflows',
     aliases: ['wf'],
-    description: 'Show saved workflow run trees (ultracode orchestration runs)',
+    description: 'Open the Runtime Center on the Workflows view',
     priority: 90,
     argumentHint: '[runId]',
     availability: 'always',

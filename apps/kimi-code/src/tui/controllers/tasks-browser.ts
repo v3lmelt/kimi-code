@@ -28,12 +28,20 @@ export interface TasksBrowserHost {
     readonly runtimeCenter: RuntimeCenterState | undefined;
   };
   readonly backgroundTasks: ReadonlyMap<string, BackgroundTaskInfo>;
-  readonly workflowTasks?: ReadonlyMap<string, RuntimeCenterTaskInfo>;
+  readonly workflowBackgroundTasks?: ReadonlyMap<string, RuntimeCenterTaskInfo>;
   readonly session: Session | undefined;
   readonly workflowRuns?: readonly WorkflowRunView[];
   showError(msg: string): void;
   setTasksBrowser(value: TasksBrowserState | undefined): void;
   setRuntimeCenter(value: RuntimeCenterState | undefined): void;
+}
+
+export function getTaskInfoForOutput(
+  taskId: string,
+  backgroundTasks: ReadonlyMap<string, BackgroundTaskInfo>,
+  workflowBackgroundTasks: ReadonlyMap<string, RuntimeCenterTaskInfo> | undefined,
+): BackgroundTaskInfo | RuntimeCenterTaskInfo | undefined {
+  return backgroundTasks.get(taskId) ?? workflowBackgroundTasks?.get(taskId);
 }
 
 export type TasksBrowserState = {
@@ -270,7 +278,11 @@ export class TasksBrowserController {
     }
     if (output === viewer.output) return;
     viewer.output = output;
-    const info = this.host.backgroundTasks.get(viewer.taskId);
+    const info = getTaskInfoForOutput(
+      viewer.taskId,
+      this.host.backgroundTasks,
+      this.host.workflowBackgroundTasks,
+    );
     viewer.component.setProps({
       taskId: viewer.taskId,
       info,
@@ -379,7 +391,9 @@ export class TasksBrowserController {
 
   private runtimeProjection(tasks: readonly RuntimeCenterTaskInfo[]): RuntimeCenterProjection {
     const metadata = this.host.session?.getResumeState()?.sessionMetadata.agents;
-    const workflowTasks = this.host.workflowTasks === undefined ? [] : [...this.host.workflowTasks.values()];
+    const workflowTasks = this.host.workflowBackgroundTasks === undefined
+      ? []
+      : [...this.host.workflowBackgroundTasks.values()];
     const byTaskId = new Map<string, RuntimeCenterTaskInfo>();
     for (const task of [...tasks, ...workflowTasks]) byTaskId.set(task.taskId, task);
     return projectRuntimeCenter({
@@ -574,7 +588,11 @@ export class TasksBrowserController {
       return;
     }
 
-    const info = this.host.backgroundTasks.get(taskId);
+    const info = getTaskInfoForOutput(
+      taskId,
+      this.host.backgroundTasks,
+      this.host.workflowBackgroundTasks,
+    );
     const viewer = new TaskOutputViewer(
       {
         taskId,
@@ -678,7 +696,11 @@ export class TasksBrowserController {
     const { state } = this.host;
     const runtime = state.runtimeCenter;
     if (runtime === undefined || runtime.viewer !== undefined) return;
-    const info = this.host.backgroundTasks.get(taskId);
+    const info = getTaskInfoForOutput(
+      taskId,
+      this.host.backgroundTasks,
+      this.host.workflowBackgroundTasks,
+    );
     const viewer = new TaskOutputViewer(
       {
         taskId,
@@ -717,7 +739,11 @@ export class TasksBrowserController {
     viewer.output = output;
     viewer.component.setProps({
       taskId: viewer.taskId,
-      info: this.host.backgroundTasks.get(viewer.taskId),
+      info: getTaskInfoForOutput(
+        viewer.taskId,
+        this.host.backgroundTasks,
+        this.host.workflowBackgroundTasks,
+      ),
       output,
       onClose: () => this.closeRuntimeOutputViewer(),
     });

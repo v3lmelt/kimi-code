@@ -1736,7 +1736,7 @@ export class KimiTUI {
     return this.sessionEventHandler.backgroundTasks;
   }
 
-  get workflowTasks(): ReadonlyMap<string, RuntimeCenterTaskInfo> {
+  get workflowBackgroundTasks(): ReadonlyMap<string, RuntimeCenterTaskInfo> {
     return this.sessionEventHandler.workflowBackgroundTasks;
   }
 

@@ -22,12 +22,13 @@ import type { BackgroundTaskInfo, BackgroundTaskStatus } from '@moonshot-ai/kimi
 
 import { currentTheme } from '#/tui/theme';
 import { printableChar } from '@/tui/utils/printable-key';
+import type { RuntimeCenterTaskInfo } from '../../utils/runtime-center-model';
 
 const ELLIPSIS = '…';
 
 export interface TaskOutputViewerProps {
   readonly taskId: string;
-  readonly info: BackgroundTaskInfo | undefined;
+  readonly info: BackgroundTaskInfo | RuntimeCenterTaskInfo | undefined;
   readonly output: string;
   readonly onClose: () => void;
 }
@@ -41,7 +42,7 @@ const STATUS_LABEL: Record<BackgroundTaskStatus, string> = {
   lost: 'lost',
 };
 
-function statusColor(status: BackgroundTaskStatus): 'success' | 'textMuted' | 'error' {
+function statusColor(status: string): 'success' | 'textMuted' | 'error' {
   switch (status) {
     case 'running':
       return 'success';
@@ -52,6 +53,8 @@ function statusColor(status: BackgroundTaskStatus): 'success' | 'textMuted' | 'e
     case 'killed':
     case 'lost':
       return 'error';
+    default:
+      return 'textMuted';
   }
 }
 
@@ -195,8 +198,9 @@ export class TaskOutputViewer extends Container implements Focusable {
     const info = this.props.info;
     const segments: string[] = [];
     if (info !== undefined) {
-      segments.push(currentTheme.fg(statusColor(info.status), STATUS_LABEL[info.status]));
-      if (info.kind === 'process' && info.exitCode !== null) {
+      const label = STATUS_LABEL[info.status as BackgroundTaskStatus] ?? info.status;
+      segments.push(currentTheme.fg(statusColor(info.status), label));
+      if (info.kind === 'process' && 'exitCode' in info && info.exitCode !== null) {
         segments.push(currentTheme.fg('textMuted', `exit ${String(info.exitCode)}`));
       }
       if (info.description && info.description.length > 0) {
