@@ -133,6 +133,7 @@ describe('OpenAIResponsesModelProvider', () => {
     const provider = new OpenAIResponsesModelProvider({
       apiKey: 'YOUR_API_KEY',
       promptCacheKey: 'session-1',
+      promptCache: { mode: 'explicit', ttl: '30m' },
       nativeToolSearch: true,
     });
 
@@ -151,6 +152,8 @@ describe('OpenAIResponsesModelProvider', () => {
         maxOutputTokens: 128_000,
         offEffort: 'none',
         nativeToolSearch: true,
+        promptCache: { mode: 'explicit', ttl: '30m' },
+        supportsPromptCacheBreakpoints: true,
         generationKwargs: { prompt_cache_key: 'session-1' },
       },
       modelCapabilities: {
@@ -270,6 +273,34 @@ describe('OpenAIResponsesModelProvider', () => {
     });
 
     expect(provider.defaultModel).toBe('gpt-example');
+  });
+
+  it('requires custom models to declare support for explicit cache breakpoints', () => {
+    const provider = new OpenAIResponsesModelProvider({
+      models: [{ id: 'gpt-4.1', maxContextTokens: 32_000, maxOutputTokens: 4_000 }],
+      promptCache: {},
+    });
+
+    expect(() => provider.resolveProviderConfig('gpt-4.1')).toThrow(/does not declare support/);
+  });
+
+  it('accepts explicit cache capability declarations on custom model aliases', () => {
+    const provider = new OpenAIResponsesModelProvider({
+      models: [
+        {
+          id: 'gateway.gpt-cache',
+          maxContextTokens: 32_000,
+          maxOutputTokens: 4_000,
+          supportsPromptCacheBreakpoints: true,
+        },
+      ],
+      promptCache: {},
+    });
+
+    expect(provider.resolveProviderConfig('gateway.gpt-cache').provider).toMatchObject({
+      promptCache: {},
+      supportsPromptCacheBreakpoints: true,
+    });
   });
 
   it('rejects an unregistered default model before a session starts', () => {

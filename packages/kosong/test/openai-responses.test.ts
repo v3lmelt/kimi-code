@@ -257,6 +257,100 @@ describe('OpenAIResponsesChatProvider', () => {
     expect(body['include']).toEqual(['reasoning.encrypted_content']);
   });
 
+  it('marks the stable Codex instruction prefix for explicit-only caching', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5.6-sol',
+      apiKey: 'YOUR_API_KEY',
+      codex: { responsesLite: true },
+      promptCache: {},
+      supportsPromptCacheBreakpoints: true,
+    });
+    const history: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'Changing request' }], toolCalls: [] },
+    ];
+
+    const body = await captureRequestBody(provider, 'Stable harness policy', [ADD_TOOL], history);
+
+    expect(body['prompt_cache_options']).toEqual({ mode: 'explicit', ttl: '30m' });
+    expect(body['input']).toEqual([
+      {
+        type: 'additional_tools',
+        role: 'developer',
+        tools: [
+          {
+            type: 'function',
+            name: 'add',
+            description: 'Add two integers.',
+            parameters: ADD_TOOL.parameters,
+            strict: false,
+          },
+        ],
+      },
+      {
+        type: 'message',
+        role: 'developer',
+        content: [
+          {
+            type: 'input_text',
+            text: 'Stable harness policy',
+            prompt_cache_breakpoint: { mode: 'explicit' },
+          },
+        ],
+      },
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Changing request' }],
+      },
+    ]);
+  });
+
+  it('supports an explicit prefix breakpoint alongside implicit conversation caching', async () => {
+    const provider = new OpenAIResponsesChatProvider({
+      model: 'gpt-5.6-luna',
+      apiKey: 'YOUR_API_KEY',
+      promptCache: { mode: 'implicit', ttl: '30m' },
+      supportsPromptCacheBreakpoints: true,
+    });
+    const history: Message[] = [
+      { role: 'user', content: [{ type: 'text', text: 'Changing request' }], toolCalls: [] },
+    ];
+
+    const body = await captureRequestBody(provider, 'Stable harness policy', [], history);
+
+    expect(body).not.toHaveProperty('instructions');
+    expect(body['prompt_cache_options']).toEqual({ mode: 'implicit', ttl: '30m' });
+    expect(body['input']).toEqual([
+      {
+        type: 'message',
+        role: 'developer',
+        content: [
+          {
+            type: 'input_text',
+            text: 'Stable harness policy',
+            prompt_cache_breakpoint: { mode: 'explicit' },
+          },
+        ],
+      },
+      {
+        type: 'message',
+        role: 'user',
+        content: [{ type: 'input_text', text: 'Changing request' }],
+      },
+    ]);
+  });
+
+  it('requires an explicit model capability before enabling cache breakpoints', () => {
+    expect(
+      () =>
+        new OpenAIResponsesChatProvider({
+          model: 'gpt-4.1',
+          apiKey: 'YOUR_API_KEY',
+          promptCache: {},
+        }),
+    ).toThrow(/does not declare support/);
+  });
+
   it('uses a fresh client request id for every Codex request', async () => {
     const provider = new OpenAIResponsesChatProvider({
       model: 'gpt-5.6-sol',
@@ -289,6 +383,8 @@ describe('OpenAIResponsesChatProvider', () => {
     const provider = new OpenAIResponsesChatProvider({
       model: 'gpt-5.6-luna',
       apiKey: 'YOUR_API_KEY',
+      promptCache: {},
+      supportsPromptCacheBreakpoints: true,
       responsesWebSocket: true,
       responsesWebSocketFactory: (_client, headers) => {
         handshakeHeaders = headers;
@@ -314,6 +410,27 @@ describe('OpenAIResponsesChatProvider', () => {
     }
 
     expect(socket.sent[0]).not.toHaveProperty('previous_response_id');
+    expect(socket.sent[0]).toMatchObject({
+      prompt_cache_options: { mode: 'explicit', ttl: '30m' },
+      input: [
+        {
+          type: 'message',
+          role: 'developer',
+          content: [
+            {
+              type: 'input_text',
+              text: 'Stable policy',
+              prompt_cache_breakpoint: { mode: 'explicit' },
+            },
+          ],
+        },
+        {
+          type: 'message',
+          role: 'user',
+          content: [{ type: 'input_text', text: 'First question' }],
+        },
+      ],
+    });
     expect(socket.sent[1]).toMatchObject({
       type: 'response.create',
       previous_response_id: 'resp-ws-1',
@@ -326,7 +443,20 @@ describe('OpenAIResponsesChatProvider', () => {
       ],
     });
     expect(socket.sent[2]).not.toHaveProperty('previous_response_id');
-    expect(socket.sent[2]!['input']).toHaveLength(3);
+    expect(socket.sent[2]!['input']).toHaveLength(4);
+    expect(socket.sent[2]!['input']).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'developer',
+          content: [
+            expect.objectContaining({
+              text: 'Changed policy',
+              prompt_cache_breakpoint: { mode: 'explicit' },
+            }),
+          ],
+        }),
+      ]),
+    );
     expect(handshakeHeaders).toMatchObject({
       'OpenAI-Beta': 'responses_websockets=2026-02-06',
       'x-client-request-id': expect.stringMatching(/^[0-9a-f-]{36}$/),
@@ -338,6 +468,8 @@ describe('OpenAIResponsesChatProvider', () => {
     const provider = new OpenAIResponsesChatProvider({
       model: 'gpt-5.6-luna',
       apiKey: 'YOUR_API_KEY',
+      promptCache: {},
+      supportsPromptCacheBreakpoints: true,
       responsesWebSocket: true,
       responsesWebSocketFactory: () => socket,
     });
@@ -358,7 +490,20 @@ describe('OpenAIResponsesChatProvider', () => {
 
     expect(socket.sent[1]).toHaveProperty('previous_response_id', 'resp-ws-1');
     expect(socket.sent[2]).not.toHaveProperty('previous_response_id');
-    expect(socket.sent[2]!['input']).toHaveLength(3);
+    expect(socket.sent[2]!['input']).toHaveLength(4);
+    expect(socket.sent[2]!['input']).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: 'developer',
+          content: [
+            expect.objectContaining({
+              text: 'Stable policy',
+              prompt_cache_breakpoint: { mode: 'explicit' },
+            }),
+          ],
+        }),
+      ]),
+    );
   });
 
   it('forces a full request after an incomplete response', async () => {
