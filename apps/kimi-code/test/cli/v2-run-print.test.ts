@@ -121,7 +121,7 @@ function opts(overrides: Record<string, unknown> = {}) {
   } as const;
 }
 
-function makeFakeHarness() {
+function makeFakeHarness(extraEvents: readonly DomainEvent[] = []) {
   // Native event listeners registered on the main agent's IEventBus; the turn
   // emits a streaming assistant delta before completing.
   const eventListeners = new Set<(event: DomainEvent) => void>();
@@ -154,6 +154,7 @@ function makeFakeHarness() {
         enqueue: vi.fn(async () => {
           // Emit a native assistant delta on the main agent bus, then complete.
           for (const listener of [...eventListeners]) {
+            for (const event of extraEvents) listener(event);
             listener({ type: 'assistant.delta', turnId: 1, delta: 'hello world' } as DomainEvent);
           }
           return {
@@ -292,6 +293,63 @@ describe('runV2Print', () => {
     expect(stderr.write).toHaveBeenNthCalledWith(1, 'hasu version 1.2.3-test\n');
     expect(stdout.text()).toContain('hello world');
     expect(app.dispose).toHaveBeenCalled();
+  });
+
+  it('writes hosted search lifecycle events to stream-json output', async () => {
+    const stdout = writer();
+    const stderr = writer();
+    const source = { type: 'url' as const, url: 'https://nodejs.org/', title: 'Node.js' };
+    const { app, agent } = makeFakeHarness([
+      {
+        type: 'hosted.search',
+        turnId: 1,
+        step: 1,
+        phase: 'completed',
+        callId: 'search-1',
+        query: 'current Node.js LTS',
+        status: 'completed',
+        sources: [source],
+        citations: [
+          {
+            type: 'url_citation',
+            startIndex: 0,
+            endIndex: 7,
+            title: 'Node.js',
+            url: 'https://nodejs.org/',
+          },
+        ],
+      } as DomainEvent,
+    ]);
+
+    mocks.bootstrap.mockReturnValue({ app });
+    mocks.ensureMainAgent.mockResolvedValue(agent);
+
+    await runV2Print(opts({ outputFormat: 'stream-json' }) as never, '1.2.3-test', {
+      stdout,
+      stderr,
+    });
+
+    const lines = stdout.text().trim().split('\n').map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(lines).toContainEqual({
+      role: 'meta',
+      type: 'hosted.search',
+      turn_id: 1,
+      step: 1,
+      phase: 'completed',
+      call_id: 'search-1',
+      query: 'current Node.js LTS',
+      status: 'completed',
+      sources: [source],
+      citations: [
+        {
+          type: 'url_citation',
+          startIndex: 0,
+          endIndex: 7,
+          title: 'Node.js',
+          url: 'https://nodejs.org/',
+        },
+      ],
+    });
   });
 
   it('passes explicit skill dirs from --skillsDir into bootstrap args', async () => {

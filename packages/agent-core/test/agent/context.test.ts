@@ -60,6 +60,82 @@ describe('Agent context', () => {
     expect(ctx.agent.context.messages.some((message) => 'origin' in message)).toBe(false);
   });
 
+  it('keeps hosted-search metadata in history while stripping it from model projection', () => {
+    const ctx = testAgent();
+    ctx.configure();
+
+    ctx.dispatch({
+      type: 'context.append_loop_event',
+      event: { type: 'step.begin', uuid: 'search-step', turnId: '', step: 1 },
+    });
+    ctx.dispatch({
+      type: 'context.append_loop_event',
+      event: {
+        type: 'content.part',
+        uuid: 'search-content',
+        turnId: '',
+        step: 1,
+        stepUuid: 'search-step',
+        part: { type: 'text', text: 'answer' },
+      },
+    });
+    ctx.dispatch({
+      type: 'context.append_loop_event',
+      event: {
+        type: 'hosted.search',
+        uuid: 'search-completed',
+        turnId: '',
+        step: 1,
+        stepUuid: 'search-step',
+        phase: 'completed',
+        callId: 'search-call',
+        status: 'completed',
+        sources: [{ url: 'https://example.test/source', title: 'Source' }],
+        citations: [
+          {
+            type: 'url_citation',
+            startIndex: 0,
+            endIndex: 6,
+            url: 'https://example.test/source',
+            citationText: 'answer',
+          },
+          {
+            type: 'url_citation',
+            startIndex: 0,
+            endIndex: 6,
+            url: 'https://example.test/source',
+            citationText: 'answer',
+          },
+        ],
+      },
+    });
+    ctx.dispatch({
+      type: 'context.append_loop_event',
+      event: { type: 'step.end', uuid: 'search-step', turnId: '', step: 1 },
+    });
+
+    const historyMessage = ctx.agent.context.history.find((message) => message.role === 'assistant');
+    expect(historyMessage?.searchMetadata).toEqual([
+      {
+        callId: 'search-call',
+        status: 'completed',
+        action: undefined,
+        sources: [{ url: 'https://example.test/source', title: 'Source' }],
+      },
+    ]);
+    expect(historyMessage?.annotations).toHaveLength(1);
+    expect(historyMessage?.annotations?.[0]).toMatchObject({
+      url: 'https://example.test/source',
+      startIndex: 0,
+      endIndex: 6,
+      citationText: 'answer',
+    });
+
+    const projected = ctx.agent.context.messages.find((message) => message.role === 'assistant');
+    expect(projected).not.toHaveProperty('searchMetadata');
+    expect(projected).not.toHaveProperty('annotations');
+  });
+
   it('preserves tool call extras (Gemini thought_signature) through to projection', () => {
     // Regression: Gemini 3 requires the thought_signature returned on a
     // functionCall to be echoed back when the call is re-sent in the next turn.

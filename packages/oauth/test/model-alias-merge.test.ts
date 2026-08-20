@@ -14,7 +14,8 @@ describe('mergeRefreshedModelAlias', () => {
         model: 'kimi-k2',
         maxContextSize: 262144,
         supportEfforts: ['low'],
-        overrides: { supportEfforts: ['low'] },
+        webSearch: 'cached',
+        overrides: { supportEfforts: ['low'], webSearch: 'live' },
       },
       {
         provider: 'managed:kimi-code',
@@ -26,7 +27,8 @@ describe('mergeRefreshedModelAlias', () => {
     );
 
     expect(merged.supportEfforts).toEqual(['low', 'high', 'max']);
-    expect(merged.overrides).toEqual({ supportEfforts: ['low'] });
+    expect(merged.webSearch).toBe('cached');
+    expect(merged.overrides).toEqual({ supportEfforts: ['low'], webSearch: 'live' });
   });
 
   it('drops managed top-level fields when upstream stops declaring them', () => {

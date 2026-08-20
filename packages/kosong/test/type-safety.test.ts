@@ -33,6 +33,14 @@ function processPartSafely(part: StreamedMessagePart): string {
       return part.argumentsPart ?? ''; // ToolCallPart.argumentsPart -> string | null
     case 'usage':
       return String(part.usage.output); // UsagePart.usage -> TokenUsage
+    case 'url_citation':
+      return part.url;
+    case 'hosted_search_source':
+      return part.source.url;
+    case 'hosted_search_action':
+      return part.action.type;
+    case 'hosted_search_lifecycle':
+      return part.status;
     default: {
       const _exhaustive: never = part;
       throw new Error(`Unknown part type: ${JSON.stringify(_exhaustive)}`);

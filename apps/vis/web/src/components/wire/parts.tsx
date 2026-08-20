@@ -63,13 +63,15 @@ export function loopEventSummary(ev: LoopRecordedEvent): string {
             : 0;
       return `${ev.part.type}${len ? ` (${len}b)` : ''}`;
     }
+    case 'hosted.search':
+      return `${ev.phase}${ev.status === undefined ? '' : ` · ${ev.status}`}`;
     case 'tool.call':
       return `${ev.name}#${ev.toolCallId.slice(-8)}`;
     case 'tool.result':
       return `result#${ev.toolCallId.slice(-8)}${ev.result.isError === true ? ' (error)' : ''}`;
     default: {
       const exhaustive: never = ev;
-      return String((exhaustive as { type?: string }).type ?? 'unknown');
+      return exhaustive;
     }
   }
 }
@@ -412,6 +414,7 @@ export function LoopEventDetail({ event }: { event: LoopRecordedEvent }) {
     }
     case 'step.begin':
     case 'content.part':
+    case 'hosted.search':
       return <JsonViewer value={event} defaultOpenDepth={2} />;
     default:
       return <JsonViewer value={event} defaultOpenDepth={2} />;

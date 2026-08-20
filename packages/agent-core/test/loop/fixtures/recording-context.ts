@@ -58,6 +58,8 @@ export class RecordingContext {
         this.calls.push({ kind: 'appendContentPart', input: record });
         return;
       }
+      case 'hosted.search':
+        return;
       case 'tool.call': {
         this.calls.push({ kind: 'appendToolCall', input: record });
         return;

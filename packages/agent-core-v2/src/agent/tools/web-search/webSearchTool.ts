@@ -26,6 +26,7 @@ import {
 } from '#/tool/toolContract';
 import { ToolResultBuilder } from '#/tool/result-builder';
 import { registerAgentToolService } from '#/agent/toolRegistry/toolContribution';
+import { IAgentProfileService } from '#/agent/profile/profile';
 import { IWebSearchProviderService } from '#/app/auth/webSearch/webSearch';
 
 import {
@@ -134,5 +135,9 @@ function classifySearchError(error: unknown): string {
 registerAgentToolService(IWebSearchTool, WebSearchTool, {
   name: 'WebSearch',
   domain: 'auth',
-  when: (accessor) => accessor.get(IWebSearchProviderService).hasWebSearchProvider(),
+  when: (accessor) => {
+    if (!accessor.get(IWebSearchProviderService).hasWebSearchProvider()) return false;
+    const profile = accessor.get(IAgentProfileService);
+    return profile.hasModel() && profile.resolveModelContext().webSearch === 'disabled';
+  },
 });

@@ -18,20 +18,33 @@
  *    `notifyConfigChanged()` (the load-bearing test-harness contract).
  */
 
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import type OpenAI from 'openai';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { createScopedTestHost } from '#/_base/di/test';
+import { SyncDescriptor } from '#/_base/di/descriptors';
+import { DisposableStore } from '#/_base/di/lifecycle';
+import { createScopedTestHost, TestInstantiationService } from '#/_base/di/test';
 import { isErrorCode } from '#/_base/errors/codes';
 import { isError2 } from '#/_base/errors/errors';
-import { IConfigService } from '#/app/config/config';
+import { ILogService } from '#/_base/log/log';
+import { IBootstrapService } from '#/app/bootstrap/bootstrap';
+import { IConfigRegistry, IConfigService } from '#/app/config/config';
+import { ConfigRegistry, ConfigService } from '#/app/config/configService';
+import { ModelRecordSchema, modelsFromToml } from '#/app/kosongConfig/configSection';
+import { IKosongConfigService } from '#/app/kosongConfig/kosongConfig';
+import '#/app/kosongConfig/kosongConfigService';
 import { ConfigErrors } from '#/app/config/errors';
 import { UNKNOWN_CAPABILITY } from '#/kosong/contract/capability';
 import type { ChatProvider } from '#/kosong/contract/provider';
 import { emptyUsage } from '#/kosong/contract/usage';
-import { IProtocolAdapterRegistry } from '#/kosong/protocol/protocol';
+import {
+  IProtocolAdapterRegistry,
+  type ProtocolAdapterConfig,
+} from '#/kosong/protocol/protocol';
 import '#/kosong/provider/bases/anthropic/index';
 import '#/kosong/provider/bases/google-genai/index';
 import '#/kosong/provider/bases/openai/index';
+import { OpenAIResponsesChatProvider } from '#/kosong/provider/bases/openai/openai-responses';
 import '#/kosong/provider/protocolAdapterRegistry';
 import '#/kosong/provider/providers/kimi/kimi.contrib';
 import '#/kosong/provider/providers/standard.contrib';
@@ -56,12 +69,17 @@ import { IHostRequestHeaders } from '#/kosong/model/hostRequestHeaders';
 import { IModelService, type ModelRecord, type ModelsSection } from '#/kosong/model/model';
 import '#/kosong/model/modelService';
 import { IModelOAuthTokens } from '#/kosong/model/modelOAuth';
+import { TomlAtomicDocumentStore } from '#/persistence/backends/node-fs/atomicDocumentStore';
+import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
+import { IAtomicTomlDocumentStore } from '#/persistence/interface/atomicDocumentStore';
+import { IFileSystemStorageService } from '#/persistence/interface/storage';
 
 import { HostRequestHeadersAdapter } from '#/app/kosongConfig/hostRequestHeadersAdapter';
 
 import { StubConfigService, stubModelOAuthTokens, stubTokenProvider } from '../stubs';
 import { stubAgentIdentity } from '../../app/agentIdentity/stubs';
 import { stubBootstrap } from '../../app/bootstrap/stubs';
+import { stubLog } from '../../_base/log/stubs';
 
 const HOST_HEADERS = { 'User-Agent': 'kimi-test/1.0', 'X-Msh-Device-Id': 'device-1' };
 
@@ -141,6 +159,217 @@ afterEach(() => {
 });
 
 describe('Model assembly (pure data)', () => {
+  it('loads hosted search from a real config.toml through config, registry, and catalog', async () => {
+    const disposables = new DisposableStore();
+    const configIx = disposables.add(new TestInstantiationService());
+    const storage = new InMemoryStorageService();
+    await storage.write(
+      '',
+      'config.toml',
+      new TextEncoder().encode(`
+[providers.codex]
+type = "openai-codex"
+
+[models."openai-codex/gpt-5.6-sol"]
+provider = "codex"
+model = "gpt-5.6-sol"
+max_context_size = 400000
+web_search = "live"
+
+[models."openai-codex/gpt-5.6-indexed"]
+provider = "codex"
+model = "gpt-5.6-sol"
+max_context_size = 400000
+web_search = "cached"
+
+[models."openai-codex/gpt-5.6-indexed".overrides]
+web_search = "indexed"
+`),
+    );
+    configIx.stub(ILogService, stubLog());
+    configIx.stub(IFileSystemStorageService, storage);
+    configIx.stub(IBootstrapService, stubBootstrap('/tmp/kimi-hosted-search'));
+    configIx.set(IAtomicTomlDocumentStore, new SyncDescriptor(TomlAtomicDocumentStore));
+    configIx.set(IConfigRegistry, new SyncDescriptor(ConfigRegistry));
+    configIx.set(IConfigService, new SyncDescriptor(ConfigService));
+    const config = configIx.get(IConfigService);
+    await config.ready;
+
+    const host = createScopedTestHost([
+      [IConfigService, config],
+      [ILogService, stubLog()],
+      [IModelOAuthTokens, stubModelOAuthTokens()],
+      [IHostRequestHeaders, hostHeadersPort({ headers: HOST_HEADERS })],
+    ]);
+    try {
+      await host.app.accessor.get(IKosongConfigService).ready;
+      const catalog = host.app.accessor.get(IModelCatalog);
+      const configured = config.get<ModelsSection>('models');
+
+      expect(configured?.['openai-codex/gpt-5.6-sol']?.webSearch).toBe('live');
+      expect(catalog.get('openai-codex/gpt-5.6-sol')).toMatchObject({
+        webSearch: 'live',
+        providerOptions: { webSearch: 'live' },
+      });
+      expect(catalog.get('openai-codex/gpt-5.6-indexed')).toMatchObject({
+        webSearch: 'indexed',
+        providerOptions: { webSearch: 'indexed' },
+      });
+    } finally {
+      host.dispose();
+      disposables.dispose();
+    }
+  });
+
+  it('reads web_search from TOML, applies model overrides, and passes it to Responses options', () => {
+    const transformed = modelsFromToml({
+      codex: {
+        provider: 'codex',
+        protocol: 'openai_responses',
+        model: 'gpt-5.6-sol',
+        max_context_size: 128000,
+        web_search: 'cached',
+        overrides: { web_search: 'indexed' },
+      },
+    }) as Record<string, unknown>;
+    const record = ModelRecordSchema.parse(transformed['codex']);
+    expect(record.webSearch).toBe('cached');
+    expect(record.overrides?.webSearch).toBe('indexed');
+
+    const { host, catalog } = createHost({
+      providers: {
+        codex: { type: 'openai-codex', baseUrl: 'https://chatgpt.com/backend-api/codex' },
+      },
+      models: { codex: record },
+    });
+    try {
+      const model = catalog.get('codex');
+      expect(model.webSearch).toBe('indexed');
+      expect(model.providerOptions?.webSearch).toBe('indexed');
+    } finally {
+      host.dispose();
+    }
+  });
+
+  it('carries TOML hosted search through the catalog into a Responses request', async () => {
+    const transformed = modelsFromToml({
+      codex: {
+        provider: 'codex',
+        protocol: 'openai_responses',
+        model: 'gpt-5.6-sol',
+        max_context_size: 128000,
+        web_search: 'cached',
+        overrides: { web_search: 'live' },
+      },
+    }) as Record<string, unknown>;
+    const record = ModelRecordSchema.parse(transformed['codex']);
+    const { host, models, providers } = createHost({
+      providers: {
+        codex: { type: 'openai-codex', baseUrl: 'https://chatgpt.com/backend-api/codex' },
+      },
+      models: { codex: record },
+    });
+    const create = vi.fn().mockResolvedValue({
+      async *[Symbol.asyncIterator](): AsyncGenerator<unknown> {
+        yield { type: 'response.output_text.delta', delta: 'done' };
+        yield { type: 'response.completed', response: { id: 'resp-test' } };
+      },
+    });
+    const client = { responses: { create } } as unknown as OpenAI;
+    let adapterConfig: ProtocolAdapterConfig | undefined;
+    const registry = {
+      _serviceBrand: undefined,
+      supportedProtocols: () => [],
+      resolveAdapterIdentity: () => {
+        throw new Error('not exercised');
+      },
+      resolveProviderBaseId: () => {
+        throw new Error('not exercised');
+      },
+      resolveCapability: () => UNKNOWN_CAPABILITY,
+      explainCapability: () => ({
+        capability: UNKNOWN_CAPABILITY,
+        source: { kind: 'none' as const },
+      }),
+      createChatProvider(config: ProtocolAdapterConfig) {
+        adapterConfig = config;
+        return new OpenAIResponsesChatProvider({
+          apiKey: 'YOUR_API_KEY',
+          baseUrl: config.baseUrl,
+          model: config.modelName,
+          webSearch: config.providerOptions?.webSearch,
+          offEffort: config.providerOptions?.offEffort,
+          clientFactory: () => client,
+        });
+      },
+    } as unknown as IProtocolAdapterRegistry;
+    const catalog = new ModelCatalog(
+      providers,
+      models,
+      stubModelOAuthTokens(),
+      registry,
+      { headers: {}, thirdPartyHeaders: {} },
+    );
+    try {
+      const model = catalog.get('codex');
+      expect(model.webSearch).toBe('live');
+      for await (const _event of catalog.getRequester('codex').request(
+        {
+          systemPrompt: '',
+          tools: [],
+          messages: [
+            {
+              role: 'user',
+              content: [{ type: 'text', text: 'search the web' }],
+              toolCalls: [],
+            },
+          ],
+        },
+        undefined,
+        { webSearch: model.webSearch },
+      )) {
+        // Consume the stream so the request lifecycle completes.
+      }
+
+      expect(adapterConfig).toMatchObject({
+        protocol: 'openai_responses',
+        providerType: 'openai-codex',
+        providerOptions: { webSearch: 'live' },
+      });
+      expect(create).toHaveBeenCalledTimes(1);
+      const params = create.mock.calls[0]?.[0] as { include: unknown[]; tools: unknown[] };
+      expect(params.include).toEqual(['web_search_call.action.sources']);
+      expect(params.tools).toEqual([{ type: 'web_search', external_web_access: true }]);
+    } finally {
+      catalog.dispose();
+      host.dispose();
+    }
+  });
+
+  it('rejects hosted search on non-Codex providers', () => {
+    const { host, catalog } = createHost({
+      providers: {
+        openai: { type: 'openai', apiKey: 'YOUR_API_KEY', baseUrl: 'https://api.openai.com/v1' },
+      },
+      models: {
+        gpt: {
+          provider: 'openai',
+          protocol: 'openai_responses',
+          model: 'gpt-5.6-sol',
+          maxContextSize: 128000,
+          webSearch: 'live',
+        },
+      },
+    });
+    try {
+      expect(() => catalog.get('gpt')).toThrowError(
+        expect.objectContaining({ code: ConfigErrors.codes.CONFIG_INVALID }),
+      );
+    } finally {
+      host.dispose();
+    }
+  });
+
   it('assembles a kimi model: protocol resolves to the vendor base, never a vendor', () => {
     const { host, catalog } = createHost(kimiSections);
     try {

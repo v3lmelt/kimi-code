@@ -12,10 +12,16 @@
 import { APIEmptyResponseError, createAbortError } from './errors';
 import {
   isContentPart,
+  isHostedSearchPart,
   isToolCall,
   isToolCallPart,
+  isUrlCitationPart,
   isUsagePart,
   mergeInPlace,
+  type HostedSearchAction,
+  type HostedSearchCitation,
+  type HostedSearchEvent,
+  type HostedSearchPart,
   type Message,
   type StreamedMessagePart,
   type ToolCall,
@@ -25,6 +31,10 @@ import type { Tool } from './tool';
 import type { TokenUsage } from './usage';
 
 type StoredToolCall = Omit<ToolCall, '_streamIndex'>;
+type MutableMessage = Message & {
+  annotations?: HostedSearchCitation[];
+  searchMetadata?: HostedSearchEvent[];
+};
 
 export interface GenerateResult {
   readonly id: string | null;
@@ -32,6 +42,8 @@ export interface GenerateResult {
   readonly usage: TokenUsage | null;
   readonly finishReason: FinishReason | null;
   readonly rawFinishReason: string | null;
+  readonly annotations?: readonly HostedSearchCitation[];
+  readonly searchMetadata?: readonly HostedSearchEvent[];
   readonly traceId?: string | null;
 }
 
@@ -48,7 +60,7 @@ export async function generate(
   callbacks?: GenerateCallbacks,
   options?: GenerateOptions,
 ): Promise<GenerateResult> {
-  const message: Message = { role: 'assistant', content: [], toolCalls: [] };
+  const message: MutableMessage = { role: 'assistant', content: [], toolCalls: [] };
   let pendingPart: StreamedMessagePart | null = null;
 
   const toolCallIndexMap = new Map<number | string, number>();
@@ -133,6 +145,16 @@ export async function generate(
   if (pendingPart !== null) {
     flushPart(message, pendingPart, toolCallIndexMap);
   }
+  if (stream.annotations !== undefined) {
+    for (const citation of stream.annotations) {
+      appendUniqueCitation((message.annotations ??= []), citation);
+    }
+  }
+  if (stream.searchMetadata !== undefined) {
+    for (const event of stream.searchMetadata) {
+      appendHostedSearchEvent((message.searchMetadata ??= []), event);
+    }
+  }
   if (message.content.length === 0 && message.toolCalls.length === 0) {
     throw new APIEmptyResponseError(
       'The API returned an empty response (no content, no tool calls).' +
@@ -177,6 +199,8 @@ export async function generate(
     usage: stream.usage,
     finishReason: stream.finishReason,
     rawFinishReason: stream.rawFinishReason,
+    annotations: message.annotations,
+    searchMetadata: message.searchMetadata,
   };
   if (stream.traceId !== undefined) {
     return { ...result, traceId: stream.traceId };
@@ -221,7 +245,7 @@ function isPendingToolCallAtIndex(
 }
 
 function flushPart(
-  message: Message,
+  message: MutableMessage,
   part: StreamedMessagePart,
   toolCallIndexMap: Map<number | string, number>,
 ): void {
@@ -243,7 +267,60 @@ function flushPart(
     if (streamIndex !== undefined) {
       toolCallIndexMap.set(streamIndex, ordinal);
     }
+    return;
   }
+  if (isUrlCitationPart(part)) {
+    appendUniqueCitation((message.annotations ??= []), part);
+    return;
+  }
+  if (isHostedSearchPart(part)) {
+    appendHostedSearchEvent((message.searchMetadata ??= []), hostedSearchPartToEvent(part));
+  }
+}
+
+function appendUniqueCitation(
+  citations: HostedSearchCitation[],
+  citation: HostedSearchCitation,
+): void {
+  if (
+    citations.some(
+      (candidate) =>
+        candidate.url === citation.url &&
+        candidate.startIndex === citation.startIndex &&
+        candidate.endIndex === citation.endIndex,
+    )
+  ) {
+    return;
+  }
+  citations.push(citation);
+}
+
+function appendHostedSearchEvent(events: HostedSearchEvent[], event: HostedSearchEvent): void {
+  if (
+    events.some(
+      (candidate) =>
+        candidate.callId === event.callId &&
+        candidate.status === event.status &&
+        JSON.stringify(candidate.action) === JSON.stringify(event.action) &&
+        JSON.stringify(candidate.sources) === JSON.stringify(event.sources),
+    )
+  ) {
+    return;
+  }
+  events.push(event);
+}
+
+function hostedSearchPartToEvent(part: HostedSearchPart): HostedSearchEvent {
+  const event: HostedSearchEvent = {};
+  if (part.callId !== undefined) event.callId = part.callId;
+  if (part.type === 'hosted_search_source') event.sources = [part.source];
+  if (part.type === 'hosted_search_action') event.action = part.action;
+  if (part.type === 'hosted_search_lifecycle') {
+    event.status = part.status;
+    if (part.action !== undefined) event.action = part.action;
+    if (part.sources !== undefined) event.sources = part.sources;
+  }
+  return event;
 }
 
 function formatFinishReasonHint(stream: StreamedMessage): string {
@@ -298,7 +375,31 @@ function deepCopyPart(part: StreamedMessagePart): StreamedMessagePart {
       return { type: 'tool_call_part', argumentsPart: part.argumentsPart, index: part.index };
     case 'usage':
       return { type: 'usage', usage: { ...part.usage } };
+    case 'url_citation':
+      return { ...part };
+    case 'hosted_search_source':
+      return { ...part, source: { ...part.source } };
+    case 'hosted_search_action':
+      return { ...part, action: deepCopyHostedSearchAction(part.action) };
+    case 'hosted_search_lifecycle':
+      return {
+        ...part,
+        action:
+          part.action === undefined ? undefined : deepCopyHostedSearchAction(part.action),
+        sources: part.sources?.map((source) => ({ ...source })),
+      };
   }
+}
+
+function deepCopyHostedSearchAction(action: HostedSearchAction): HostedSearchAction {
+  if (action.type === 'search') {
+    return {
+      ...action,
+      queries: action.queries === undefined ? undefined : [...action.queries],
+      sources: action.sources?.map((source) => ({ ...source })),
+    };
+  }
+  return { ...action };
 }
 
 /** Recursive copy of a ToolCall `extras` record (plain objects and arrays). */

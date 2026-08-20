@@ -91,4 +91,47 @@ describe('MoonshotFetchURLProvider content kind', () => {
 
     expect(result).toEqual({ content: 'verbatim body', kind: 'passthrough' });
   });
+
+  it('forwards the abort signal to the Moonshot request and local fallback', async () => {
+    const signal = new AbortController().signal;
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValue(new Response('boom', { status: 503 }));
+    const localFallback = fakeFetcher('fallback content');
+    const provider = new MoonshotFetchURLProvider({
+      apiKey: 'test-key',
+      baseUrl: 'https://fetch.example/v1',
+      localFallback,
+      fetchImpl,
+    });
+
+    await provider.fetch('https://example.com/page', { signal });
+
+    expect(fetchImpl).toHaveBeenCalledWith(
+      'https://fetch.example/v1',
+      expect.objectContaining({ signal }),
+    );
+    expect(localFallback.fetch).toHaveBeenCalledWith('https://example.com/page', { signal });
+  });
+
+  it('does not fall back after the Moonshot request is aborted', async () => {
+    const controller = new AbortController();
+    const fetchImpl = vi.fn<typeof fetch>().mockImplementation(async (_url, init) => {
+      expect(init?.signal).toBe(controller.signal);
+      controller.abort();
+      throw new Error('aborted');
+    });
+    const localFallback = fakeFetcher('fallback content');
+    const provider = new MoonshotFetchURLProvider({
+      apiKey: 'test-key',
+      baseUrl: 'https://fetch.example/v1',
+      localFallback,
+      fetchImpl,
+    });
+
+    await expect(
+      provider.fetch('https://example.com/page', { signal: controller.signal }),
+    ).rejects.toThrow('aborted');
+    expect(localFallback.fetch).not.toHaveBeenCalled();
+  });
 });

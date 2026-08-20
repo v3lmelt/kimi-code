@@ -98,6 +98,57 @@ describe('reduceWireRecords', () => {
     expect(foldedLength).toBe(2);
   });
 
+  it('replays hosted-search metadata onto the assistant message and deduplicates citations', () => {
+    const { entries } = reduceWireRecords([
+      ...assistantStep('search-step', 'answer').slice(0, 2),
+      loopEvent({
+        type: 'hosted.search',
+        uuid: 'search-completed',
+        turnId: 't',
+        step: 0,
+        stepUuid: 'search-step',
+        phase: 'completed',
+        callId: 'search-call',
+        status: 'completed',
+        sources: [{ url: 'https://example.test/source', title: 'Source' }],
+        citations: [
+          {
+            type: 'url_citation',
+            startIndex: 0,
+            endIndex: 6,
+            url: 'https://example.test/source',
+            citationText: 'answer',
+          },
+          {
+            type: 'url_citation',
+            startIndex: 0,
+            endIndex: 6,
+            url: 'https://example.test/source',
+            citationText: 'answer',
+          },
+        ],
+      }),
+      loopEvent({ type: 'step.end', uuid: 'search-step', turnId: 't', step: 0 }),
+    ]);
+    const assistant = entries[0]?.message;
+
+    expect(assistant?.searchMetadata).toEqual([
+      {
+        callId: 'search-call',
+        status: 'completed',
+        action: undefined,
+        sources: [{ url: 'https://example.test/source', title: 'Source' }],
+      },
+    ]);
+    expect(assistant?.annotations).toHaveLength(1);
+    expect(assistant?.annotations?.[0]).toMatchObject({
+      url: 'https://example.test/source',
+      startIndex: 0,
+      endIndex: 6,
+      citationText: 'answer',
+    });
+  });
+
   it('compaction keeps the prefix and appends the user-role summary', () => {
     const { entries, foldedLength } = reduceWireRecords([
       appendMessage(userMessage('u1')),

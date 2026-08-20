@@ -84,6 +84,7 @@ import {
   GoalCompletionMessageComponent,
   GoalSetMessageComponent,
 } from './components/messages/goal-panel';
+import { HostedSearchComponent } from './components/messages/hosted-search';
 import { PluginCommandComponent } from './components/messages/plugin-command';
 import { ShellRunComponent } from './components/messages/shell-run';
 import { SkillActivationComponent } from './components/messages/skill-activation';
@@ -2330,6 +2331,9 @@ export class KimiTUI {
   // =========================================================================
 
   private createTranscriptComponent(entry: TranscriptEntry): Component | null {
+    if (entry.hostedSearchData !== undefined) {
+      return new HostedSearchComponent(entry.hostedSearchData);
+    }
     if (entry.compactionData !== undefined) {
       const data = entry.compactionData;
       const block = new CompactionComponent(this.state.ui, data.instruction);
@@ -2377,7 +2381,10 @@ export class KimiTUI {
           return new GoalCompletionMessageComponent(entry.content);
         }
         const component = new AssistantMessageComponent();
-        component.updateContent(entry.content);
+        component.updateContent(entry.content, {
+          citations: entry.assistantCitations,
+          sources: entry.assistantCitationSources,
+        });
         return component;
       }
       case 'thinking': {

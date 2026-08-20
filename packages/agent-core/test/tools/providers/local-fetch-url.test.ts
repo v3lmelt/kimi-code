@@ -392,4 +392,24 @@ describe('LocalFetchURLProvider connection pinning', () => {
     const dispatcher = (fetchImpl.mock.calls[0]![1] as RequestInit).dispatcher;
     expect(asUndiciAgent(dispatcher).closed).toBe(true);
   });
+
+  it('propagates the abort signal to every redirect request', async () => {
+    const signal = new AbortController().signal;
+    const fetchImpl = vi
+      .fn<typeof fetch>()
+      .mockResolvedValueOnce(
+        new Response(null, {
+          status: 302,
+          headers: { location: 'https://example.com/next' },
+        }),
+      )
+      .mockResolvedValueOnce(htmlResponse('ok', 'text/plain'));
+    const provider = new LocalFetchURLProvider({ fetchImpl });
+
+    await provider.fetch('https://example.com/start', { signal });
+
+    expect(fetchImpl.mock.calls).toHaveLength(2);
+    expect((fetchImpl.mock.calls[0]![1] as RequestInit).signal).toBe(signal);
+    expect((fetchImpl.mock.calls[1]![1] as RequestInit).signal).toBe(signal);
+  });
 });

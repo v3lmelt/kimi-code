@@ -63,7 +63,55 @@ export interface UsagePart {
   usage: TokenUsage;
 }
 
-export type StreamedMessagePart = ContentPart | ToolCall | ToolCallPart | UsagePart;
+export interface HostedSearchSource {
+  type?: 'url';
+  url: string;
+  title?: string;
+}
+
+export type HostedSearchAction =
+  | { type: 'search'; query?: string; queries?: string[]; sources?: HostedSearchSource[] }
+  | { type: 'open_page'; url?: string }
+  | { type: 'find_in_page'; url?: string; pattern?: string };
+
+export type HostedSearchLifecycle = 'in_progress' | 'searching' | 'completed' | 'failed';
+
+export interface HostedSearchEvent {
+  callId?: string;
+  status?: HostedSearchLifecycle;
+  action?: HostedSearchAction;
+  sources?: HostedSearchSource[];
+}
+
+export type HostedSearchPart =
+  | { type: 'hosted_search_source'; source: HostedSearchSource; callId?: string }
+  | { type: 'hosted_search_action'; action: HostedSearchAction; callId?: string }
+  | {
+      type: 'hosted_search_lifecycle';
+      status: HostedSearchLifecycle;
+      action?: HostedSearchAction;
+      sources?: HostedSearchSource[];
+      callId?: string;
+    };
+
+export interface HostedSearchCitation {
+  type: 'url_citation';
+  startIndex: number;
+  endIndex: number;
+  title?: string;
+  url: string;
+  citationText?: string;
+}
+
+export type UrlCitationPart = HostedSearchCitation;
+
+export type StreamedMessagePart =
+  | ContentPart
+  | ToolCall
+  | ToolCallPart
+  | UsagePart
+  | HostedSearchPart
+  | UrlCitationPart;
 
 export interface Message {
   readonly role: Role;
@@ -72,6 +120,8 @@ export interface Message {
   readonly toolCalls: ToolCall[];
   readonly toolCallId?: string;
   readonly partial?: boolean;
+  readonly annotations?: readonly HostedSearchCitation[];
+  readonly searchMetadata?: readonly HostedSearchEvent[];
   readonly tools?: readonly Tool[];
 }
 
@@ -101,6 +151,18 @@ export function isToolCallPart(part: StreamedMessagePart): part is ToolCallPart 
 
 export function isUsagePart(part: StreamedMessagePart): part is UsagePart {
   return part.type === 'usage';
+}
+
+export function isHostedSearchPart(part: StreamedMessagePart): part is HostedSearchPart {
+  return (
+    part.type === 'hosted_search_source' ||
+    part.type === 'hosted_search_action' ||
+    part.type === 'hosted_search_lifecycle'
+  );
+}
+
+export function isUrlCitationPart(part: StreamedMessagePart): part is UrlCitationPart {
+  return part.type === 'url_citation';
 }
 
 export function mergeInPlace(target: StreamedMessagePart, source: StreamedMessagePart): boolean {

@@ -17,6 +17,7 @@ import {
   type OAuthRef,
   type ProviderConfig,
   type ProviderType,
+  type WebSearchMode,
 } from '../config';
 import { ErrorCodes, isKimiError, KimiError } from '../errors';
 
@@ -42,6 +43,8 @@ export interface ResolvedRuntimeProvider {
   readonly type: ProviderType;
   /** Model-level protocol override (`alias.protocol`); when set, takes precedence over `type` for transport selection. */
   readonly protocol: ModelAlias['protocol'];
+  /** Hosted web-search mode exposed by the resolved model. */
+  readonly webSearch?: WebSearchMode;
 }
 
 interface ProviderManagerOptions {
@@ -88,6 +91,7 @@ export class SingleModelProvider implements ModelProvider {
       provider: this.providerConfig,
       type: this.providerConfig.type,
       protocol: undefined,
+      webSearch: readProviderWebSearchMode(this.providerConfig),
     };
   }
 }
@@ -146,6 +150,9 @@ export class ProviderManager implements ModelProvider {
       );
     }
 
+    const webSearch = effectiveAlias.webSearch ?? 'disabled';
+    validateHostedSearchConfiguration(providerConfig.type, effectiveAlias.protocol, webSearch, model);
+
     const provider = toKosongProviderConfig(
       providerConfig,
       alias.model,
@@ -162,6 +169,7 @@ export class ProviderManager implements ModelProvider {
       effectiveAlias.offEffort,
       effectiveAlias.adaptiveThinking,
       alias.betaApi,
+      webSearch,
     );
 
     return {
@@ -176,6 +184,7 @@ export class ProviderManager implements ModelProvider {
       maxOutputSize: effectiveAlias.maxOutputSize,
       type: providerConfig.type,
       protocol: alias.protocol,
+      webSearch,
     };
   }
 
@@ -294,6 +303,7 @@ function toKosongProviderConfig(
   offEffort: string | undefined,
   adaptiveThinking: boolean | undefined,
   betaApi: boolean | undefined,
+  webSearch: WebSearchMode,
 ): KosongProviderConfig {
   const effectiveType = modelProtocol ?? provider.type;
   const envCustomHeaders = parseKimiCodeCustomHeaders();
@@ -417,6 +427,7 @@ function toKosongProviderConfig(
         baseUrl,
         apiKey: providerApiKey(provider),
         offEffort,
+        ...(webSearch !== 'disabled' ? { webSearch } : {}),
         codex: codexResponsesLite ? { responsesLite: true } : undefined,
         responsesWebSocket: codexResponsesLite && responsesWebSocket === true ? true : undefined,
         // Session affinity: same `prompt_cache_key` intent as the `openai`
@@ -466,6 +477,57 @@ function toKosongProviderConfig(
       );
     }
   }
+}
+
+function readProviderWebSearchMode(provider: KosongProviderConfig): WebSearchMode {
+  if (provider.type !== 'openai_responses') return 'disabled';
+  const candidate = provider as KosongProviderConfig & {
+    hostedSearch?: unknown;
+    hostedSearchMode?: unknown;
+    webSearch?: unknown;
+    webSearchMode?: unknown;
+  };
+  return toWebSearchMode(
+    candidate.webSearch ??
+      candidate.webSearchMode ??
+      candidate.hostedSearch ??
+      candidate.hostedSearchMode,
+  );
+}
+
+function toWebSearchMode(value: unknown): WebSearchMode {
+  const mode =
+    typeof value === 'string'
+      ? value
+      : value !== null && typeof value === 'object' && 'mode' in value
+        ? (value as { mode?: unknown }).mode
+        : undefined;
+  switch (mode) {
+    case 'cached':
+    case 'indexed':
+    case 'live':
+      return mode;
+    default:
+      return 'disabled';
+  }
+}
+
+function validateHostedSearchConfiguration(
+  providerType: ProviderType,
+  modelProtocol: ModelAlias['protocol'],
+  webSearch: WebSearchMode,
+  model: string,
+): void {
+  if (webSearch === 'disabled') return;
+  const effectiveProtocol = modelProtocol ?? providerType;
+  const supported =
+    providerType === 'openai-codex' &&
+    (effectiveProtocol === 'openai-codex' || effectiveProtocol === 'openai_responses');
+  if (supported) return;
+  throw new KimiError(
+    ErrorCodes.MODEL_CONFIG_INVALID,
+    `Model "${model}" enables hosted web search mode "${webSearch}", but hosted web search is only supported for openai-codex models using the openai_responses transport.`,
+  );
 }
 
 function isOpenAICodexBaseUrl(value: string | undefined): boolean {

@@ -271,16 +271,41 @@ describe('IModelsDevImportService', () => {
   it('keeps the stored api_key on a re-import without one, replaces it when given', async () => {
     setModelsDevUpstreamForTest({ fetchImpl: fetchJson(CATALOG) });
     const { config, imports } = createHost({
-      providers: { openai: { type: 'openai', apiKey: 'sk-old' } },
+      providers: { openai: { type: 'openai', apiKey: 'test-key-old' } },
     });
 
     await imports.importModelsDevProvider({ catalogId: 'openai' });
     let providers = config.inspect<ProvidersSection>(PROVIDERS_SECTION).userValue ?? {};
-    expect(providers['openai']?.apiKey).toBe('sk-old');
+    expect(providers['openai']?.apiKey).toBe('test-key-old');
 
-    await imports.importModelsDevProvider({ catalogId: 'openai', apiKey: 'sk-new' });
+    await imports.importModelsDevProvider({ catalogId: 'openai', apiKey: 'test-key-new' });
     providers = config.inspect<ProvidersSection>(PROVIDERS_SECTION).userValue ?? {};
-    expect(providers['openai']?.apiKey).toBe('sk-new');
+    expect(providers['openai']?.apiKey).toBe('test-key-new');
+  });
+
+  it('preserves local hosted-search settings and overrides on re-import', async () => {
+    setModelsDevUpstreamForTest({ fetchImpl: fetchJson(CATALOG) });
+    const { config, imports } = createHost({
+      providers: { openai: { type: 'openai', apiKey: 'test-key-old' } },
+      models: {
+        'openai/gpt-4.1': {
+          provider: 'openai',
+          model: 'gpt-4.1',
+          maxContextSize: 1,
+          webSearch: 'cached',
+          overrides: { webSearch: 'live', defaultEffort: 'high' },
+        },
+      },
+    });
+
+    await imports.importModelsDevProvider({ catalogId: 'openai' });
+
+    const models = config.inspect<ModelsSection>(MODELS_SECTION).userValue ?? {};
+    expect(models['openai/gpt-4.1']).toMatchObject({
+      maxContextSize: 1047576,
+      webSearch: 'cached',
+      overrides: { webSearch: 'live', defaultEffort: 'high' },
+    });
   });
 
   it('rejects importing over an OAuth-managed provider', async () => {

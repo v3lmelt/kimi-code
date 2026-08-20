@@ -84,6 +84,42 @@ describe('reduceContextTranscript', () => {
     expect(result.foldedLength).toBe(2);
   });
 
+  it('restores hosted search metadata and citations from loop events', () => {
+    const searchMetadata = [
+      {
+        callId: 'search-1',
+        status: 'completed' as const,
+        sources: [{ type: 'url' as const, url: 'https://nodejs.org/', title: 'Node.js' }],
+      },
+    ];
+    const annotations = [
+      {
+        type: 'url_citation' as const,
+        startIndex: 0,
+        endIndex: 7,
+        title: 'Node.js',
+        url: 'https://nodejs.org/',
+      },
+    ];
+    const result = reduceContextTranscript([
+      loopEvent({ type: 'step.begin', uuid: 's1' }),
+      loopEvent({ type: 'content.part', stepUuid: 's1', part: { type: 'text', text: 'Node.js' } }),
+      loopEvent({
+        type: 'hosted.search',
+        uuid: 'hs1',
+        stepUuid: 's1',
+        phase: 'completed',
+        callId: 'search-1',
+        status: 'completed',
+        sources: searchMetadata[0]!.sources,
+        citations: annotations,
+      }),
+      loopEvent({ type: 'step.end', uuid: 's1' }),
+    ]);
+
+    expect(result.entries[0]).toMatchObject({ searchMetadata, annotations });
+  });
+
   it('compaction keeps the prefix and appends a user-role summary marker', () => {
     const result = reduceContextTranscript([
       appendMessage(userMessage('u1')),

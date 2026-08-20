@@ -47,6 +47,48 @@ describe('AssistantMessageComponent', () => {
     }
   });
 
+  it('renders each citation marker as one link without exceeding narrow widths', () => {
+    const component = new AssistantMessageComponent();
+    const url = 'https://example.test/source';
+    component.updateContent('hello world', {
+      citations: [{ type: 'url_citation', startIndex: 0, endIndex: 5, url }],
+    });
+
+    const rendered = component.render(120).join('\\n');
+    expect(rendered).toContain('[1]');
+    expect(rendered.split(url).length - 1).toBe(1);
+    for (const width of [12, 20, 80]) {
+      for (const line of component.render(width)) {
+        expect(visibleWidth(line)).toBeLessThanOrEqual(width);
+      }
+    }
+  });
+
+  it('ignores invalid and overlapping citation annotations at render time', () => {
+    const component = new AssistantMessageComponent();
+    const valid = {
+      type: 'url_citation' as const,
+      startIndex: 0,
+      endIndex: 5,
+      url: 'https://example.test/valid',
+    };
+    component.updateContent('abcdefghij', {
+      citations: [
+        valid,
+        { ...valid },
+        { ...valid, startIndex: 2, endIndex: 7, url: 'https://example.test/overlap' },
+        { ...valid, startIndex: Number.NaN, url: 'https://example.test/nan' },
+        { ...valid, startIndex: 4, endIndex: 11, url: 'https://example.test/too-long' },
+      ],
+    });
+
+    const rendered = component.render(120).join('\\n');
+    expect(rendered.match(/\[1\]/g)).toHaveLength(1);
+    expect(rendered).not.toContain('overlap');
+    expect(rendered).not.toContain('nan');
+    expect(rendered).not.toContain('too-long');
+  });
+
   it('renders unknown markdown fence languages as plain text without stderr noise', () => {
     const stderr = captureProcessWrite('stderr');
     try {

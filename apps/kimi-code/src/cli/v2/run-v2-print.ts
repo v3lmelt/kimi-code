@@ -570,6 +570,9 @@ function dispatchNativeEvent(
     case 'tool.result':
       writer.writeToolResult(event.toolCallId, event.output);
       return;
+    case 'hosted.search':
+      writer.writeHostedSearch(event);
+      return;
     case 'tool.progress':
       if (event.update.text !== undefined && event.update.text.length > 0) {
         stderr.write(event.update.text.endsWith('\n') ? event.update.text : `${event.update.text}\n`);

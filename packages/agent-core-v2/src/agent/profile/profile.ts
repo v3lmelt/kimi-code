@@ -21,7 +21,7 @@ import type {
   EnvironmentDisclosureSnapshot,
 } from '#/app/agentProfileCatalog/agentProfileCatalog';
 import type { ModelCapability } from '#/kosong/contract/capability';
-import type { ThinkingEffort } from '#/kosong/contract/provider';
+import type { HostedSearchMode, ThinkingEffort } from '#/kosong/contract/provider';
 import type { ModelRequestParams } from '#/kosong/model/modelRequester';
 
 import { createDecorator } from "#/_base/di/instantiation";
@@ -110,6 +110,7 @@ export interface ProfileModelContext {
   readonly maxOutputSize: number | undefined;
   readonly alwaysThinking: boolean | undefined;
   readonly thinkingLevel: ThinkingEffort;
+  readonly webSearch?: HostedSearchMode;
   readonly reservedContextSize: number | undefined;
   readonly compactionTriggerRatio: number | undefined;
 }

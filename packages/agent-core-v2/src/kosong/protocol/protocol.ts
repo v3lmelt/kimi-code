@@ -25,7 +25,7 @@ import { z } from 'zod';
 import { createDecorator, type ServiceIdentifier } from '#/_base/di/instantiation';
 import type { ModelCapability } from '#/kosong/contract/capability';
 import type { InspectionSource } from '#/kosong/contract/inspection';
-import type { ChatProvider } from '#/kosong/contract/provider';
+import type { ChatProvider, HostedSearchMode } from '#/kosong/contract/provider';
 
 import type { ProtocolBaseId, ResolvedAdapterIdentity } from './protocolBase';
 
@@ -45,6 +45,7 @@ export interface ProtocolProviderOptions {
   readonly offEffort?: string;
   readonly adaptiveThinking?: boolean;
   readonly betaApi?: boolean;
+  readonly webSearch?: HostedSearchMode;
   readonly metadata?: Readonly<Record<string, string>>;
   readonly vertexai?: boolean;
   readonly project?: string;

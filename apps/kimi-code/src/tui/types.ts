@@ -1,6 +1,11 @@
 import type {
   GoalChange,
   GoalSnapshot,
+  HostedSearchAction,
+  HostedSearchCitation,
+  HostedSearchLifecycle,
+  HostedSearchPhase,
+  HostedSearchSource,
   ModelAlias,
   PermissionMode,
   ProviderConfig,
@@ -233,6 +238,22 @@ export type GoalTranscriptData =
   | { readonly kind: 'created' }
   | { readonly kind: 'lifecycle'; readonly change: GoalChange };
 
+/** Mutable, UI-only projection of one hosted-search lifecycle. */
+export interface HostedSearchTranscriptData {
+  /** Stable card identity; temporary identities survive call-id migration. */
+  readonly identity: string;
+  callId?: string;
+  readonly turnId: string;
+  readonly step: number;
+  version: number;
+  phase: HostedSearchPhase;
+  status?: HostedSearchLifecycle;
+  query?: string;
+  actions: HostedSearchAction[];
+  sources: HostedSearchSource[];
+  citations: HostedSearchCitation[];
+}
+
 export type TranscriptEntryKind =
   | 'welcome'
   | 'user'
@@ -283,6 +304,9 @@ export interface TranscriptEntry {
   skillArgs?: string;
   skillTrigger?: SkillActivationTrigger;
   pluginCommandData?: PluginCommandTranscriptData;
+  hostedSearchData?: HostedSearchTranscriptData;
+  assistantCitations?: readonly HostedSearchCitation[];
+  assistantCitationSources?: readonly HostedSearchSource[];
 }
 
 export type LivePaneMode =

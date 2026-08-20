@@ -47,6 +47,7 @@ import type {
 } from '@moonshot-ai/agent-core-v2/agent/goal/types';
 import type {
   AssistantDeltaEvent,
+  HostedSearchDomainEvent,
   ThinkingDeltaEvent,
   ToolCallDeltaEvent,
   TurnStepCompletedEvent,
@@ -759,6 +760,51 @@ export const assistantDeltaEventSchema = z.object({
   delta: z.string(),
 }) satisfies z.ZodType<AssistantDeltaEvent>;
 
+const hostedSearchSourceSchema = z.object({
+  type: z.literal('url').optional(),
+  url: z.string(),
+  title: z.string().optional(),
+});
+
+const hostedSearchActionSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('search'),
+    query: z.string().optional(),
+    queries: z.array(z.string()).optional(),
+    sources: z.array(hostedSearchSourceSchema).optional(),
+  }),
+  z.object({ type: z.literal('open_page'), url: z.string().optional() }),
+  z.object({
+    type: z.literal('find_in_page'),
+    url: z.string().optional(),
+    pattern: z.string().optional(),
+  }),
+]);
+
+const hostedSearchCitationSchema = z.object({
+  type: z.literal('url_citation'),
+  startIndex: z.number(),
+  endIndex: z.number(),
+  title: z.string().optional(),
+  url: z.string(),
+  citationText: z.string().optional(),
+});
+
+export const hostedSearchEventSchema = z.object({
+  type: z.literal('hosted.search'),
+  turnId: z.number(),
+  step: z.number(),
+  stepId: z.string().optional(),
+  eventId: z.string().optional(),
+  phase: z.enum(['started', 'action', 'source', 'completed']),
+  callId: z.string().optional(),
+  query: z.string().optional(),
+  status: z.enum(['in_progress', 'searching', 'completed', 'failed']).optional(),
+  action: hostedSearchActionSchema.optional(),
+  sources: z.array(hostedSearchSourceSchema).optional(),
+  citations: z.array(hostedSearchCitationSchema).optional(),
+}) satisfies z.ZodType<HostedSearchDomainEvent>;
+
 export const hookResultEventSchema = z.object({
   type: z.literal('hook.result'),
   turnId: z.number().optional(),
@@ -995,6 +1041,7 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   turnStepRetryingEventSchema,
   turnStepInterruptedEventSchema,
   assistantDeltaEventSchema,
+  hostedSearchEventSchema,
   hookResultEventSchema,
   thinkingDeltaEventSchema,
   toolCallDeltaEventSchema,

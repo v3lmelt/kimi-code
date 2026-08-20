@@ -602,6 +602,9 @@ function runPromptTurn(
         case 'tool.result':
           outputWriter.writeToolResult(event.toolCallId, event.output);
           return;
+        case 'hosted.search':
+          outputWriter.writeHostedSearch(event);
+          return;
         case 'tool.progress':
           if (event.update.text !== undefined && event.update.text.length > 0) {
             stderr.write(

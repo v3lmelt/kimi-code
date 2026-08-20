@@ -14,6 +14,7 @@ import type {
   Event,
   GoalChange,
   GoalUpdatedEvent,
+  HostedSearchEvent,
   HookResultEvent,
   Session,
   SessionMetaUpdatedEvent,
@@ -365,6 +366,7 @@ export class SessionEventHandler {
       case 'shell.output': this.host.handleShellOutput(event); break;
       case 'shell.started': this.host.handleShellStarted(event); break;
       case 'assistant.delta': this.handleAssistantDelta(event); break;
+      case 'hosted.search': this.handleHostedSearch(event); break;
       case 'hook.result': this.handleHookResult(event); break;
       case 'thinking.delta': this.handleThinkingDelta(event); break;
       case 'tool.call.started': this.handleToolCall(event); break;
@@ -419,6 +421,7 @@ export class SessionEventHandler {
     }
     this.clearAgentSwarmProgress();
     this.host.streamingUI.resetToolUi();
+    this.host.streamingUI.resetHostedSearchForTurn?.();
     this.host.streamingUI.setStep(0);
     this.host.patchLivePane({
       mode: 'waiting',
@@ -516,6 +519,7 @@ export class SessionEventHandler {
     this.host.streamingUI.setStep(event.step);
     this.host.streamingUI.resetToolUi();
     this.host.streamingUI.finalizeLiveTextBuffers('waiting');
+    this.host.streamingUI.resetHostedSearchCitations?.();
     this.host.patchLivePane({
       mode: 'waiting',
       pendingApproval: null,
@@ -728,6 +732,15 @@ export class SessionEventHandler {
       this.host.setAppState({ streamingPhase: 'thinking', streamingStartTime: Date.now() });
     }
     streamingUI.scheduleFlush();
+  }
+
+  private handleHostedSearch(event: HostedSearchEvent): void {
+    this.lastActivityAtMs = Date.now();
+    this.host.streamingUI.handleHostedSearch(event);
+    this.host.patchLivePane({ mode: 'waiting' });
+    if (this.host.state.appState.streamingPhase === 'idle') {
+      this.host.setAppState({ streamingPhase: 'waiting', streamingStartTime: Date.now() });
+    }
   }
 
   private handleAssistantDelta(event: AssistantDeltaEvent): void {

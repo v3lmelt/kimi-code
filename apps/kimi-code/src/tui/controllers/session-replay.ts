@@ -191,6 +191,10 @@ export class SessionReplayRenderer {
   // ---------------------------------------------------------------------------
 
   private renderRecords(agent: ResumedAgentState): void {
+    // Replay can follow a session switch without a live turn.started event.
+    // Clear the live hosted-search index first so replayed keys cannot reuse a
+    // card that belonged to the previous session.
+    this.host.streamingUI.resetHostedSearchForTurn();
     const context = createReplayRenderContext();
     for (const record of limitReplayRecordsByTurn(agent.replay, REPLAY_TURN_LIMIT)) {
       this.renderRecord(context, record);
@@ -244,6 +248,29 @@ export class SessionReplayRenderer {
           this.renderHookResult(context, message);
           this.renderToolCalls(context, message.toolCalls);
           return;
+        }
+        this.host.streamingUI.resetHostedSearchCitations();
+        for (const event of message.searchMetadata ?? []) {
+          this.host.streamingUI.handleHostedSearch({
+            type: 'hosted.search',
+            turnId: context.turnIndex,
+            step: context.stepIndex,
+            phase:
+              event.status === 'completed' || event.status === 'failed'
+                ? 'completed'
+                : event.action !== undefined
+                  ? 'action'
+                  : event.sources !== undefined
+                    ? 'source'
+                    : 'started',
+            callId: event.callId,
+            status: event.status,
+            action: event.action,
+            sources: event.sources,
+          });
+        }
+        if (message.annotations !== undefined && message.annotations.length > 0) {
+          this.host.streamingUI.addAssistantCitations(message.annotations);
         }
         collectReplayMessageContent(context.assistant, message.content);
         this.flushAssistant(context);
@@ -400,6 +427,7 @@ export class SessionReplayRenderer {
       streamingUI.onThinkingUpdate(thinking);
       streamingUI.onThinkingEnd();
     }
+    streamingUI.sanitizeHostedSearchCitations(text);
     if (text.length > 0) {
       streamingUI.onStreamingTextStart();
       streamingUI.onStreamingTextUpdate(text);

@@ -3,7 +3,8 @@
  * records into folded `ContextMessage`s.
  *
  * The agent loop streams a turn as `context.append_loop_event` records
- * (`step.begin` / `content.part` / `tool.call` / `tool.result` / `step.end`)
+ * (`step.begin` / `content.part` / `hosted.search` / `tool.call` /
+ * `tool.result` / `step.end`)
  * and never writes a folded assistant message, keeping the on-disk shape
  * byte-compatible with v1. This fold turns them into assistant / tool
  * messages — at live dispatch time and again when `WireService.restore`
@@ -15,6 +16,7 @@
  *   - `step.begin`  → open an assistant message (`partial: true`); first settle
  *                     the step left open by a failed attempt
  *   - `content.part`→ append to the open assistant's content
+ *   - `hosted.search` → append search metadata and citations
  *   - `tool.call`   → append to the open assistant's `toolCalls`, mark pending
  *   - `tool.result` → push a `tool` message (with the v1 output
  *                     wrapping), clear its pending id
@@ -39,7 +41,13 @@
  */
 
 import type { FinishReason } from '#/kosong/contract/provider';
-import { createToolMessage, type ContentPart, type ToolCall } from '#/kosong/contract/message';
+import {
+  createToolMessage,
+  type ContentPart,
+  type HostedSearchCitation,
+  type HostedSearchEvent,
+  type ToolCall,
+} from '#/kosong/contract/message';
 import type { TokenUsage } from '#/kosong/contract/usage';
 
 import type { ContextMessage } from './types';
@@ -100,6 +108,20 @@ export type LoopRecordedEvent =
         readonly note?: string;
       };
       readonly parentUuid?: string;
+    }
+  | {
+      readonly type: 'hosted.search';
+      readonly stepUuid: string;
+      readonly uuid: string;
+      readonly turnId?: string;
+      readonly step?: number;
+      readonly phase: 'started' | 'action' | 'source' | 'completed';
+      readonly callId?: string;
+      readonly query?: string;
+      readonly status?: HostedSearchEvent['status'];
+      readonly action?: HostedSearchEvent['action'];
+      readonly sources?: readonly NonNullable<HostedSearchEvent['sources']>[number][];
+      readonly citations?: readonly HostedSearchCitation[];
     };
 
 interface FoldCtx {
@@ -158,6 +180,9 @@ export function foldLoopEvent(
         ...message,
         content: [...message.content, event.part],
       })), ctx);
+    case 'hosted.search':
+      return bind(appendToOpenAssistant(state, (message) =>
+        appendHostedSearchMetadata(message, event)), ctx);
     case 'tool.call': {
       const call: ToolCall = {
         type: 'function',
@@ -191,6 +216,42 @@ export function foldLoopEvent(
 export function resetFold(state: readonly ContextMessage[]): readonly ContextMessage[] {
   foldCtxMap.set(state, { openStepUuid: undefined, pending: new Set(), deferred: [] });
   return state;
+}
+
+function appendHostedSearchMetadata(
+  message: ContextMessage,
+  event: Extract<LoopRecordedEvent, { type: 'hosted.search' }>,
+): ContextMessage {
+  const metadata: HostedSearchEvent = {
+    callId: event.callId,
+    status: event.status,
+    action: event.action,
+    sources: event.sources === undefined ? undefined : [...event.sources],
+  };
+  const searchMetadata = [...(message.searchMetadata ?? [])];
+  const metadataKey = JSON.stringify(metadata);
+  if (!searchMetadata.some((candidate) => JSON.stringify(candidate) === metadataKey)) {
+    searchMetadata.push(metadata);
+  }
+  const annotations = [...(message.annotations ?? [])];
+  for (const citation of event.citations ?? []) {
+    const url = citation.url.trim();
+    const key = `${url}\0${citation.startIndex}\0${citation.endIndex}`;
+    if (
+      annotations.some(
+        (candidate) =>
+          `${candidate.url}\0${candidate.startIndex}\0${candidate.endIndex}` === key,
+      )
+    ) {
+      continue;
+    }
+    annotations.push({ ...citation, url });
+  }
+  return {
+    ...message,
+    searchMetadata,
+    annotations: annotations.length > 0 ? annotations : undefined,
+  };
 }
 
 function appendToOpenAssistant(

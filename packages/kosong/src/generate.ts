@@ -1,10 +1,16 @@
 import { APIEmptyResponseError } from './errors';
 import {
   isContentPart,
+  isHostedSearchPart,
   isToolCall,
   isToolCallPart,
+  isUrlCitationPart,
   isUsagePart,
   mergeInPlace,
+  type HostedSearchAction,
+  type HostedSearchCitation,
+  type HostedSearchEvent,
+  type HostedSearchPart,
   type Message,
   type StreamedMessagePart,
   type ToolCall,
@@ -15,6 +21,11 @@ import type { TokenUsage } from './usage';
 
 /** Snapshot of a ToolCall excluding the internal `_streamIndex` routing field. */
 type StoredToolCall = Omit<ToolCall, '_streamIndex'>;
+
+type MutableMessage = Message & {
+  annotations?: HostedSearchCitation[];
+  searchMetadata?: HostedSearchEvent[];
+};
 
 /**
  * The result of a single {@link generate} call.
@@ -40,6 +51,10 @@ export interface GenerateResult {
    * `null` if the provider did not emit one.
    */
   readonly rawFinishReason: string | null;
+  /** URL citations emitted by a hosted web-search provider. */
+  readonly annotations?: readonly HostedSearchCitation[];
+  /** Hosted-search lifecycle, action, and source metadata. */
+  readonly searchMetadata?: readonly HostedSearchEvent[];
   /**
    * Provider trace identifier from the `x-trace-id` response header
    * (Kimi/KFC only), or `null` when the provider does not report one.
@@ -93,7 +108,7 @@ export async function generate(
   callbacks?: GenerateCallbacks,
   options?: GenerateOptions,
 ): Promise<GenerateResult> {
-  const message: Message = { role: 'assistant', content: [], toolCalls: [] };
+  const message = { role: 'assistant', content: [], toolCalls: [] } as MutableMessage;
   let pendingPart: StreamedMessagePart | null = null;
 
   // Map from provider streaming index (e.g. OpenAI Chat `index`, Responses
@@ -219,6 +234,22 @@ export async function generate(
   if (pendingPart !== null) {
     flushPart(message, pendingPart, toolCallIndexMap);
   }
+
+  // Providers may expose final metadata even when it was not represented as a
+  // streamed part. Merge it after draining while retaining the stream order.
+  if (stream.annotations !== undefined && stream.annotations.length > 0) {
+    const annotations = (message.annotations ??= []);
+    for (const citation of stream.annotations) {
+      appendUnique(annotations, citation, citationKey);
+    }
+  }
+  if (stream.searchMetadata !== undefined && stream.searchMetadata.length > 0) {
+    const searchMetadata = (message.searchMetadata ??= []);
+    for (const event of stream.searchMetadata) {
+      appendHostedSearchEvent(searchMetadata, event);
+    }
+  }
+
   if (message.content.length === 0 && message.toolCalls.length === 0) {
     throw new APIEmptyResponseError(
       'The API returned an empty response (no content, no tool calls).' +
@@ -259,13 +290,22 @@ export async function generate(
     }
   }
 
-  const result: GenerateResult = {
+  const result = {
     id: stream.id,
     message,
     usage: stream.usage,
     finishReason: stream.finishReason,
     rawFinishReason: stream.rawFinishReason,
+  } as GenerateResult & {
+    annotations?: HostedSearchCitation[];
+    searchMetadata?: HostedSearchEvent[];
   };
+  if (message.annotations !== undefined && message.annotations.length > 0) {
+    result.annotations = message.annotations;
+  }
+  if (message.searchMetadata !== undefined && message.searchMetadata.length > 0) {
+    result.searchMetadata = message.searchMetadata;
+  }
   if (stream.traceId !== undefined) {
     return { ...result, traceId: stream.traceId };
   }
@@ -322,12 +362,22 @@ function isPendingToolCallAtIndex(
  * - ToolCallPart -> ignored (orphaned delta without a matching pending call)
  */
 function flushPart(
-  message: Message,
+  message: MutableMessage,
   part: StreamedMessagePart,
   toolCallIndexMap: Map<number | string, number>,
 ): void {
   if (isContentPart(part)) {
     message.content.push(part);
+    return;
+  }
+  if (isUrlCitationPart(part)) {
+    const annotations = (message.annotations ??= []);
+    appendUnique(annotations, part, citationKey);
+    return;
+  }
+  if (isHostedSearchPart(part)) {
+    const searchMetadata = (message.searchMetadata ??= []);
+    appendHostedSearchEvent(searchMetadata, hostedSearchPartToEvent(part));
     return;
   }
   if (isToolCall(part)) {
@@ -346,6 +396,63 @@ function flushPart(
     }
   }
   // ToolCallPart: orphaned delta — silently ignore.
+}
+
+function appendUnique<T>(items: T[], value: T, key: (item: T) => string): void {
+  const valueKey = key(value);
+  if (!items.some((item) => key(item) === valueKey)) {
+    items.push(value);
+  }
+}
+
+function citationKey(citation: HostedSearchCitation): string {
+  return `${citation.url}\u0000${citation.startIndex}\u0000${citation.endIndex}`;
+}
+
+function hostedSearchEventKey(event: HostedSearchEvent): string {
+  return JSON.stringify(event);
+}
+
+function appendHostedSearchEvent(events: HostedSearchEvent[], event: HostedSearchEvent): void {
+  if (event.callId !== undefined && event.status !== undefined) {
+    const existing = events.find(
+      (candidate) => candidate.callId === event.callId && candidate.status === event.status,
+    );
+    if (existing !== undefined) {
+      if (existing.action === undefined && event.action !== undefined) {
+        existing.action = event.action;
+      }
+      if (event.sources !== undefined) {
+        existing.sources ??= [];
+        for (const source of event.sources) {
+          if (!existing.sources.some((candidate) => candidate.url === source.url)) {
+            existing.sources.push(source);
+          }
+        }
+      }
+      return;
+    }
+  }
+  appendUnique(events, event, hostedSearchEventKey);
+}
+
+function hostedSearchPartToEvent(part: HostedSearchPart): HostedSearchEvent {
+  const event: HostedSearchEvent = {};
+  if (part.callId !== undefined) event.callId = part.callId;
+  switch (part.type) {
+    case 'hosted_search_source':
+      event.sources = [part.source];
+      break;
+    case 'hosted_search_action':
+      event.action = part.action;
+      break;
+    case 'hosted_search_lifecycle':
+      event.status = part.status;
+      if (part.action !== undefined) event.action = part.action;
+      if (part.sources !== undefined) event.sources = part.sources;
+      break;
+  }
+  return event;
 }
 
 function formatFinishReasonHint(stream: StreamedMessage): string {
@@ -401,7 +508,52 @@ export function deepCopyPart(part: StreamedMessagePart): StreamedMessagePart {
       return { type: 'tool_call_part', argumentsPart: part.argumentsPart, index: part.index };
     case 'usage':
       return { type: 'usage', usage: { ...part.usage } };
+    case 'url_citation':
+      return { ...part };
+    case 'hosted_search_source':
+      return { ...part, source: { ...part.source } };
+    case 'hosted_search_action': {
+      const copy: Extract<HostedSearchPart, { type: 'hosted_search_action' }> = {
+        type: 'hosted_search_action',
+        action: deepCopyHostedSearchAction(part.action),
+      };
+      if (part.callId !== undefined) copy.callId = part.callId;
+      return copy;
+    }
+    case 'hosted_search_lifecycle': {
+      const copy: Extract<HostedSearchPart, { type: 'hosted_search_lifecycle' }> = {
+        type: 'hosted_search_lifecycle',
+        status: part.status,
+      };
+      if (part.callId !== undefined) copy.callId = part.callId;
+      if (part.action !== undefined) copy.action = deepCopyHostedSearchAction(part.action);
+      if (part.sources !== undefined) {
+        copy.sources = part.sources.map((source) => ({ ...source }));
+      }
+      return copy;
+    }
   }
+}
+
+function deepCopyHostedSearchAction(action: HostedSearchAction): HostedSearchAction {
+  if (action.type === 'search') {
+    const copy: Extract<HostedSearchAction, { type: 'search' }> = { type: 'search' };
+    if (action.query !== undefined) copy.query = action.query;
+    if (action.queries !== undefined) copy.queries = [...action.queries];
+    if (action.sources !== undefined) {
+      copy.sources = action.sources.map((source) => ({ ...source }));
+    }
+    return copy;
+  }
+  if (action.type === 'open_page') {
+    const copy: Extract<HostedSearchAction, { type: 'open_page' }> = { type: 'open_page' };
+    if (action.url !== undefined) copy.url = action.url;
+    return copy;
+  }
+  const copy: Extract<HostedSearchAction, { type: 'find_in_page' }> = { type: 'find_in_page' };
+  if (action.url !== undefined) copy.url = action.url;
+  if (action.pattern !== undefined) copy.pattern = action.pattern;
+  return copy;
 }
 
 /** Recursive copy of a ToolCall `extras` record (plain objects and arrays). */

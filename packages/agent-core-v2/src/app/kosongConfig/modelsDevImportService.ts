@@ -46,7 +46,7 @@ import { Error2 } from '#/_base/errors/errors';
 import { IAgentIdentity } from '#/app/agentIdentity/agentIdentity';
 import { IConfigService } from '#/app/config/config';
 import { IModelCatalog } from '#/kosong/model/catalog';
-import { type ModelsSection } from '#/kosong/model/model';
+import { type ModelRecord, type ModelsSection } from '#/kosong/model/model';
 import { type ProviderConfig, type ProvidersSection } from '#/kosong/provider/provider';
 import { modelsDevProviderModels, resolveModelsDevImport } from './modelsDev';
 
@@ -72,6 +72,31 @@ import {
 } from './modelsDevUpstream';
 
 const codes = ModelsDevImportErrors.codes;
+
+const MODELS_DEV_OWNED_MODEL_FIELDS = new Set([
+  'provider',
+  'model',
+  'maxContextSize',
+  'maxInputSize',
+  'maxOutputSize',
+  'capabilities',
+  'displayName',
+  'reasoningKey',
+  'supportEfforts',
+  'offEffort',
+  'protocol',
+  'baseUrl',
+]);
+
+function mergeModelsDevModelRecord(
+  existing: ModelRecord | undefined,
+  refreshed: ModelRecord,
+): ModelRecord {
+  const localFields = Object.fromEntries(
+    Object.entries(existing ?? {}).filter(([key]) => !MODELS_DEV_OWNED_MODEL_FIELDS.has(key)),
+  );
+  return { ...localFields, ...refreshed };
+}
 
 export class ModelsDevImportService implements IModelsDevImportService {
   declare readonly _serviceBrand: undefined;
@@ -198,7 +223,11 @@ export class ModelsDevImportService implements IModelsDevImportService {
     await config.replace(MODELS_SECTION, withoutTarget);
     const nextModels = { ...withoutTarget };
     for (const model of models) {
-      nextModels[`${targetId}/${model.id}`] = modelsDevModelToRecord(targetId, model);
+      const alias = `${targetId}/${model.id}`;
+      nextModels[alias] = mergeModelsDevModelRecord(
+        records[alias],
+        modelsDevModelToRecord(targetId, model),
+      );
     }
     await config.replace(MODELS_SECTION, nextModels);
 

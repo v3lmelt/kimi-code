@@ -45,7 +45,13 @@ import { IAgentToolExecutorService } from '#/agent/toolExecutor/toolExecutor';
 import { IConfigService } from '#/app/config/config';
 import { IEventBus } from '#/app/event/eventBus';
 import { type FinishReason } from '#/kosong/contract/provider';
-import { mergeInPlace, type ContentPart, type StreamedMessagePart } from '#/kosong/contract/message';
+import {
+  mergeInPlace,
+  type ContentPart,
+  type HostedSearchPart,
+  type HostedSearchSource,
+  type StreamedMessagePart,
+} from '#/kosong/contract/message';
 import { type TokenUsage } from '#/kosong/contract/usage';
 import { BugIndicatingError, ErrorCodes, Error2, isError2, toKimiErrorPayload } from '#/errors';
 import { OrderedHookSlot } from '#/hooks';
@@ -908,7 +914,12 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
     this.activeRequestTrace = undefined;
     await this.hooks.onWillBeginStep.run({ turnId, step: currentStep, signal });
     const markStepStarted = this.beginStep(turnId, signal, currentStep, stepUuid, onStarted);
-    const streamParts = this.createStreamPartHandler(turnId, currentStep, markStepStarted);
+    const streamParts = this.createStreamPartHandler(
+      turnId,
+      currentStep,
+      stepUuid,
+      markStepStarted,
+    );
     const request = this.llmRequester.start(
       {
         source: { type: 'turn', turnId, step: currentStep },
@@ -984,6 +995,46 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
         stepUuid,
         part,
       });
+    }
+    if (
+      response.message.searchMetadata !== undefined ||
+      response.message.annotations !== undefined
+    ) {
+      const metadata = response.message.searchMetadata ?? [];
+      const sources = uniqueHostedSearchSources(metadata.flatMap((event) => [
+        ...(event.sources ?? []),
+        ...(event.action?.type === 'search' ? (event.action.sources ?? []) : []),
+      ]));
+      const query = metadata.find((event) => event.action?.type === 'search')?.action;
+      const answerText = response.message.content
+        .filter((part) => part.type === 'text')
+        .map((part) => part.text)
+        .join('');
+      const citations = response.message.annotations?.map((citation) => ({
+        ...citation,
+        citationText:
+          citation.citationText ?? answerText.slice(citation.startIndex, citation.endIndex),
+      }));
+      const completedEvent = {
+        type: 'hosted.search',
+        turnId,
+        step: currentStep,
+        stepId: stepUuid,
+        eventId: randomUUID(),
+        phase: 'completed',
+        status: 'completed',
+        query:
+          query?.type === 'search' ? query.query ?? query.queries?.[0] : undefined,
+        sources,
+        citations,
+      } as const;
+      this.context.appendLoopEvent({
+        ...completedEvent,
+        uuid: completedEvent.eventId,
+        turnId: String(turnId),
+        stepUuid,
+      });
+      this.eventBus.publish(completedEvent);
     }
   }
 
@@ -1162,6 +1213,7 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
   private createStreamPartHandler(
     turnId: number,
     step: number,
+    stepUuid: string,
     onResponseEvent: () => void,
   ): StreamPartCollector {
     const callsByIndex = new Map<number | string | undefined, { id: string; name: string }>();
@@ -1221,6 +1273,24 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
           case 'usage':
             this.eventBus.publish({ type: 'turn.step.usage', turnId, step, usage: part.usage });
             return;
+          case 'hosted_search_source':
+          case 'hosted_search_action':
+          case 'hosted_search_lifecycle':
+            onResponseEvent();
+            {
+              const event = hostedSearchPartEvent(part, turnId, step);
+              this.context.appendLoopEvent({
+                ...event,
+                uuid: event.eventId!,
+                turnId: String(turnId),
+                stepUuid,
+              });
+              this.eventBus.publish(event);
+            }
+            return;
+          case 'url_citation':
+            onResponseEvent();
+            return;
           default: {
             const _exhaustive: never = part;
             return _exhaustive;
@@ -1231,6 +1301,50 @@ export class AgentLoopService extends Disposable implements IAgentLoopService {
         partialContent.splice(0).filter((part) => !isVacuousContentPart(part)),
     };
   }
+}
+
+function uniqueHostedSearchSources(
+  sources: readonly HostedSearchSource[],
+): HostedSearchSource[] {
+  const seen = new Set<string>();
+  return sources.filter((source) => {
+    const key = `${source.url}\n${source.title ?? ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function hostedSearchPartEvent(
+  part: HostedSearchPart,
+  turnId: number,
+  step: number,
+): import('./turnEvents').HostedSearchDomainEvent {
+  const base = { type: 'hosted.search' as const, turnId, step, eventId: randomUUID() };
+  if (part.type === 'hosted_search_source') {
+    return { ...base, phase: 'source', callId: part.callId, sources: [part.source] };
+  }
+  if (part.type === 'hosted_search_action') {
+    return {
+      ...base,
+      phase: 'action',
+      callId: part.callId,
+      action: part.action,
+      query: part.action.type === 'search' ? part.action.query ?? part.action.queries?.[0] : undefined,
+    };
+  }
+  return {
+    ...base,
+    phase: 'started',
+    callId: part.callId,
+    status: part.status,
+    action: part.action,
+    sources: part.sources,
+    query:
+      part.action?.type === 'search'
+        ? part.action.query ?? part.action.queries?.[0]
+        : undefined,
+  };
 }
 
 function normalizeFinishReason(reason: FinishReason): string {

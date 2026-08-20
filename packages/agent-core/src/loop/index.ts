@@ -43,6 +43,9 @@ export { ToolAccesses } from './tool-access';
 export type {
   CreateLoopEventDispatcherInput,
   LoopContentPartEvent,
+  LoopHostedSearchCitation,
+  LoopHostedSearchEvent,
+  LoopHostedSearchSource,
   LoopRecordedEvent,
   LoopStepBeginEvent,
   LoopStepEndEvent,
@@ -63,6 +66,9 @@ export type {
 export { createLoopEventDispatcher } from './events';
 
 export type {
+  HostedSearchNormalizationInput,
+  HostedSearchNormalizationResult,
+  HostedSearchNormalizer,
   LLM,
   LLMChatParams,
   LLMChatResponse,

@@ -29,7 +29,8 @@ describe('models TOML transforms', () => {
         beta_api: true,
         support_efforts: ['low', 'high'],
         default_effort: 'high',
-        overrides: { max_output_size: 4096, default_effort: 'low' },
+        web_search: 'indexed',
+        overrides: { max_output_size: 4096, default_effort: 'low', web_search: 'cached' },
       },
     }) as Record<string, Record<string, unknown>>;
     expect(from['k1']).toEqual({
@@ -43,7 +44,8 @@ describe('models TOML transforms', () => {
       betaApi: true,
       supportEfforts: ['low', 'high'],
       defaultEffort: 'high',
-      overrides: { maxOutputSize: 4096, defaultEffort: 'low' },
+      webSearch: 'indexed',
+      overrides: { maxOutputSize: 4096, defaultEffort: 'low', webSearch: 'cached' },
     });
 
     const back = modelsToToml(from, undefined) as Record<string, Record<string, unknown>>;
@@ -58,7 +60,8 @@ describe('models TOML transforms', () => {
       beta_api: true,
       support_efforts: ['low', 'high'],
       default_effort: 'high',
-      overrides: { max_output_size: 4096, default_effort: 'low' },
+      web_search: 'indexed',
+      overrides: { max_output_size: 4096, default_effort: 'low', web_search: 'cached' },
     });
   });
 });

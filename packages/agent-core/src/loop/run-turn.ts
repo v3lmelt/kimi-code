@@ -18,7 +18,7 @@ import {
   isMaxStepsExceededError,
 } from './errors';
 import type { LoopInterruptReason, LoopEventDispatcher, LoopTurnInterruptedEvent } from './events';
-import type { LLM, LLMRequestTrace } from './llm';
+import type { HostedSearchNormalizer, LLM, LLMRequestTrace } from './llm';
 import { executeLoopStep } from './turn-step';
 import type {
   ExecutableTool,
@@ -76,6 +76,7 @@ export interface RunTurnInput {
    * Returning `undefined` keeps the default "not found" message.
    */
   readonly describeMissingTool?: ((name: string) => string | undefined) | undefined;
+  readonly normalizeHostedSearch?: HostedSearchNormalizer | undefined;
   readonly hooks?: LoopHooks | undefined;
   readonly log?: Logger | undefined;
   readonly maxSteps?: number | undefined;
@@ -99,6 +100,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
     tools,
     buildTools,
     describeMissingTool,
+    normalizeHostedSearch,
     hooks,
     log,
     maxSteps,
@@ -169,6 +171,7 @@ export async function runTurn(input: RunTurnInput): Promise<TurnResult> {
         // discards loaded schemas and empties the ledger).
         buildTools,
         describeMissingTool,
+        normalizeHostedSearch,
         hooks,
         log,
         currentStep: steps,

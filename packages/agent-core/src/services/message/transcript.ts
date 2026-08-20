@@ -49,6 +49,8 @@
 import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
+import type { HostedSearchCitation, HostedSearchEvent } from '@moonshot-ai/kosong';
+
 import type { AgentRecord } from '../../agent/records';
 import type { ContextMessage } from '../../agent/context';
 import type { ExecutableToolResult, LoopRecordedEvent } from '../../loop';
@@ -91,6 +93,8 @@ interface MutableMessage {
   isError?: boolean | undefined;
   note?: string | undefined;
   origin?: ContextMessage['origin'];
+  annotations?: HostedSearchCitation[];
+  searchMetadata?: HostedSearchEvent[];
 }
 
 interface MutableEntry {
@@ -172,6 +176,38 @@ export function reduceWireRecords(records: Iterable<AgentRecord>): {
         // Lenient where ContextMemory throws: a dangling part in a damaged
         // file should not take the whole messages endpoint down.
         openSteps.get(event.stepUuid)?.message.content.push(event.part);
+        return;
+      }
+      case 'hosted.search': {
+        const openStep = openSteps.get(event.stepUuid);
+        if (openStep === undefined) return;
+
+        const metadata: HostedSearchEvent = {
+          callId: event.callId,
+          status: event.status,
+          action: event.action,
+          sources: event.sources?.map((source) => ({ ...source })),
+        };
+        const searchMetadata = (openStep.message.searchMetadata ??= []);
+        const metadataKey = JSON.stringify(metadata);
+        if (!searchMetadata.some((candidate) => JSON.stringify(candidate) === metadataKey)) {
+          searchMetadata.push(metadata);
+        }
+
+        const annotations = (openStep.message.annotations ??= []);
+        for (const citation of event.citations ?? []) {
+          const url = citation.url.trim();
+          const key = `${url}\u0000${citation.startIndex}\u0000${citation.endIndex}`;
+          if (
+            annotations.some(
+              (candidate) =>
+                `${candidate.url}\u0000${candidate.startIndex}\u0000${candidate.endIndex}` === key,
+            )
+          ) {
+            continue;
+          }
+          annotations.push({ ...citation, url });
+        }
         return;
       }
       case 'tool.call': {

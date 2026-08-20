@@ -1,5 +1,12 @@
 import { type FinishReason } from '#/kosong/contract/provider';
-import { isContentPart, isToolCall, type Message, type StreamedMessagePart } from '#/kosong/contract/message';
+import {
+  isContentPart,
+  isToolCall,
+  type HostedSearchCitation,
+  type HostedSearchEvent,
+  type Message,
+  type StreamedMessagePart,
+} from '#/kosong/contract/message';
 import type { generate as kosongGenerate } from '#/kosong/contract/generate';
 
 import { estimateTokensForMessages } from '#/kosong/contract/tokens';
@@ -17,6 +24,8 @@ interface ScriptedResponse {
   readonly finishReason?: FinishReason | null | undefined;
   readonly rawFinishReason?: string | null | undefined;
   readonly traceId?: string | null | undefined;
+  readonly annotations?: readonly HostedSearchCitation[] | undefined;
+  readonly searchMetadata?: readonly HostedSearchEvent[] | undefined;
 }
 
 export function createScriptedGenerate() {
@@ -33,12 +42,18 @@ export function createScriptedGenerate() {
     readonly finishReason?: FinishReason | null | undefined;
     readonly rawFinishReason?: string | null | undefined;
     readonly traceId?: string | null | undefined;
+    readonly annotations?: readonly HostedSearchCitation[] | undefined;
+    readonly searchMetadata?: readonly HostedSearchEvent[] | undefined;
   }) {
     responses.push({
       parts: structuredClone(input.parts ?? []),
       ...(input.finishReason !== undefined ? { finishReason: input.finishReason } : {}),
       ...(input.rawFinishReason !== undefined ? { rawFinishReason: input.rawFinishReason } : {}),
       ...(input.traceId !== undefined ? { traceId: input.traceId } : {}),
+      ...(input.annotations !== undefined ? { annotations: structuredClone(input.annotations) } : {}),
+      ...(input.searchMetadata !== undefined
+        ? { searchMetadata: structuredClone(input.searchMetadata) }
+        : {}),
     });
   }
 
@@ -69,6 +84,8 @@ export function createScriptedGenerate() {
       role: 'assistant',
       content: structuredClone(content),
       toolCalls: structuredClone(toolCalls),
+      annotations: structuredClone(response.annotations),
+      searchMetadata: structuredClone(response.searchMetadata),
     };
 
     for (const part of response.parts) {

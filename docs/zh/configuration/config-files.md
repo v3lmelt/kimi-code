@@ -125,7 +125,7 @@ timeout = 5
 
 | 字段 | 类型 | 必填 | 说明 |
 | --- | --- | --- | --- |
-| `type` | `string` | 是 | 供应商类型：`kimi`、`anthropic`、`openai`、`openai_responses`、`google-genai`、`vertexai` |
+| `type` | `string` | 是 | 供应商类型：`kimi`、`anthropic`、`openai`、`openai_responses`、`openai-codex`、`google-genai`、`vertexai` |
 | `api_key` | `string` | 否 | API 密钥，明文写在配置文件里 |
 | `base_url` | `string` | 否 | API 基础 URL |
 | `oauth` | `table` | 否 | OAuth 凭据引用（`storage`、`key` 两个字段），由登录流程自动注入，通常无需手写 |
@@ -161,6 +161,33 @@ KIMI_BASE_URL = "https://api.moonshot.ai/v1"
 | `display_name` | `string` | 否 | UI 中显示的名称，未设时回退到 `model` |
 | `reasoning_key` | `string` | 否 | 仅 `openai` 供应商。当网关用非标准字段名返回推理内容时才需要设置；默认自动识别 `reasoning_content` / `reasoning_details` / `reasoning` |
 | `adaptive_thinking` | `boolean` | 否 | 仅 `anthropic` 供应商。强制开启或关闭 adaptive thinking，覆盖按模型名推断的逻辑。省略时自动推断（Claude ≥ 4.6 使用 adaptive） |
+| `web_search` | `string` | 否 | Codex Hosted Search 模式：`disabled`（默认值）、`cached`、`indexed` 或 `live`。仅当供应商为 `openai-codex` 且模型使用 OpenAI Responses 传输方式（`openai_responses`）时支持 |
+
+### Codex Hosted Search
+
+为由 `openai-codex` 支持的模型别名设置 `web_search`：
+
+```toml
+[providers."codex"]
+type = "openai-codex"
+
+[models."codex/gpt-5"]
+provider = "codex"
+model = "gpt-5"
+max_context_size = 400000
+web_search = "indexed"
+```
+
+这些模式控制供应商的网页访问方式：
+
+- `disabled`：不添加 Hosted Search。这是默认值。
+- `cached`：允许使用缓存的搜索数据；关闭外部网页访问。
+- `indexed`：启用外部网页访问和索引网页访问。
+- `live`：启用外部网页访问，但不请求索引网页访问。
+
+终端界面会在搜索卡中渲染 Hosted Search 活动。Assistant 消息正文中的编号 URL 标记与卡片的来源列表相对应。来源片段可能来自不同来源：被引用的来源显示其引用文本；未被引用的来源使用供应商提供的片段或简短的页面摘录；无法提供上述任一内容的来源不显示片段。
+
+Hosted Search 与常规的 `WebSearch` 工具对同一模型互斥。当 `web_search` 不为 `disabled` 时，由 `[services.moonshot_search]` 支持的常规工具不会向该模型提供。将 `web_search` 设置为 `"disabled"`，即可改用常规工具。
 
 别名中含 `.` 时需要加引号：
 
@@ -186,7 +213,7 @@ max_context_size = 131072
 display_name = "Kimi for Coding (custom)"
 ```
 
-`[models."<alias>".overrides]` 接受普通模型字段，例如 `max_context_size`、`max_input_size`、`max_output_size`、`capabilities`、`display_name`、`reasoning_key`、`adaptive_thinking`、`support_efforts`、`default_effort` 和 `off_effort`。不接受身份 / 路由字段：`provider`、`model`、`protocol`、`beta_api` 和 `base_url`。
+`[models."<alias>".overrides]` 接受普通模型字段，例如 `max_context_size`、`max_input_size`、`max_output_size`、`capabilities`、`display_name`、`reasoning_key`、`adaptive_thinking`、`support_efforts`、`default_effort`、`off_effort` 和 `web_search`。不接受身份 / 路由字段：`provider`、`model`、`protocol`、`beta_api` 和 `base_url`。
 
 无需修改配置文件也可以临时切换模型——通过 `KIMI_MODEL_*` 环境变量在内存里合成一个临时供应商，详见[用环境变量定义模型](./env-vars.md#用环境变量定义模型-kimi-model)。
 

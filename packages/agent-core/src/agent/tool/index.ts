@@ -51,6 +51,7 @@ export class ToolManager {
   private readonly deferredUserTools = new Set<string>();
   protected readonly mcpTools: Map<string, McpToolEntry> = new Map();
   private loopToolsOverride: readonly ExecutableTool[] | undefined;
+  private loopToolsOverrideBuiltinWebSearch: ExecutableTool | undefined;
   /** server name → list of qualified tool names registered for that server. */
   protected readonly mcpToolsByServer: Map<string, string[]> = new Map();
   protected enabledTools: Set<string> = new Set();
@@ -554,6 +555,7 @@ export class ToolManager {
 
   copyLoopToolsFrom(source: ToolManager): void {
     this.loopToolsOverride = source.loopTools;
+    this.loopToolsOverrideBuiltinWebSearch = source.builtinTools.get('WebSearch');
   }
 
   private isMcpToolEnabled(name: string): boolean {
@@ -954,7 +956,13 @@ export class ToolManager {
   }
 
   get loopTools(): readonly ExecutableTool[] {
-    if (this.loopToolsOverride !== undefined) return this.loopToolsOverride;
+    if (this.loopToolsOverride !== undefined) {
+      if (this.agent.config.webSearch === 'disabled') return this.loopToolsOverride;
+      const builtinWebSearch = this.loopToolsOverrideBuiltinWebSearch;
+      return builtinWebSearch === undefined
+        ? this.loopToolsOverride
+        : this.loopToolsOverride.filter((tool) => tool !== builtinWebSearch);
+    }
     // Self-heal an empty builtin table. The constructor and every config-
     // mutation checkpoint gate initializeBuiltinTools() on hasProvider, but a
     // provider that becomes resolvable asynchronously (OAuth / managed
@@ -973,6 +981,7 @@ export class ToolManager {
       }
     }
     const disclosure = this.progressiveDisclosure;
+    const hostedSearchEnabled = this.agent.config.webSearch !== 'disabled';
     const enabledMcpNames = [...this.mcpTools.keys()].filter((name) =>
       this.isMcpToolEnabled(name),
     );
@@ -1022,6 +1031,7 @@ export class ToolManager {
         // execution closure intact while adding the wire-strip marker.
         return deferred ? { ...tool, deferred: true as const } : tool;
       })
-      .filter((tool) => !!tool);
+      .filter((tool) => !!tool)
+      .filter((tool) => !hostedSearchEnabled || tool !== this.builtinTools.get('WebSearch'));
   }
 }

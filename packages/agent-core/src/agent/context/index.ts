@@ -1,4 +1,10 @@
-import { createToolMessage, type ContentPart, type Message } from '@moonshot-ai/kosong';
+import {
+  createToolMessage,
+  type ContentPart,
+  type HostedSearchCitation,
+  type HostedSearchEvent,
+  type Message,
+} from '@moonshot-ai/kosong';
 
 import type { Agent } from '..';
 import { ErrorCodes, KimiError } from '../../errors';
@@ -49,11 +55,16 @@ const IMPORT_CONTEXT_GUIDANCE =
 // at the tail. When the tail is unresolved, pendingToolResultIds is exactly the
 // set of missing tool result ids for that tail exchange; appendMessage keeps
 // later messages in deferredMessages until those ids are resolved.
+type MutableContextMessage = ContextMessage & {
+  annotations?: HostedSearchCitation[];
+  searchMetadata?: HostedSearchEvent[];
+};
+
 export class ContextMemory {
   private _history: ContextMessage[] = [];
   private _tokenCount = 0;
   private tokenCountCoveredMessageCount = 0;
-  private openSteps: Map<string, ContextMessage> = new Map();
+  private openSteps: Map<string, MutableContextMessage> = new Map();
   private pendingToolResultIds = new Set<string>();
   private deferredMessages: ContextMessage[] = [];
   private _lastAssistantAt: number | null = null;
@@ -669,7 +680,7 @@ export class ContextMemory {
             toolCallIds: closed.slice(0, 5),
           });
         }
-        const message: ContextMessage = {
+        const message: MutableContextMessage = {
           role: 'assistant',
           content: [],
           toolCalls: [],
@@ -715,6 +726,40 @@ export class ContextMemory {
           );
         }
         openStep.content.push(event.part);
+        return;
+      }
+      case 'hosted.search': {
+        const openStep = this.openSteps.get(event.stepUuid);
+        if (openStep === undefined) return;
+
+        // Hosted-search metadata is durable transcript state, but it must not
+        // become model-visible history or alter tool-exchange bookkeeping.
+        const metadata: HostedSearchEvent = {
+          callId: event.callId,
+          status: event.status,
+          action: event.action,
+          sources: event.sources?.map((source) => ({ ...source })),
+        };
+        const searchMetadata = (openStep.searchMetadata ??= []);
+        const metadataKey = JSON.stringify(metadata);
+        if (!searchMetadata.some((candidate) => JSON.stringify(candidate) === metadataKey)) {
+          searchMetadata.push(metadata);
+        }
+
+        const annotations = (openStep.annotations ??= []);
+        for (const citation of event.citations ?? []) {
+          const url = citation.url.trim();
+          const key = `${url}\u0000${citation.startIndex}\u0000${citation.endIndex}`;
+          if (
+            annotations.some(
+              (candidate) =>
+                `${candidate.url}\u0000${candidate.startIndex}\u0000${candidate.endIndex}` === key,
+            )
+          ) {
+            continue;
+          }
+          annotations.push({ ...citation, url });
+        }
         return;
       }
       case 'tool.call': {

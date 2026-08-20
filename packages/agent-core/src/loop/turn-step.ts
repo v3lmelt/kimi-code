@@ -13,14 +13,20 @@ import {
   APIRequestTooLargeError,
   isImageFormatError,
   isRecoverableRequestStructureError,
+  type HostedSearchPart,
   type TokenUsage,
 } from '@moonshot-ai/kosong';
 import type { Logger } from '#/logging/types';
 
-import type { LoopEventDispatcher } from './events';
+import type {
+  LoopEventDispatcher,
+  LoopHostedSearchEvent,
+  LoopHostedSearchSource,
+} from './events';
 import { errorMessage } from './errors';
 import {
   LLMRequestTraceState,
+  type HostedSearchNormalizer,
   type LLM,
   type LLMChatParams,
   type LLMChatResponse,
@@ -38,7 +44,7 @@ import type {
 
 type ChatStreamingCallbacks = Pick<
   LLMChatParams,
-  'onTextDelta' | 'onThinkDelta' | 'onToolCallDelta' | 'onUsageDelta' | 'onTextPart' | 'onThinkPart'
+  'onTextDelta' | 'onThinkDelta' | 'onToolCallDelta' | 'onUsageDelta' | 'onTextPart' | 'onThinkPart' | 'onHostedSearchPart'
 >;
 
 export interface ExecuteLoopStepDeps {
@@ -68,6 +74,7 @@ export interface ExecuteLoopStepDeps {
   readonly buildTools?: (() => readonly ExecutableTool[]) | undefined;
   /** See RunTurnInput.describeMissingTool. */
   readonly describeMissingTool?: ((name: string) => string | undefined) | undefined;
+  readonly normalizeHostedSearch?: HostedSearchNormalizer | undefined;
   readonly hooks?: LoopHooks | undefined;
   readonly log?: Logger | undefined;
   readonly currentStep: number;
@@ -107,6 +114,7 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
     tools,
     buildTools,
     describeMissingTool,
+    normalizeHostedSearch,
     hooks,
     log,
     currentStep,
@@ -162,6 +170,7 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
   });
   onRequestTrace?.(trace);
 
+  let hostedSearchSeen = false;
   const chatParams: LLMChatParams = {
     messages,
     tools: stepTools ?? [],
@@ -176,6 +185,9 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
       turnId,
       currentStep,
       stepUuid,
+      onHostedSearchPartSeen: () => {
+        hostedSearchSeen = true;
+      },
     }),
   };
   const retryInput = {
@@ -394,6 +406,58 @@ export async function executeLoopStep(deps: ExecuteLoopStepDeps): Promise<{
   const stopTurnAfterUsage = usageResult?.stopTurn === true;
   const stopReason = deriveStepStopReason(response);
 
+  if (
+    hostedSearchSeen ||
+    response.hostedSearchMetadata !== undefined ||
+    response.hostedSearchAnnotations !== undefined
+  ) {
+    signal.throwIfAborted();
+    let normalized: {
+      readonly query?: string;
+      readonly sources: readonly LoopHostedSearchSource[];
+      readonly citations: readonly {
+        readonly type: 'url_citation';
+        readonly startIndex: number;
+        readonly endIndex: number;
+        readonly title?: string;
+        readonly url: string;
+        readonly citationText?: string;
+      }[];
+    };
+    try {
+      normalized =
+        normalizeHostedSearch === undefined
+          ? {
+              sources: (response.hostedSearchMetadata ?? []).flatMap((event) => [
+                ...(event.sources ?? []),
+                ...(event.action?.type === 'search' ? (event.action.sources ?? []) : []),
+              ]),
+              citations: [],
+            }
+          : await normalizeHostedSearch({
+              answerText: response.assistantText ?? '',
+              events: response.hostedSearchMetadata ?? [],
+              annotations: response.hostedSearchAnnotations ?? [],
+            });
+    } catch (error) {
+      log?.warn('hosted search source normalization failed', { error });
+      normalized = { sources: [], citations: [] };
+    }
+    signal.throwIfAborted();
+    await dispatchEvent({
+      type: 'hosted.search',
+      uuid: randomUUID(),
+      turnId,
+      step: currentStep,
+      stepUuid,
+      phase: 'completed',
+      status: 'completed',
+      query: normalized.query,
+      sources: normalized.sources,
+      citations: normalized.citations,
+    });
+  }
+
   // Execute tools only when the normalized response shape represents a tool
   // step. Provider terminal diagnostics such as filtering or truncation must
   // not trigger side-effecting tool execution even if a malformed response also
@@ -520,6 +584,45 @@ function deriveStepStopReason(response: LLMChatResponse): LoopStepStopReason {
   }
 }
 
+function hostedSearchPartEvent(
+  part: HostedSearchPart,
+  turnId: string,
+  step: number,
+  stepUuid: string,
+): LoopHostedSearchEvent {
+  const base = {
+    type: 'hosted.search' as const,
+    uuid: randomUUID(),
+    turnId,
+    step,
+    stepUuid,
+  };
+  if (part.type === 'hosted_search_source') {
+    return { ...base, phase: 'source', callId: part.callId, sources: [part.source] };
+  }
+  if (part.type === 'hosted_search_action') {
+    return {
+      ...base,
+      phase: 'action',
+      callId: part.callId,
+      action: part.action,
+      query: part.action.type === 'search' ? part.action.query ?? part.action.queries?.[0] : undefined,
+    };
+  }
+  return {
+    ...base,
+    phase: 'started',
+    callId: part.callId,
+    status: part.status,
+    action: part.action,
+    sources: part.sources,
+    query:
+      part.action?.type === 'search'
+        ? part.action.query ?? part.action.queries?.[0]
+        : undefined,
+  };
+}
+
 function stepEndProviderDiagnostics(
   response: LLMChatResponse,
   stopReason: LoopStepStopReason,
@@ -545,8 +648,9 @@ function createChatStreamingCallbacks(deps: {
   readonly turnId: string;
   readonly currentStep: number;
   readonly stepUuid: string;
+  readonly onHostedSearchPartSeen?: (() => void) | undefined;
 }): ChatStreamingCallbacks {
-  const { dispatchEvent, turnId, currentStep, stepUuid } = deps;
+  const { dispatchEvent, turnId, currentStep, stepUuid, onHostedSearchPartSeen } = deps;
 
   return {
     onTextDelta: (delta) => {
@@ -565,6 +669,10 @@ function createChatStreamingCallbacks(deps: {
     },
     onUsageDelta: (usage) => {
       dispatchEvent({ type: 'step.usage', step: currentStep, usage });
+    },
+    onHostedSearchPart: async (part) => {
+      onHostedSearchPartSeen?.();
+      await dispatchEvent(hostedSearchPartEvent(part, turnId, currentStep, stepUuid));
     },
     onTextPart: async (part) => {
       await dispatchEvent({

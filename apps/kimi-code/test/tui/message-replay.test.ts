@@ -4,7 +4,9 @@ import type {
   AgentReplayRecord,
   BackgroundTaskInfo,
   ContentPart,
+  ContextMessage,
   GoalSnapshot,
+  HostedSearchCitation,
   PromptOrigin,
   ResumedAgentState,
   Role,
@@ -27,6 +29,9 @@ import { ToolCallComponent } from '#/tui/components/messages/tool-call';
 import { ReadGroupComponent } from '#/tui/components/messages/read-group';
 import { replayBackgroundProjection } from '#/tui/utils/message-replay';
 import type { TaskNotificationOrigin } from '#/tui/utils/message-replay';
+import type { AgentRecord } from '../../../../packages/agent-core/src/agent/records';
+import { reduceWireRecords } from '../../../../packages/agent-core/src/services/message/transcript';
+import { OpenAIResponsesStreamedMessage } from '../../../../packages/kosong/src/providers/openai-responses';
 
 vi.mock('#/utils/open-url', () => ({ openUrl: vi.fn() }));
 
@@ -82,6 +87,8 @@ function message(
     readonly toolCallId?: string;
     readonly origin?: PromptOrigin | TaskNotificationOrigin;
     readonly isError?: boolean;
+    readonly annotations?: readonly HostedSearchCitation[];
+    readonly searchMetadata?: NonNullable<ContextMessage['searchMetadata']>;
   } = {},
 ): AgentReplayRecord {
   return {
@@ -94,8 +101,136 @@ function message(
       toolCallId: extra.toolCallId,
       origin: extra.origin as PromptOrigin | undefined,
       isError: extra.isError,
+      annotations: extra.annotations,
+      searchMetadata: extra.searchMetadata,
     },
   };
+}
+
+interface WireSearchSource {
+  readonly type: 'url';
+  readonly url: string;
+  readonly title?: string;
+}
+
+interface WireSearchCall {
+  readonly type: 'web_search_call';
+  readonly id: string;
+  readonly status: 'completed';
+  readonly action: {
+    readonly type: 'search';
+    readonly query: string;
+    readonly sources: readonly WireSearchSource[];
+  };
+}
+
+interface WireOutputText {
+  readonly type: 'output_text';
+  readonly text: string;
+  readonly annotations: readonly {
+    readonly type: 'url_citation';
+    readonly start_index: number;
+    readonly end_index: number;
+    readonly title?: string;
+    readonly url: string;
+  }[];
+}
+
+interface WireAssistantMessage {
+  readonly type: 'message';
+  readonly content: readonly WireOutputText[];
+}
+
+interface WireResponseFixture {
+  readonly output: readonly (WireSearchCall | WireAssistantMessage)[];
+}
+
+/**
+ * Convert the same Responses wire shape consumed by Kosong into the persisted
+ * ContextMessage shape used by session replay. This deliberately does not
+ * manufacture a protocol HostedSearchEvent with turn/step fields.
+ */
+async function replayMessageFromWire(response: WireResponseFixture): Promise<AgentReplayRecord> {
+  const streamed = new OpenAIResponsesStreamedMessage(response, false);
+  let answerText = '';
+  for await (const part of streamed) {
+    if (part.type === 'text') answerText += part.text;
+  }
+
+  const annotations = streamed.annotations.map((annotation) => ({ ...annotation }));
+  const searchMetadata: Array<NonNullable<ContextMessage['searchMetadata']>[number]> =
+    streamed.searchMetadata.map((event) => ({
+      callId: event.callId,
+      status: event.status,
+      action: event.action,
+      sources: event.sources?.map((source) => ({ ...source })),
+    }));
+
+  // `turn.step` emits a separate completion summary after Kosong has exposed
+  // provider metadata. ContextMemory stores that summary without a call id,
+  // while URL annotations are persisted on the assistant message separately.
+  // Derive the summary here to keep this fixture on the real replay wire shape.
+  const citationByUrl = new Map(annotations.map((annotation) => [annotation.url.trim(), annotation]));
+  const seenSourceUrls = new Set<string>();
+  const sourceCandidates = [
+    ...searchMetadata.flatMap((event) => [
+      ...(event.sources ?? []),
+      ...(event.action?.type === 'search' ? (event.action.sources ?? []) : []),
+    ]),
+    ...annotations.map((annotation) => ({ url: annotation.url, title: annotation.title })),
+  ];
+  const summarySources = sourceCandidates.flatMap((source) => {
+      const url = source.url.trim();
+      if (url.length === 0 || seenSourceUrls.has(url)) return [];
+      seenSourceUrls.add(url);
+      const annotation = citationByUrl.get(url);
+      if (annotation === undefined) return [{ url, title: source.title }];
+      const citationText = answerText.slice(annotation.startIndex, annotation.endIndex);
+      return [
+        {
+          url,
+          title: source.title,
+          cited: true,
+          citationText,
+          snippet: citationText,
+          snippetKind: 'citation' as const,
+        },
+      ];
+    })
+    .toSorted((left, right) => {
+      const leftCited = citationByUrl.has(left.url);
+      const rightCited = citationByUrl.has(right.url);
+      if (leftCited === rightCited) return 0;
+      return leftCited ? -1 : 1;
+    });
+  if (searchMetadata.length > 0) {
+    searchMetadata.push({ status: 'completed', sources: summarySources });
+  }
+
+  const message: ContextMessage = {
+    role: 'assistant',
+    content: [{ type: 'text', text: answerText }],
+    toolCalls: [],
+    annotations,
+    searchMetadata,
+  };
+  return { time: REPLAY_TIME, type: 'message', message };
+}
+
+function wireLoopEvent(event: Record<string, unknown>): AgentRecord {
+  return {
+    type: 'context.append_loop_event',
+    event,
+    time: REPLAY_TIME,
+  } as unknown as AgentRecord;
+}
+
+function replayMessagesFromWire(records: readonly AgentRecord[]): AgentReplayRecord[] {
+  return reduceWireRecords(records).entries.map(({ message, time }) => ({
+    type: 'message',
+    time: time ?? REPLAY_TIME,
+    message,
+  }));
 }
 
 function toolCall(id: string, name: string, args: Record<string, unknown>): ToolCall {
@@ -649,12 +784,207 @@ describe('KimiTUI resume message replay', () => {
     expect(group).toBeInstanceOf(AgentGroupComponent);
     expect((group as AgentGroupComponent).size()).toBe(2);
     const output = stripAnsi((group as AgentGroupComponent).render(120).join('\n'));
-    expect(output).toContain('2 agents finished');
+    expect(output).toContain('2 agents');
     expect(output).not.toContain('Still working…');
     expect(output).not.toContain('Waiting to start…');
     expect(driver.streamingUI.hasPendingAgentGroup()).toBe(false);
     expect(driver.streamingUI.getToolComponent('call_agent_1')).toBeUndefined();
     expect(driver.streamingUI.getToolComponent('call_agent_2')).toBeUndefined();
+  });
+
+  it('replays hosted-search cards and display-only citations', async () => {
+    const answer = 'The answer is Paris.';
+    const sourceUrl = 'https://example.com/paris';
+    const citation: HostedSearchCitation = {
+      type: 'url_citation',
+      startIndex: 4,
+      endIndex: 10,
+      title: 'Example source',
+      url: sourceUrl,
+    };
+    const driver = await replayIntoDriver([
+      await replayMessageFromWire({
+        output: [
+          {
+            type: 'web_search_call',
+            id: 'search-1',
+            status: 'completed',
+            action: {
+              type: 'search',
+              query: 'capital of France',
+              sources: [],
+            },
+          },
+          {
+            type: 'message',
+            content: [
+              {
+                type: 'output_text',
+                text: answer,
+                annotations: [
+                  {
+                    type: 'url_citation',
+                    start_index: citation.startIndex,
+                    end_index: citation.endIndex,
+                    title: citation.title,
+                    url: sourceUrl,
+                  },
+                ],
+              },
+            ],
+          },
+        ],
+      }),
+    ]);
+
+    const assistant = driver.state.transcriptEntries.find((entry) => entry.kind === 'assistant');
+    const search = driver.state.transcriptEntries.find(
+      (entry) => entry.hostedSearchData !== undefined,
+    );
+    expect(assistant?.content).toBe(answer);
+    expect(assistant?.assistantCitations).toEqual([citation]);
+    expect(search?.hostedSearchData?.status).toBe('completed');
+    expect(search?.hostedSearchData?.query).toBe('capital of France');
+    expect(search?.hostedSearchData?.sources.map((source) => source.url)).toEqual([sourceUrl]);
+
+    const transcript = stripAnsi(driver.state.transcriptContainer.render(140).join('\\n'));
+    expect(transcript).toContain('Hosted search');
+    expect(transcript).toContain('capital of France');
+    expect(transcript).toContain('Example source');
+    expect(transcript).toContain(sourceUrl);
+    expect(transcript).toContain('[1]');
+    expect(transcript).not.toContain('WebSearch');
+  });
+
+  it('replays hosted search through wire reduction into the TUI', async () => {
+    const answer = 'The answer is Paris.';
+    const sourceUrl = 'https://example.com/reduced-paris';
+    const replay = replayMessagesFromWire([
+      wireLoopEvent({
+        type: 'step.begin',
+        uuid: 'step-reduced',
+        turnId: 'turn-reduced',
+        step: 0,
+      }),
+      wireLoopEvent({
+        type: 'content.part',
+        uuid: 'part-reduced',
+        turnId: 'turn-reduced',
+        step: 0,
+        stepUuid: 'step-reduced',
+        part: { type: 'text', text: answer },
+      }),
+      wireLoopEvent({
+        type: 'hosted.search',
+        uuid: 'search-action-reduced',
+        turnId: 'turn-reduced',
+        step: 0,
+        stepUuid: 'step-reduced',
+        phase: 'action',
+        callId: 'search-reduced',
+        status: 'searching',
+        action: {
+          type: 'search',
+          query: 'capital of France',
+          sources: [{ url: sourceUrl, title: 'Reduced source' }],
+        },
+      }),
+      wireLoopEvent({
+        type: 'hosted.search',
+        uuid: 'search-completed-reduced',
+        turnId: 'turn-reduced',
+        step: 0,
+        stepUuid: 'step-reduced',
+        phase: 'completed',
+        callId: 'search-reduced',
+        status: 'completed',
+        sources: [
+          {
+            url: sourceUrl,
+            title: 'Reduced source',
+            cited: true,
+            citationText: 'answer',
+            snippet: 'answer',
+            snippetKind: 'citation',
+          },
+        ],
+        citations: [
+          {
+            type: 'url_citation',
+            startIndex: 4,
+            endIndex: 10,
+            url: sourceUrl,
+            title: 'Reduced source',
+            citationText: 'answer',
+          },
+        ],
+      }),
+      wireLoopEvent({
+        type: 'step.end',
+        uuid: 'step-reduced',
+        turnId: 'turn-reduced',
+        step: 0,
+      }),
+    ]);
+
+    const driver = await replayIntoDriver(replay);
+    const assistant = driver.state.transcriptEntries.find((entry) => entry.kind === 'assistant');
+    const search = driver.state.transcriptEntries.find(
+      (entry) => entry.hostedSearchData !== undefined,
+    );
+
+    expect(assistant?.content).toBe(answer);
+    expect(assistant?.assistantCitations).toEqual([
+      expect.objectContaining({
+        startIndex: 4,
+        endIndex: 10,
+        url: sourceUrl,
+      }),
+    ]);
+    expect(search?.hostedSearchData).toMatchObject({
+      query: 'capital of France',
+      callId: 'search-reduced',
+      status: 'completed',
+    });
+    expect(search?.hostedSearchData?.sources).toEqual([
+      expect.objectContaining({ url: sourceUrl, cited: true }),
+    ]);
+
+    const transcript = stripAnsi(driver.state.transcriptContainer.render(140).join('\\n'));
+    expect(transcript).toContain('Reduced source');
+    expect(transcript).toContain(sourceUrl);
+    expect(transcript).toContain('[1]');
+  });
+
+  it('rebuilds replayed hosted-search cards after switching sessions', async () => {
+    const sourceUrl = 'https://example.com/replayed';
+    const initial = makeSession([]);
+    const resumed = makeSession([
+      message('assistant', [{ type: 'text', text: 'A replayed answer.' }], {
+        searchMetadata: [{ callId: 'search-1', status: 'completed', sources: [{ url: sourceUrl }] }],
+      }),
+    ]);
+    const driver = await makeDriver(initial);
+
+    driver.streamingUI.handleHostedSearch({
+      type: 'hosted.search',
+      turnId: 0,
+      step: 0,
+      phase: 'completed',
+      callId: 'search-1',
+      status: 'completed',
+      sources: [{ url: 'https://example.com/old' }],
+    });
+    expect(driver.state.transcriptEntries.filter((entry) => entry.hostedSearchData !== undefined))
+      .toHaveLength(1);
+
+    await driver.switchToSession(resumed, 'Resumed session (ses-replay).');
+
+    const cards = driver.state.transcriptEntries.filter(
+      (entry) => entry.hostedSearchData !== undefined,
+    );
+    expect(cards).toHaveLength(1);
+    expect(cards[0]?.hostedSearchData?.sources.map((source) => source.url)).toEqual([sourceUrl]);
   });
 
   it('groups replayed Read calls from one assistant message using live grouping', async () => {

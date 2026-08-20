@@ -5,7 +5,20 @@ import {
   ChatProviderError,
   isContextOverflowErrorCode,
 } from '#/errors';
-import type { ContentPart, Message, StreamedMessagePart, ToolCall } from '#/message';
+import type {
+  ContentPart,
+  HostedSearchAction,
+  HostedSearchCitation,
+  HostedSearchEvent,
+  HostedSearchLifecycle,
+  HostedSearchMode,
+  HostedSearchPart,
+  HostedSearchSource,
+  Message,
+  StreamedMessagePart,
+  ToolCall,
+  UrlCitationPart,
+} from '#/message';
 import { extractText, isToolDeclarationOnlyMessage } from '#/message';
 import type {
   ChatProvider,
@@ -102,6 +115,13 @@ type ResponseOutputItemView =
       summary: RawObject[];
     }
   | {
+      type: 'web_search_call';
+      callId?: string;
+      status?: HostedSearchLifecycle;
+      action?: HostedSearchAction;
+      sources: HostedSearchSource[];
+    }
+  | {
       type: 'other';
     };
 
@@ -143,6 +163,95 @@ function readObjectArrayField(object: RawObject, key: string): RawObject[] | und
     const objectItem = asRawObject(item);
     return objectItem === null ? [] : [objectItem];
   });
+}
+
+function readHostedSearchSource(value: unknown): HostedSearchSource | undefined {
+  const source = asRawObject(value);
+  if (source === null) return undefined;
+  const url = readStringField(source, 'url');
+  if (url === undefined || url.length === 0) return undefined;
+  const result: HostedSearchSource = { url };
+  if (readStringField(source, 'type') === 'url') result.type = 'url';
+  const title = readStringField(source, 'title');
+  if (title !== undefined) result.title = title;
+  return result;
+}
+
+function readHostedSearchSources(value: unknown): HostedSearchSource[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((item) => {
+    const source = readHostedSearchSource(item);
+    return source === undefined ? [] : [source];
+  });
+}
+
+function readHostedSearchAction(value: unknown): HostedSearchAction | undefined {
+  const action = asRawObject(value);
+  if (action === null) return undefined;
+  const type = readStringField(action, 'type');
+  if (type === 'search') {
+    const result: Extract<HostedSearchAction, { type: 'search' }> = { type };
+    const query = readStringField(action, 'query');
+    if (query !== undefined) result.query = query;
+    if (Array.isArray(action['queries'])) {
+      result.queries = action['queries'].flatMap((item) =>
+        typeof item === 'string' ? [item] : [],
+      );
+    }
+    const sources = readHostedSearchSources(action['sources']);
+    if (sources.length > 0) result.sources = sources;
+    return result;
+  }
+  if (type === 'open_page') {
+    const result: Extract<HostedSearchAction, { type: 'open_page' }> = { type };
+    const url = readStringField(action, 'url');
+    if (url !== undefined) result.url = url;
+    return result;
+  }
+  if (type === 'find_in_page') {
+    const result: Extract<HostedSearchAction, { type: 'find_in_page' }> = { type };
+    const url = readStringField(action, 'url');
+    if (url !== undefined) result.url = url;
+    const pattern = readStringField(action, 'pattern');
+    if (pattern !== undefined) result.pattern = pattern;
+    return result;
+  }
+  return undefined;
+}
+
+function readHostedSearchLifecycle(value: unknown): HostedSearchLifecycle | undefined {
+  const status = typeof value === 'string' ? value : undefined;
+  return status === 'in_progress' ||
+    status === 'searching' ||
+    status === 'completed' ||
+    status === 'failed'
+    ? status
+    : undefined;
+}
+
+function readUrlCitation(value: unknown): UrlCitationPart | undefined {
+  const annotation = asRawObject(value);
+  if (annotation === null || annotation['type'] !== 'url_citation') return undefined;
+  const url = readStringField(annotation, 'url');
+  const startIndex = readNumberField(annotation, 'start_index');
+  const endIndex = readNumberField(annotation, 'end_index');
+  if (url === undefined || startIndex === undefined || endIndex === undefined) return undefined;
+  const result: UrlCitationPart = { type: 'url_citation', startIndex, endIndex, url };
+  const title = readStringField(annotation, 'title');
+  if (title !== undefined) result.title = title;
+  return result;
+}
+
+function readCitations(value: unknown): UrlCitationPart[] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((annotation) => {
+    const citation = readUrlCitation(annotation);
+    return citation === undefined ? [] : [citation];
+  });
+}
+
+function readOutputTextCitations(contentItem: RawObject): UrlCitationPart[] {
+  return readCitations(contentItem['annotations']);
 }
 
 function failResponsesDecode(context: string, detail: string): never {
@@ -199,6 +308,22 @@ function readResponseOutputItem(
       encryptedContent: readStringField(item, 'encrypted_content'),
       summary: readObjectArrayField(item, 'summary') ?? [],
     };
+  }
+
+  if (type === 'web_search_call') {
+    const action = readHostedSearchAction(item['action']);
+    const actionObject = readObjectField(item, 'action');
+    const sources = readHostedSearchSources(actionObject?.['sources'] ?? item['sources']);
+    const result: Extract<ResponseOutputItemView, { type: 'web_search_call' }> = {
+      type,
+      sources,
+    };
+    const callId = readStringField(item, 'id');
+    if (callId !== undefined) result.callId = callId;
+    const status = readHostedSearchLifecycle(item['status']);
+    if (status !== undefined) result.status = status;
+    if (action !== undefined) result.action = action;
+    return result;
   }
 
   return { type: 'other' };
@@ -350,10 +475,20 @@ function formatResponsesFailedResponse(response: RawObject): string {
     : `incomplete: ${reason}`;
 }
 
+export type HostedSearchConfig = HostedSearchMode | { readonly mode: HostedSearchMode };
+
 export interface OpenAIResponsesOptions {
   apiKey?: string | undefined;
   baseUrl?: string | undefined;
   model: string;
+  /** Hosted web search policy. Defaults to `disabled`. */
+  hostedSearch?: HostedSearchConfig | undefined;
+  /** Backwards-compatible spelling for {@link hostedSearch}. */
+  hostedSearchMode?: HostedSearchConfig | undefined;
+  /** Alias accepted by callers that name the feature after the wire tool. */
+  webSearch?: HostedSearchConfig | undefined;
+  /** Explicit alias for callers that prefer a `*Mode` option name. */
+  webSearchMode?: HostedSearchConfig | undefined;
   maxOutputTokens?: number | undefined;
   /**
    * The effort value that encodes "thinking off" on this wire (e.g. `'none'`
@@ -677,6 +812,26 @@ function convertTool(tool: Tool, nativeToolSearch: boolean): ResponseToolParam {
   return converted;
 }
 
+function hostedSearchTool(mode: HostedSearchMode): RawObject | undefined {
+  if (mode === 'disabled') return undefined;
+  if (mode === 'cached') {
+    return { type: 'web_search', external_web_access: false };
+  }
+  if (mode === 'indexed') {
+    return {
+      type: 'web_search',
+      external_web_access: true,
+      indexed_web_access: true,
+    };
+  }
+  return { type: 'web_search', external_web_access: true };
+}
+
+function resolveHostedSearchMode(config: HostedSearchConfig | undefined): HostedSearchMode {
+  if (config === undefined) return 'disabled';
+  return typeof config === 'string' ? config : config.mode;
+}
+
 /**
  * Convert the history, buffering tool-result media when `extract_text`
  * flattens tool outputs to plain strings. The buffered media items are
@@ -723,11 +878,68 @@ function convertHistoryMessages(
   flushPendingMedia();
   return input;
 }
+
+function hostedSearchPartToEvent(part: HostedSearchPart): HostedSearchEvent {
+  const event: HostedSearchEvent = {};
+  if (part.callId !== undefined) event.callId = part.callId;
+  switch (part.type) {
+    case 'hosted_search_source':
+      event.sources = [part.source];
+      break;
+    case 'hosted_search_action':
+      event.action = part.action;
+      break;
+    case 'hosted_search_lifecycle':
+      event.status = part.status;
+      if (part.action !== undefined) event.action = part.action;
+      if (part.sources !== undefined) event.sources = part.sources;
+      break;
+  }
+  return event;
+}
+
+function hostedSearchPartsForItem(
+  item: Extract<ResponseOutputItemView, { type: 'web_search_call' }>,
+): HostedSearchPart[] {
+  const parts: HostedSearchPart[] = [];
+  if (item.action !== undefined) {
+    const actionPart = { type: 'hosted_search_action', action: item.action } as const;
+    if (item.callId !== undefined) {
+      parts.push({ ...actionPart, callId: item.callId });
+    } else {
+      parts.push(actionPart);
+    }
+  }
+  for (const source of item.sources) {
+    const sourcePart = { type: 'hosted_search_source', source } as const;
+    if (item.callId !== undefined) {
+      parts.push({ ...sourcePart, callId: item.callId });
+    } else {
+      parts.push(sourcePart);
+    }
+  }
+  if (item.status !== undefined) {
+    const lifecyclePart: Extract<HostedSearchPart, { type: 'hosted_search_lifecycle' }> = {
+      type: 'hosted_search_lifecycle',
+      status: item.status,
+    };
+    if (item.callId !== undefined) lifecyclePart.callId = item.callId;
+    if (item.action !== undefined) lifecyclePart.action = item.action;
+    if (item.sources.length > 0) lifecyclePart.sources = item.sources;
+    parts.push(lifecyclePart);
+  }
+  return parts;
+}
+
 export class OpenAIResponsesStreamedMessage implements StreamedMessage {
   private _id: string | null = null;
   private _usage: TokenUsage | null = null;
   private _finishReason: FinishReason | null = null;
   private _rawFinishReason: string | null = null;
+  private readonly _annotations: HostedSearchCitation[] = [];
+  private readonly _annotationKeys = new Set<string>();
+  private readonly _searchMetadata: HostedSearchEvent[] = [];
+  private readonly _searchMetadataKeys = new Set<string>();
   private readonly _iter: AsyncGenerator<StreamedMessagePart>;
 
   constructor(response: unknown, isStream: boolean) {
@@ -754,8 +966,52 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
     return this._rawFinishReason;
   }
 
+  get annotations(): readonly HostedSearchCitation[] {
+    return this._annotations;
+  }
+
+  get searchMetadata(): readonly HostedSearchEvent[] {
+    return this._searchMetadata;
+  }
+
   async *[Symbol.asyncIterator](): AsyncIterator<StreamedMessagePart> {
     yield* this._iter;
+  }
+
+  private _recordCitation(citation: HostedSearchCitation): boolean {
+    const key = `${citation.url}\u0000${citation.startIndex}\u0000${citation.endIndex}`;
+    if (this._annotationKeys.has(key)) return false;
+    this._annotationKeys.add(key);
+    this._annotations.push(citation);
+    return true;
+  }
+
+  private _recordSearchPart(part: HostedSearchPart): boolean {
+    const event = hostedSearchPartToEvent(part);
+    if (part.type === 'hosted_search_lifecycle' && part.callId !== undefined) {
+      const existing = this._searchMetadata.find(
+        (candidate) => candidate.callId === part.callId && candidate.status === part.status,
+      );
+      if (existing !== undefined) {
+        if (existing.action === undefined && event.action !== undefined) {
+          existing.action = event.action;
+        }
+        if (event.sources !== undefined) {
+          existing.sources ??= [];
+          for (const source of event.sources) {
+            if (!existing.sources.some((candidate) => candidate.url === source.url)) {
+              existing.sources.push(source);
+            }
+          }
+        }
+        return false;
+      }
+    }
+    const key = JSON.stringify(event);
+    if (this._searchMetadataKeys.has(key)) return false;
+    this._searchMetadataKeys.add(key);
+    this._searchMetadata.push(event);
+    return true;
   }
 
   private _captureFinishReasonFromResponse(response: RawObject): void {
@@ -804,6 +1060,9 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             if (text !== undefined) {
               yield { type: 'text', text };
             }
+            for (const citation of readOutputTextCitations(contentItem)) {
+              if (this._recordCitation(citation)) yield citation;
+            }
           }
         }
       } else if (outputItem.type === 'function_call') {
@@ -813,6 +1072,10 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
           name: requireFunctionCallName(outputItem),
           arguments: outputItem.arguments ?? null,
         } satisfies ToolCall;
+      } else if (outputItem.type === 'web_search_call') {
+        for (const part of hostedSearchPartsForItem(outputItem)) {
+          if (this._recordSearchPart(part)) yield part;
+        }
       } else if (outputItem.type === 'reasoning') {
         let hasReasoningSummary = false;
         for (const summary of outputItem.summary) {
@@ -941,6 +1204,32 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
           case 'response.output_text.delta':
             yield { type: 'text', text: requireStringField(chunk, 'delta', type) };
             break;
+          case 'response.output_text.annotation.added': {
+            const citation = readUrlCitation(chunk['annotation']);
+            if (citation !== undefined && this._recordCitation(citation)) {
+              yield citation;
+            }
+            break;
+          }
+          case 'response.output_text.done': {
+            for (const citation of readCitations(chunk['annotations'])) {
+              if (this._recordCitation(citation)) yield citation;
+            }
+            break;
+          }
+          case 'response.web_search_call.in_progress':
+          case 'response.web_search_call.searching':
+          case 'response.web_search_call.completed': {
+            const status = type.slice('response.web_search_call.'.length) as HostedSearchLifecycle;
+            const part: Extract<HostedSearchPart, { type: 'hosted_search_lifecycle' }> = {
+              type: 'hosted_search_lifecycle',
+              status,
+            };
+            const callId = readStringField(chunk, 'item_id');
+            if (callId !== undefined) part.callId = callId;
+            if (this._recordSearchPart(part)) yield part;
+            break;
+          }
           case 'response.created':
           case 'response.in_progress': {
             const responseObject = requireObjectField(chunk, 'response', type);
@@ -978,6 +1267,17 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
                 tc._streamIndex = streamIndex;
               }
               yield tc;
+            } else if (item.type === 'web_search_call') {
+              for (const part of hostedSearchPartsForItem(item)) {
+                if (this._recordSearchPart(part)) yield part;
+              }
+            } else if (item.type === 'message') {
+              for (const contentItem of item.content) {
+                if (contentItem['type'] !== 'output_text') continue;
+                for (const citation of readOutputTextCitations(contentItem)) {
+                  if (this._recordCitation(citation)) yield citation;
+                }
+              }
             }
             break;
           }
@@ -994,6 +1294,17 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
             } else if (item.type === 'function_call' && typeof item.arguments === 'string') {
               const streamIndex = responseStreamIndex(item.itemId, outputIndex);
               yield* yieldFinalArgumentsSuffix(streamIndex, item.arguments, type);
+            } else if (item.type === 'web_search_call') {
+              for (const part of hostedSearchPartsForItem(item)) {
+                if (this._recordSearchPart(part)) yield part;
+              }
+            } else if (item.type === 'message') {
+              for (const contentItem of item.content) {
+                if (contentItem['type'] !== 'output_text') continue;
+                for (const citation of readOutputTextCitations(contentItem)) {
+                  if (this._recordCitation(citation)) yield citation;
+                }
+              }
             }
             break;
           }
@@ -1085,6 +1396,10 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
   }
 }
 
+function isHostedSearchWireTool(value: unknown): boolean {
+  return asRawObject(value)?.['type'] === 'web_search';
+}
+
 function shapeOpenAICodexRequest(body: Record<string, unknown>, responsesLite: boolean): void {
   delete body['max_output_tokens'];
   delete body['max_completion_tokens'];
@@ -1093,7 +1408,11 @@ function shapeOpenAICodexRequest(body: Record<string, unknown>, responsesLite: b
   const input = Array.isArray(body['input']) ? body['input'] : [];
   stripOpenAICodexImageDetails(input);
   const tools = Array.isArray(body['tools']) ? body['tools'] : [];
-  const prefix: unknown[] = [{ type: 'additional_tools', role: 'developer', tools }];
+  const additionalTools = tools.filter((tool) => !isHostedSearchWireTool(tool));
+  const hostedTools = tools.filter(isHostedSearchWireTool);
+  const prefix: unknown[] = [
+    { type: 'additional_tools', role: 'developer', tools: additionalTools },
+  ];
   const instructions = body['instructions'];
   if (typeof instructions === 'string' && instructions.length > 0) {
     prefix.push({
@@ -1108,7 +1427,11 @@ function shapeOpenAICodexRequest(body: Record<string, unknown>, responsesLite: b
   if (toolChoice !== 'none' && toolChoice !== 'required') body['tool_choice'] = 'auto';
   body['reasoning'] = { ...asRawObject(body['reasoning']), context: 'all_turns' };
   delete body['instructions'];
-  delete body['tools'];
+  if (hostedTools.length > 0) {
+    body['tools'] = hostedTools;
+  } else {
+    delete body['tools'];
+  }
 }
 
 function configureOpenAIResponsesPromptCache(
@@ -1430,6 +1753,7 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
   private _httpClient: unknown;
   private _clientFactory: ((auth: ProviderRequestAuth) => OpenAI) | undefined;
   private _codex: OpenAIResponsesOptions['codex'];
+  private _hostedSearchMode: HostedSearchMode;
   private _nativeToolSearch: boolean;
   private _responsesWebSocket: boolean;
   private _promptCache: OpenAIResponsesPromptCacheOptions | undefined;
@@ -1453,6 +1777,12 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
     this._httpClient = options.httpClient;
     this._clientFactory = options.clientFactory;
     this._codex = options.codex;
+    this._hostedSearchMode = resolveHostedSearchMode(
+      options.hostedSearch ??
+        options.hostedSearchMode ??
+        options.webSearch ??
+        options.webSearchMode,
+    );
     this._nativeToolSearch = options.nativeToolSearch === true;
     this._responsesWebSocket = options.responsesWebSocket === true;
     this._promptCache =
@@ -1516,6 +1846,17 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
       kwargs['include'] = ['reasoning.encrypted_content'];
     }
 
+    const hostedSearch = hostedSearchTool(this._hostedSearchMode);
+    if (hostedSearch !== undefined) {
+      const include = Array.isArray(kwargs['include'])
+        ? kwargs['include'].filter((value): value is string => typeof value === 'string')
+        : [];
+      if (!include.includes('web_search_call.action.sources')) {
+        include.push('web_search_call.action.sources');
+      }
+      kwargs['include'] = include;
+    }
+
     // Remove undefined values
     for (const key of Object.keys(kwargs)) {
       if (kwargs[key] === undefined) {
@@ -1524,12 +1865,19 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
       }
     }
 
+    const requestTools: unknown[] = tools.map((tool) =>
+      convertTool(tool, this._nativeToolSearch),
+    );
+    if (hostedSearch !== undefined) {
+      requestTools.push(hostedSearch);
+    }
+
     try {
       const client = this._createClient(options?.auth);
       const createParams: Record<string, unknown> = {
         model: this._model,
         input,
-        tools: tools.map((tool) => convertTool(tool, this._nativeToolSearch)),
+        tools: requestTools,
         store: false,
         stream: this._stream,
         ...kwargs,

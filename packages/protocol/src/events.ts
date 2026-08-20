@@ -700,6 +700,61 @@ export interface TurnStepUsageEvent {
   readonly usage: TokenUsage;
 }
 
+export type HostedSearchPhase = 'started' | 'action' | 'source' | 'completed';
+export type HostedSearchLifecycle = 'in_progress' | 'searching' | 'completed' | 'failed';
+
+export interface HostedSearchSource {
+  readonly url: string;
+  readonly title?: string;
+  readonly snippet?: string;
+  readonly cited?: boolean;
+  readonly citationText?: string;
+  readonly snippetKind?: 'citation' | 'page_extract' | 'unavailable';
+  readonly date?: string;
+  readonly siteName?: string;
+}
+
+export type HostedSearchAction =
+  | {
+      readonly type: 'search';
+      readonly query?: string;
+      readonly queries?: readonly string[];
+      readonly sources?: readonly HostedSearchSource[];
+    }
+  | {
+      readonly type: 'open_page';
+      readonly url?: string;
+    }
+  | {
+      readonly type: 'find_in_page';
+      readonly url?: string;
+      readonly pattern?: string;
+    };
+
+export interface HostedSearchCitation {
+  readonly type: 'url_citation';
+  readonly startIndex: number;
+  readonly endIndex: number;
+  readonly title?: string;
+  readonly url: string;
+  readonly citationText?: string;
+}
+
+export interface HostedSearchEvent {
+  readonly type: 'hosted.search';
+  readonly turnId: number;
+  readonly step: number;
+  readonly stepId?: string;
+  readonly eventId?: string;
+  readonly phase: HostedSearchPhase;
+  readonly callId?: string;
+  readonly query?: string;
+  readonly status?: HostedSearchLifecycle;
+  readonly action?: HostedSearchAction;
+  readonly sources?: readonly HostedSearchSource[];
+  readonly citations?: readonly HostedSearchCitation[];
+}
+
 export interface TurnStepRetryingEvent {
   readonly type: 'turn.step.retrying';
   readonly turnId: number;
@@ -981,6 +1036,7 @@ export type AgentEvent =
   | TurnStepStartedEvent
   | TurnStepCompletedEvent
   | TurnStepUsageEvent
+  | HostedSearchEvent
   | TurnStepRetryingEvent
   | TurnStepInterruptedEvent
   | AssistantDeltaEvent
@@ -1641,6 +1697,59 @@ export const turnStepUsageEventSchema = z.object({
   usage: tokenUsageSchema,
 }) satisfies z.ZodType<TurnStepUsageEvent>;
 
+const hostedSearchSourceSchema = z.object({
+  url: z.string(),
+  title: z.string().optional(),
+  snippet: z.string().optional(),
+  cited: z.boolean().optional(),
+  citationText: z.string().optional(),
+  snippetKind: z.enum(['citation', 'page_extract', 'unavailable']).optional(),
+  date: z.string().optional(),
+  siteName: z.string().optional(),
+}) satisfies z.ZodType<HostedSearchSource>;
+
+const hostedSearchActionSchema = z.discriminatedUnion('type', [
+  z.object({
+    type: z.literal('search'),
+    query: z.string().optional(),
+    queries: z.array(z.string()).optional(),
+    sources: z.array(hostedSearchSourceSchema).optional(),
+  }),
+  z.object({
+    type: z.literal('open_page'),
+    url: z.string().optional(),
+  }),
+  z.object({
+    type: z.literal('find_in_page'),
+    url: z.string().optional(),
+    pattern: z.string().optional(),
+  }),
+]) satisfies z.ZodType<HostedSearchAction>;
+
+const hostedSearchCitationSchema = z.object({
+  type: z.literal('url_citation'),
+  startIndex: z.number(),
+  endIndex: z.number(),
+  title: z.string().optional(),
+  url: z.string(),
+  citationText: z.string().optional(),
+}) satisfies z.ZodType<HostedSearchCitation>;
+
+export const hostedSearchEventSchema = z.object({
+  type: z.literal('hosted.search'),
+  turnId: z.number(),
+  step: z.number(),
+  stepId: z.string().optional(),
+  eventId: z.string().optional(),
+  phase: z.enum(['started', 'action', 'source', 'completed']),
+  callId: z.string().optional(),
+  query: z.string().optional(),
+  status: z.enum(['in_progress', 'searching', 'completed', 'failed']).optional(),
+  action: hostedSearchActionSchema.optional(),
+  sources: z.array(hostedSearchSourceSchema).optional(),
+  citations: z.array(hostedSearchCitationSchema).optional(),
+}) satisfies z.ZodType<HostedSearchEvent>;
+
 export const turnStepRetryingEventSchema = z.object({
   type: z.literal('turn.step.retrying'),
   turnId: z.number(),
@@ -1899,6 +2008,7 @@ export const agentEventSchema = z.discriminatedUnion('type', [
   turnStepStartedEventSchema,
   turnStepCompletedEventSchema,
   turnStepUsageEventSchema,
+  hostedSearchEventSchema,
   turnStepRetryingEventSchema,
   turnStepInterruptedEventSchema,
   assistantDeltaEventSchema,

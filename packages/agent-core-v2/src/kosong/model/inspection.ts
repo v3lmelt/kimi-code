@@ -22,6 +22,7 @@ import { parseKimiCodeCustomHeaders } from '@moonshot-ai/kimi-code-oauth';
 import { BugIndicatingError } from '#/_base/errors/errors';
 
 import type { ModelCapability } from '#/kosong/contract/capability';
+import type { HostedSearchMode } from '#/kosong/contract/provider';
 import type { InspectionSource, ResolutionTrace } from '#/kosong/contract/inspection';
 import type { Protocol, ProtocolProviderOptions } from '#/kosong/protocol/protocol';
 
@@ -55,6 +56,7 @@ export interface InspectedResolvedModel {
   readonly reasoningKey?: string;
   readonly supportEfforts?: readonly string[];
   readonly defaultEffort?: string;
+  readonly webSearch: HostedSearchMode;
   readonly alwaysThinking: boolean;
   readonly headers: Readonly<Record<string, string>>;
   readonly providerOptions?: ProtocolProviderOptions;
@@ -252,6 +254,7 @@ interface ResolvedModelLike {
   readonly reasoningKey?: string;
   readonly supportEfforts?: readonly string[];
   readonly defaultEffort?: string;
+  readonly webSearch?: HostedSearchMode;
   readonly alwaysThinking: boolean;
   readonly headers: Readonly<Record<string, string>>;
   readonly providerOptions?: ProtocolProviderOptions;
@@ -306,10 +309,17 @@ export function assembleModelInspection(args: {
     'reasoningKey',
     'supportEfforts',
     'defaultEffort',
+    'webSearch',
     'aliases',
   ] as const) {
     const source = sources.get(`model.effective.${field}`);
     if (source !== undefined) sources.set(`resolved.${field}`, source);
+  }
+  if (!sources.has('resolved.webSearch')) {
+    sources.set('resolved.webSearch', {
+      kind: 'builtin',
+      detail: 'hosted web search defaults to disabled',
+    });
   }
   const wireNameField = effective.name !== undefined ? 'name' : 'model';
   sources.set(
@@ -416,6 +426,7 @@ export function assembleModelInspection(args: {
       reasoningKey: model.reasoningKey,
       supportEfforts: model.supportEfforts,
       defaultEffort: model.defaultEffort,
+      webSearch: model.webSearch ?? 'disabled',
       alwaysThinking: model.alwaysThinking,
       headers: model.headers,
       providerOptions: model.providerOptions,
