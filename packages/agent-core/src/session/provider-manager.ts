@@ -49,6 +49,8 @@ interface ProviderManagerOptions {
   readonly kimiRequestHeaders?: Record<string, string>;
   readonly resolveOAuthTokenProvider?: OAuthTokenProviderResolver;
   readonly promptCacheKey?: string;
+  readonly codexConversationId?: string;
+  readonly codexThreadId?: string;
 }
 
 type AuthorizedRequest = <T>(
@@ -57,6 +59,7 @@ type AuthorizedRequest = <T>(
 
 export interface ModelProvider {
   readonly defaultModel?: string;
+  forAgent?(agentId: string): ModelProvider;
   resolveProviderConfig(model: string): ResolvedRuntimeProvider;
   resolveAuth?(model: string, options?: { readonly log?: Logger }): AuthorizedRequest | undefined;
 }
@@ -90,6 +93,17 @@ export class SingleModelProvider implements ModelProvider {
 
 export class ProviderManager implements ModelProvider {
   constructor(private readonly options: ProviderManagerOptions) {}
+
+  forAgent(agentId: string): ModelProvider {
+    const sessionCacheKey = this.options.promptCacheKey;
+    if (sessionCacheKey === undefined) return this;
+    return new ProviderManager({
+      ...this.options,
+      promptCacheKey: promptCacheKeyForAgent(sessionCacheKey, agentId),
+      codexConversationId: sessionCacheKey,
+      codexThreadId: `${sessionCacheKey}:${agentId}`,
+    });
+  }
 
   private get config(): KimiConfig {
     const { config } = this.options;
@@ -140,6 +154,8 @@ export class ProviderManager implements ModelProvider {
       effectiveAlias.maxOutputSize,
       effectiveAlias.reasoningKey,
       this.options.promptCacheKey,
+      this.options.codexConversationId,
+      this.options.codexThreadId,
       effectiveAlias.supportEfforts,
       effectiveAlias.offEffort,
       effectiveAlias.adaptiveThinking,
@@ -269,6 +285,8 @@ function toKosongProviderConfig(
   maxOutputSize: number | undefined,
   reasoningKey: string | undefined,
   promptCacheKey: string | undefined,
+  codexConversationId: string | undefined,
+  codexThreadId: string | undefined,
   supportEfforts: readonly string[] | undefined,
   offEffort: string | undefined,
   adaptiveThinking: boolean | undefined,
@@ -403,7 +421,11 @@ function toKosongProviderConfig(
         ...defaultHeadersField({
           ...envCustomHeaders,
           ...kimiUserAgentHeader(kimiRequestHeaders),
-          ...codexSessionHeaders(promptCacheKey, codexResponsesLite),
+          ...codexSessionHeaders(
+            codexConversationId ?? promptCacheKey,
+            codexThreadId ?? promptCacheKey,
+            codexResponsesLite,
+          ),
           ...provider.customHeaders,
         }),
       };
@@ -457,15 +479,19 @@ function isOpenAICodexBaseUrl(value: string | undefined): boolean {
 }
 
 function codexSessionHeaders(
-  promptCacheKey: string | undefined,
+  conversationId: string | undefined,
+  threadId: string | undefined,
   enabled: boolean,
 ): Record<string, string> {
-  if (!enabled || promptCacheKey === undefined) return {};
+  if (!enabled || conversationId === undefined || threadId === undefined) return {};
   return {
-    conversation_id: promptCacheKey,
-    session_id: promptCacheKey,
-    'x-client-request-id': promptCacheKey,
+    conversation_id: conversationId,
+    session_id: threadId,
   };
+}
+
+export function promptCacheKeyForAgent(sessionCacheKey: string, agentId: string): string {
+  return agentId === 'main' ? sessionCacheKey : `${sessionCacheKey}:${agentId}`;
 }
 
 // Returns a fresh `defaultHeaders` field for a kosong provider config so

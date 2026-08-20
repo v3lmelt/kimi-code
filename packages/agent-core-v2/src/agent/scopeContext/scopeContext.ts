@@ -37,3 +37,7 @@ export function makeAgentScopeContext(input: {
     },
   };
 }
+
+export function promptCacheKeyForAgent(sessionId: string, agentId: string): string {
+  return agentId === 'main' ? sessionId : `${sessionId}:${agentId}`;
+}

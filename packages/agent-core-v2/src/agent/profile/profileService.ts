@@ -119,6 +119,10 @@ import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostClock } from '#/os/interface/hostClock';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
+import {
+  IAgentScopeContext,
+  promptCacheKeyForAgent,
+} from '#/agent/scopeContext/scopeContext';
 import type { ToolSource } from '#/tool/toolContract';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { subagentDisplayModel } from '#/session/subagent/configSection';
@@ -296,6 +300,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     @IHostClock private readonly clock: IHostClock,
     @IHostFileSystem private readonly fs: IHostFileSystem,
     @ISessionContext private readonly sessionContext: ISessionContext,
+    @IAgentScopeContext private readonly agentContext: IAgentScopeContext,
     @IBootstrapService private readonly bootstrap: IBootstrapService,
     @ISessionWorkspaceContext private readonly workspace: ISessionWorkspaceContext,
     @ISessionAgentProfileCatalog private readonly catalog: ISessionAgentProfileCatalog,
@@ -703,7 +708,10 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       topP: overrides?.topP,
     };
     return {
-      cacheKey: this.sessionContext.sessionId,
+      cacheKey: promptCacheKeyForAgent(
+        this.sessionContext.sessionId,
+        this.agentContext.agentId,
+      ),
       sampling:
         sampling.temperature === undefined && sampling.topP === undefined ? undefined : sampling,
       thinkingEffort: thinking.effective,

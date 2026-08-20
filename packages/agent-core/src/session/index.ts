@@ -1196,7 +1196,8 @@ export class Session {
       mediaOriginalsDir: sessionMediaOriginalsDir(this.options.homedir),
       skills: this.skills,
       rpc: proxyWithExtraPayload(this.rpc, { agentId: id }),
-      modelProvider: this.options.providerManager,
+      modelProvider:
+        this.options.providerManager?.forAgent?.(id) ?? this.options.providerManager,
       hookEngine: config.hookEngine ?? this.hookEngine,
       subagentHost,
       mcp: this.mcp,

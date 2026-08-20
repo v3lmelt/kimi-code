@@ -185,13 +185,37 @@ describe('OpenAIResponsesModelProvider', () => {
           'User-Agent': 'kimi-code/1.2.3',
           conversation_id: 'session-1',
           session_id: 'session-1',
-          'x-client-request-id': 'session-1',
           'x-openai-internal-codex-responses-lite': 'true',
         },
         codex: { responsesLite: true },
       },
       modelCapabilities: { max_context_tokens: 272_000 },
       supportEfforts: ['low', 'medium', 'high', 'xhigh', 'max'],
+    });
+  });
+
+  it('scopes ChatGPT cache and thread identities per agent', () => {
+    const provider = new OpenAIResponsesModelProvider({
+      authentication: 'chatgpt',
+      promptCacheKey: 'session-1',
+    });
+
+    const main = provider.forAgent('main').resolveProviderConfig('gpt-5.6-sol');
+    const child = provider.forAgent('agent-3').resolveProviderConfig('gpt-5.6-sol');
+
+    expect(main.provider).toMatchObject({
+      generationKwargs: { prompt_cache_key: 'session-1' },
+      defaultHeaders: {
+        conversation_id: 'session-1',
+        session_id: 'session-1:main',
+      },
+    });
+    expect(child.provider).toMatchObject({
+      generationKwargs: { prompt_cache_key: 'session-1:agent-3' },
+      defaultHeaders: {
+        conversation_id: 'session-1',
+        session_id: 'session-1:agent-3',
+      },
     });
   });
 
