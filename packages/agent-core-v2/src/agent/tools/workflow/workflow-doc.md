@@ -6,15 +6,15 @@ The `Workflow` tool is active by default (`[agent] workflow_tool_enabled = true`
 
 ## How it works
 
-You write a script that starts with a pure-literal `meta` object and exports an async `main()` entry point. Inside `main()` you call the DSL globals:
+You write a script that starts with a pure-literal `meta` object and exports an async `main()` entry point. `meta.model` sets the default model for `agent()` calls unless an individual call supplies `opts.model`; every `phase` value used by an agent call must be declared in `meta.phases`. Inside `main()` you call the DSL globals:
 
-- `agent(prompt, opts?)` — spawn one subagent and await its result. `opts` may carry `label`, `phase`, `schema` (structured output), `model`, `effort`, `isolation`, `agentType`. The result is `{ ok, agentId, output, durationMs }`; `output` is `null` when the agent was skipped or errored.
+- `agent(prompt, opts?)` — spawn one subagent and await its result. `opts` may carry `label`, `phase`, `schema` (structured output), `model`, `effort`, `isolation`, `agentType`. `effort` is forwarded to the child binding. The supported isolation values are `session` and `none`; `worktree` is rejected explicitly. A structured-output schema is mandatory: after bounded validation retries are exhausted, the call fails with `ok: false` and does not substitute text. The result is `{ ok, agentId, output, durationMs }`; `output` is `null` when the agent was skipped or errored.
 - `parallel(items, fn, opts?)` — run `fn` over every item concurrently with a barrier; resolves in input order. A per-item throw yields `null` for that element.
 - `pipeline(stages, opts?)` — run a linear chain of stages sequentially, each stage's output feeding the next as `prevResult`. Use `{ input }` to seed the first stage and `{ items }` to run the whole chain once per item. A throwing stage aborts the chain to `null`.
 - `phase(title)` — announce a phase (matched against `meta.phases`).
 - `log(...parts)` — append a line to the run journal.
 - `args` — the structured value you passed as the tool's `args` parameter.
-- `budget` — `{ total, spent(), remaining() }`. `total` is the run's token budget and `spent()` reflects real tokens consumed by subagents so far. Use `budget.remaining()` to decide whether to keep fanning out or wrap up.
+- `budget` — `{ total, spent(), remaining() }`. `total` is the run's token budget and `spent()` reflects the parent turn plus subagent tokens recorded so far. Use `budget.remaining()` to decide whether to keep fanning out or wrap up.
 - `workflow(fn | { fn, budget?, isolation? })` — run a nested workflow body inside the same sandbox (at most one level of nesting).
 
 The runtime enforces hard budgets: a maximum of 1000 agents per run, 4096 items per `parallel()`/`pipeline()` call, no `eval`/`new Function`/WebAssembly inside the sandbox, a 30-second bound on any single `await`-free slice of script execution (so an infinite loop cannot pin the host), and a hard stop on new `agent()` calls once `budget.total` is exhausted (in-flight agents still complete; their results are preserved).
@@ -93,7 +93,7 @@ The tool result includes a `run_id`. To resume after a pause, kill, or script ed
 
 ## Budget usage
 
-`budget.total` is the run's token budget and `budget.spent()` reflects real subagent token consumption. Use it to keep the run in bounds:
+`budget.total` is the run's token budget and `budget.spent()` reflects the parent turn plus real subagent token consumption. Use it to keep the run in bounds:
 
 - Prefer the cheapest sufficient model (`effort: 'low'`) for bulk, independent fan-out; reserve expensive effort for synthesis and verification stages.
 - Guard long loops and large fan-outs with `budget.remaining()` checks; when it is low, reduce scope and consolidate results instead of spawning more.
