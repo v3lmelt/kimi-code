@@ -30,6 +30,7 @@ export type {
   ApplyOpenAICodexConfigResult,
   OpenAIResponsesHarnessModel,
   OpenAIResponsesModelProviderOptions,
+  OpenAIResponsesPromptCacheOptions,
 } from '#/openai-model-provider';
 export { removeProviderFromConfig } from '#/v2/config-mapper';
 

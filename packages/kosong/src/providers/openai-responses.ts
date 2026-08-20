@@ -377,12 +377,27 @@ export interface OpenAIResponsesOptions {
   nativeToolSearch?: boolean | undefined;
   /** Reuse a Responses WebSocket and send strict input deltas when possible. */
   responsesWebSocket?: boolean | undefined;
+  /**
+   * Add a stable explicit cache breakpoint after the system instructions.
+   * Intended for GPT-5.6 and later models. The API currently supports a
+   * single 30-minute TTL.
+   */
+  promptCache?: OpenAIResponsesPromptCacheOptions;
+  /** Explicit model capability required when promptCache is configured. */
+  supportsPromptCacheBreakpoints?: boolean;
   /** Test seam for the Responses WebSocket transport. */
   responsesWebSocketFactory?: OpenAIResponsesWebSocketFactory | undefined;
   /** ChatGPT Codex wire adjustments layered on top of the Responses API. */
   codex?: {
     readonly responsesLite?: boolean;
   };
+}
+
+export interface OpenAIResponsesPromptCacheOptions {
+  /** Defaults to explicit-only caching to avoid writes for changing user input. */
+  readonly mode?: 'implicit' | 'explicit';
+  /** The Responses API currently supports only a 30-minute exact TTL. */
+  readonly ttl?: '30m';
 }
 
 export type OpenAIResponsesWebSocketMessage =
@@ -1096,6 +1111,35 @@ function shapeOpenAICodexRequest(body: Record<string, unknown>, responsesLite: b
   delete body['tools'];
 }
 
+function configureOpenAIResponsesPromptCache(
+  body: Record<string, unknown>,
+  systemPrompt: string,
+  promptCache: OpenAIResponsesPromptCacheOptions,
+): void {
+  body['prompt_cache_options'] = {
+    mode: promptCache.mode ?? 'explicit',
+    ttl: promptCache.ttl ?? '30m',
+  };
+  if (systemPrompt.length === 0) return;
+
+  const input = Array.isArray(body['input']) ? body['input'] : [];
+  body['input'] = [
+    {
+      type: 'message',
+      role: 'developer',
+      content: [
+        {
+          type: 'input_text',
+          text: systemPrompt,
+          prompt_cache_breakpoint: { mode: 'explicit' },
+        },
+      ],
+    },
+    ...input,
+  ];
+  delete body['instructions'];
+}
+
 function stripOpenAICodexImageDetails(input: unknown[]): void {
   for (const item of input) {
     const itemRecord = asRawObject(item);
@@ -1388,9 +1432,15 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
   private _codex: OpenAIResponsesOptions['codex'];
   private _nativeToolSearch: boolean;
   private _responsesWebSocket: boolean;
+  private _promptCache: OpenAIResponsesPromptCacheOptions | undefined;
   private _responsesWebSocketSession: OpenAIResponsesWebSocketSession;
 
   constructor(options: OpenAIResponsesOptions) {
+    if (options.promptCache !== undefined && options.supportsPromptCacheBreakpoints !== true) {
+      throw new ChatProviderError(
+        `OpenAI Responses model "${options.model}" does not declare support for explicit prompt cache breakpoints.`,
+      );
+    }
     const apiKey = options.apiKey ?? process.env['OPENAI_API_KEY'];
     this._apiKey = apiKey === undefined || apiKey.length === 0 ? undefined : apiKey;
     this._baseUrl = options.baseUrl ?? 'https://api.openai.com/v1';
@@ -1405,6 +1455,8 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
     this._codex = options.codex;
     this._nativeToolSearch = options.nativeToolSearch === true;
     this._responsesWebSocket = options.responsesWebSocket === true;
+    this._promptCache =
+      options.promptCache === undefined ? undefined : { ...options.promptCache };
     this._responsesWebSocketSession = new OpenAIResponsesWebSocketSession(
       options.responsesWebSocketFactory ??
         ((client, headers) =>
@@ -1487,6 +1539,9 @@ export class OpenAIResponsesChatProvider implements ChatProvider {
       }
       if (systemPrompt) {
         createParams['instructions'] = systemPrompt;
+      }
+      if (this._promptCache !== undefined) {
+        configureOpenAIResponsesPromptCache(createParams, systemPrompt, this._promptCache);
       }
       if (options?.responseFormat !== undefined) {
         createParams['text'] = {
