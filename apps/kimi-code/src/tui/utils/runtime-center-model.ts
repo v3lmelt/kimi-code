@@ -368,7 +368,10 @@ function agentProjection(
   const task = tasks.find((candidate) => candidate.agentId === agentId);
   const workflow = workflows.find((run) => run.agents.some((agent) => agent.agentId === agentId));
   const workflowAgent = workflow?.agents.find((agent) => agent.agentId === agentId);
-  const owningTaskId = task?.taskId ?? workflowAgent?.taskId;
+  // A workflow child event can omit the task id even though its owning
+  // workflow run was launched as a background task. Resolve that ownership
+  // through the run before disabling the Output action.
+  const owningTaskId = task?.taskId ?? workflowAgent?.taskId ?? workflow?.taskId;
   const activity = agentActivity(workflow, agentId);
   const status = task?.status ?? activity.status;
   const workspaceMode = stringField(record, 'workspaceMode', 'workspace_mode', 'mode', 'isolation');
@@ -493,14 +496,119 @@ export function mergeWorkflowTaskSnapshots(
   let changed = limitedRuns !== runs;
   for (const task of tasks) {
     const fallback = workflowViewFromTask(task);
-    if (fallback === undefined || byId.has(fallback.runId)) continue;
-    byId.set(fallback.runId, fallback);
-    changed = true;
+    if (fallback === undefined) continue;
+    const existing = byId.get(fallback.runId);
+    if (existing === undefined) {
+      byId.set(fallback.runId, fallback);
+      changed = true;
+      continue;
+    }
+    const merged = mergeWorkflowTaskSnapshot(existing, fallback);
+    if (merged !== existing) {
+      byId.set(fallback.runId, merged);
+      changed = true;
+    }
   }
   if (!changed) return runs;
   return [...byId.values()]
     .toSorted((a, b) => b.startedAt.localeCompare(a.startedAt))
     .slice(0, WORKFLOW_LEDGER_LIMITS.runs);
+}
+
+/**
+ * Merge the durable task snapshot into a live run without replacing the
+ * progress event's richer metadata. Task snapshots own background identity
+ * and lifecycle status; progress events own names, descriptions, phases and
+ * the live child ledger. Terminal live state is retained so a stale running
+ * snapshot cannot reopen a settled run.
+ */
+function mergeWorkflowTaskSnapshot(
+  run: WorkflowRunView,
+  snapshot: WorkflowRunView,
+): WorkflowRunView {
+  const taskId = snapshot.taskId ?? run.taskId;
+  const taskPath = snapshot.taskPath ?? run.taskPath;
+  const nodeId = snapshot.nodeId ?? run.nodeId;
+  const status = isTerminal(run.status) ? run.status : snapshot.status;
+  const name = run.name.length === 0 ? snapshot.name : run.name;
+  const description = run.description.length === 0 ? snapshot.description : run.description;
+  const phases = run.phases.length === 0 ? snapshot.phases : run.phases;
+  const model = run.model ?? snapshot.model;
+  const cache = run.cache ?? snapshot.cache;
+  const replayed = run.replayed ?? snapshot.replayed;
+  const isolationLease = run.isolationLease ?? snapshot.isolationLease;
+  const worktreePath = run.worktreePath ?? snapshot.worktreePath;
+  const startedAt = run.startedAt || snapshot.startedAt;
+  const spawnedAgents = Math.max(run.spawnedAgents, snapshot.spawnedAgents);
+  const completedAgents = Math.max(run.completedAgents, snapshot.completedAgents);
+  const result = run.result ?? snapshot.result;
+  const error = run.error ?? snapshot.error;
+  const durationMs = run.durationMs ?? snapshot.durationMs;
+  const tokensSpent = run.tokensSpent ?? snapshot.tokensSpent;
+  const nodeIds = mergeNodeIds(run.nodeIds, snapshot.nodeIds);
+  if (
+    taskId === run.taskId &&
+    taskPath === run.taskPath &&
+    nodeId === run.nodeId &&
+    status === run.status &&
+    name === run.name &&
+    description === run.description &&
+    phases === run.phases &&
+    model === run.model &&
+    cache === run.cache &&
+    replayed === run.replayed &&
+    isolationLease === run.isolationLease &&
+    worktreePath === run.worktreePath &&
+    startedAt === run.startedAt &&
+    spawnedAgents === run.spawnedAgents &&
+    completedAgents === run.completedAgents &&
+    result === run.result &&
+    error === run.error &&
+    durationMs === run.durationMs &&
+    tokensSpent === run.tokensSpent &&
+    nodeIds === run.nodeIds
+  ) {
+    return run;
+  }
+  return {
+    ...run,
+    taskId,
+    taskPath,
+    nodeId,
+    status,
+    name,
+    description,
+    phases,
+    model,
+    cache,
+    replayed,
+    isolationLease,
+    worktreePath,
+    startedAt,
+    spawnedAgents,
+    completedAgents,
+    result,
+    error,
+    durationMs,
+    tokensSpent,
+    nodeIds,
+  };
+}
+
+function mergeNodeIds(
+  left: readonly string[] | undefined,
+  right: readonly string[] | undefined,
+): readonly string[] | undefined {
+  if (left === undefined && right === undefined) return undefined;
+  const base = left ?? [];
+  let values = base;
+  for (const nodeId of right ?? []) {
+    if (nodeId.length === 0 || values.includes(nodeId)) continue;
+    values = [...values, nodeId];
+  }
+  return values.length > WORKFLOW_LEDGER_LIMITS.nodes
+    ? values.slice(-WORKFLOW_LEDGER_LIMITS.nodes)
+    : values;
 }
 
 export function runtimeCenterActionLabel(actionName: RuntimeCenterAction): string {

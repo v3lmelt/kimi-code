@@ -24,7 +24,10 @@ import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { type HostFileStat, IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { unwrapErrorCause } from '#/_base/errors/errors';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
-import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import {
+  assertWorkspacePathBeforeIO,
+  ISessionWorkspaceContext,
+} from '#/session/workspaceContext/workspaceContext';
 import {
   ToolAccesses,
   type ExecutableToolResult,
@@ -91,6 +94,11 @@ export class WriteTool implements IWriteTool {
   }
 
   private async execution(args: WriteInput, safePath: string): Promise<ExecutableToolResult> {
+    try {
+      safePath = await assertWorkspacePathBeforeIO(this.workspaceCtx, safePath, 'write');
+    } catch (error) {
+      return { isError: true, output: error instanceof Error ? error.message : String(error) };
+    }
     const parentError = await this.ensureParentDirectory(safePath);
     if (parentError !== undefined) {
       return { isError: true, output: parentError };

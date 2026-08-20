@@ -12,7 +12,7 @@ import {
 } from '#/agent/workflow/ir/result';
 import { compileWorkflowGraph, type CompiledWorkflowGraph } from '#/agent/workflow/compile/graphCompiler';
 import { computeWorkflowFingerprint } from '#/agent/workflow/ir/fingerprint';
-import { nodeDependencies } from '#/agent/workflow/ir/graph';
+import { nodeChildren, nodeDependencies } from '#/agent/workflow/ir/graph';
 import type {
   WorkflowAgentNode,
   WorkflowAgentResult,
@@ -174,6 +174,11 @@ export interface WorkflowDagRunResult {
   readonly budgetExceeded: boolean;
 }
 
+interface ConditionSelection {
+  readonly selected: ReadonlySet<WorkflowNodeId>;
+  readonly unselected: ReadonlySet<WorkflowNodeId>;
+}
+
 export class WorkflowDagScheduler {
   private readonly graph: CompiledWorkflowGraph;
   private readonly options: WorkflowDagSchedulerOptions;
@@ -183,6 +188,7 @@ export class WorkflowDagScheduler {
   private readonly states = new Map<WorkflowNodeId, WorkflowDagNodeStateLike>();
   private readonly results = new Map<WorkflowNodeId, WorkflowNodeResult>();
   private readonly conditionValues = new Map<WorkflowNodeId, boolean>();
+  private readonly conditionSelections = new Map<WorkflowNodeId, ConditionSelection>();
   private readonly now: () => string;
   private readonly maxConcurrency: number;
 
@@ -250,13 +256,16 @@ export class WorkflowDagScheduler {
         if (node.kind === 'condition') {
           const condition = await this.evaluateCondition(node);
           this.conditionValues.set(node.id, condition);
+          const selected = this.reachableFrom(condition ? node.whenTrue : node.whenFalse);
+          const unselected = this.branchSubgraphFrom(condition ? node.whenFalse : node.whenTrue);
+          this.conditionSelections.set(node.id, { selected, unselected });
           if (!condition) {
             this.markSkipped(node, 'Condition evaluated to false.');
-            this.skipBranch(node.whenTrue);
+            this.skipBranch(unselected, selected);
             progress = true;
             continue;
           }
-          this.skipBranch(node.whenFalse);
+          this.skipBranch(unselected, selected);
         }
         const estimate = estimateBudget(node);
         if (!this.budget.reserve(node.id, estimate)) {
@@ -489,11 +498,43 @@ export class WorkflowDagScheduler {
     }
   }
 
-  private skipBranch(nodeId: WorkflowNodeId | undefined): void {
-    if (nodeId === undefined) return;
-    const node = this.graph.graph.nodes.find((candidate) => candidate.id === nodeId);
-    if (node === undefined || isTerminalState(this.states.get(node.id)?.status)) return;
-    this.markSkipped(node, 'Condition branch was not selected.');
+  private skipBranch(
+    unselected: ReadonlySet<WorkflowNodeId>,
+    selected: ReadonlySet<WorkflowNodeId>,
+  ): void {
+    for (const node of this.graph.graph.nodes) {
+      if (!unselected.has(node.id) || selected.has(node.id) || isTerminalState(this.states.get(node.id)?.status)) continue;
+      this.markSkipped(node, 'Condition branch was not selected.');
+    }
+  }
+
+  private reachableFrom(start: WorkflowNodeId | undefined): ReadonlySet<WorkflowNodeId> {
+    const reachable = new Set<WorkflowNodeId>();
+    if (start === undefined) return reachable;
+    const pending = [start];
+    while (pending.length > 0) {
+      const nodeId = pending.pop()!;
+      if (reachable.has(nodeId)) continue;
+      reachable.add(nodeId);
+      for (const node of this.graph.graph.nodes) {
+        if (nodeDependencies(node).includes(nodeId)) pending.push(node.id);
+      }
+    }
+    return reachable;
+  }
+
+  private branchSubgraphFrom(start: WorkflowNodeId | undefined): ReadonlySet<WorkflowNodeId> {
+    const reachable = new Set<WorkflowNodeId>();
+    if (start === undefined) return reachable;
+    const pending = [start];
+    while (pending.length > 0) {
+      const nodeId = pending.pop()!;
+      if (reachable.has(nodeId)) continue;
+      reachable.add(nodeId);
+      const node = this.graph.graph.nodes.find((candidate) => candidate.id === nodeId);
+      if (node !== undefined) pending.push(...nodeChildren(node));
+    }
+    return reachable;
   }
 
   private node(nodeId: WorkflowNodeId): WorkflowNode {
@@ -526,11 +567,11 @@ export class WorkflowDagScheduler {
       if (dependency.status !== 'skipped' || node.acceptsSkipped === true) return false;
       const dependencyId = dependencyIds[index];
       if (dependencyId === undefined) return true;
-      const owner = this.graph.graph.nodes.find((candidate) => candidate.id === dependencyId);
-      if (owner?.kind !== 'condition') return true;
-      const condition = this.conditionValues.get(owner.id);
-      return !((condition === true && owner.whenTrue === node.id) ||
-        (condition === false && owner.whenFalse === node.id));
+      for (const [conditionId, selection] of this.conditionSelections) {
+        if (conditionId === dependencyId && selection.selected.has(node.id)) return false;
+        if (selection.unselected.has(dependencyId) && selection.selected.has(node.id)) return false;
+      }
+      return true;
     });
   }
 

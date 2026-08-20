@@ -29,6 +29,10 @@ export interface WorkspaceConfig {
     path: string,
     operation: PathAccessOperation,
   ) => string;
+  readonly assertIsolationAllowedAsync?: (
+    path: string,
+    operation: PathAccessOperation,
+  ) => Promise<string>;
 }
 
 const SENSITIVE_BASENAMES = new Set<string>([

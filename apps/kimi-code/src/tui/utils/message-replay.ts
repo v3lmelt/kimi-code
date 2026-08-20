@@ -107,6 +107,26 @@ export function countActiveBackgroundTasks(tasks: ReadonlyMap<string, Background
   return { bashTasks, agentTasks, workflowTasks };
 }
 
+/** Count active workflow snapshots kept outside the legacy task map. */
+export function countActiveWorkflowBackgroundTasks(
+  tasks: Iterable<{ readonly status: string }>,
+): number {
+  let workflowTasks = 0;
+  for (const info of tasks) {
+    if (
+      info.status !== 'completed' &&
+      info.status !== 'failed' &&
+      info.status !== 'timed_out' &&
+      info.status !== 'killed' &&
+      info.status !== 'lost' &&
+      info.status !== 'aborted'
+    ) {
+      workflowTasks += 1;
+    }
+  }
+  return workflowTasks;
+}
+
 export function replayBackgroundProjection(
   background: readonly BackgroundTaskInfo[],
   availableModels?: AppState['availableModels'],

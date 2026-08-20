@@ -302,6 +302,9 @@ export class ReadMediaFileTool implements AgentTool<ReadMediaFileInput> {
     }
 
     try {
+      if (this.workspace.assertIsolationAllowedAsync !== undefined) {
+        safePath = await this.workspace.assertIsolationAllowedAsync(safePath, 'read');
+      }
       const header = await this.fs.readBytes(safePath, MEDIA_SNIFF_BYTES);
       const fileType = detectFileType(safePath, header, 'media');
 

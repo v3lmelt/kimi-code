@@ -160,7 +160,10 @@ export function applyWorkflowProgressEvent(
 ): WorkflowRunsViewState {
   switch (progress.type) {
     case 'workflow.started': {
-      if (runs.some((run) => run.runId === progress.runId)) return runs;
+      const existing = runs.find((run) => run.runId === progress.runId);
+      if (existing !== undefined) {
+        return mapRun(runs, progress.runId, (run) => mergeStartedRun(run, progress));
+      }
       const view: WorkflowRunView = {
         runId: progress.runId,
         taskId: progress.taskId,
@@ -170,7 +173,7 @@ export function applyWorkflowProgressEvent(
         description: progress.meta.description,
         phases: progress.meta.phases ?? [],
         status: 'running',
-        model: progress.model,
+        model: progress.model ?? progress.meta.model,
         isolationLease: progress.isolationLease,
         worktreePath: progress.worktreePath,
         startedAt: progress.startedAt,
@@ -284,6 +287,69 @@ export function applyWorkflowProgressEvent(
     default:
       return runs;
   }
+}
+
+/**
+ * A task snapshot can create a placeholder run before the live started event
+ * reaches the client. Merge that event into the placeholder instead of
+ * dropping it. The progress event owns the descriptive run metadata; fields
+ * that only the task snapshot knows about remain untouched when absent here.
+ */
+function mergeStartedRun(
+  run: WorkflowRunView,
+  progress: Extract<WorkflowProgressEvent, { type: 'workflow.started' }>,
+): WorkflowRunView {
+  const phases = progress.meta.phases === undefined
+    ? run.phases
+    : samePhases(run.phases, progress.meta.phases)
+      ? run.phases
+      : progress.meta.phases;
+  const taskId = progress.taskId ?? run.taskId;
+  const taskPath = progress.taskPath ?? run.taskPath;
+  const nodeId = progress.nodeId ?? run.nodeId;
+  const model = progress.model ?? progress.meta.model ?? run.model;
+  const isolationLease = progress.isolationLease ?? run.isolationLease;
+  const worktreePath = progress.worktreePath ?? run.worktreePath;
+  const nodeIds = appendNodeId(run.nodeIds, progress.nodeId);
+  if (
+    taskId === run.taskId &&
+    taskPath === run.taskPath &&
+    nodeId === run.nodeId &&
+    run.name === progress.meta.name &&
+    run.description === progress.meta.description &&
+    phases === run.phases &&
+    model === run.model &&
+    isolationLease === run.isolationLease &&
+    worktreePath === run.worktreePath &&
+    run.startedAt === progress.startedAt &&
+    nodeIds === run.nodeIds
+  ) {
+    return run;
+  }
+  return {
+    ...run,
+    taskId,
+    taskPath,
+    nodeId,
+    name: progress.meta.name,
+    description: progress.meta.description,
+    phases,
+    model,
+    isolationLease,
+    worktreePath,
+    startedAt: progress.startedAt,
+    nodeIds,
+  };
+}
+
+function samePhases(
+  left: readonly WorkflowRunViewPhase[],
+  right: readonly WorkflowPhaseMeta[],
+): boolean {
+  return left.length === right.length && left.every((phase, index) => {
+    const next = right[index];
+    return next !== undefined && phase.title === next.title && phase.detail === next.detail;
+  });
 }
 
 function appendAgent(

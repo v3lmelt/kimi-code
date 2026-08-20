@@ -25,6 +25,7 @@
  */
 
 import type { ILogService } from '#/_base/log/log';
+import type { IDisposable } from '#/_base/di/lifecycle';
 import type { IWireService } from '#/wire/wire';
 import type {
   AgentTask,
@@ -77,6 +78,7 @@ import {
 /** A cached completed subagent from a prior run, keyed by cache key. */
 export interface WorkflowResumeLedger {
   readonly sourceRunId: WorkflowRunId;
+  readonly lease?: IDisposable;
   /**
    * Successful prior completions keyed by `workflowAgentCacheKey(prompt,
    * opts)`. A replayed `agent()` call whose key hits the map returns the
@@ -118,6 +120,7 @@ export interface WorkflowTaskOptions {
   readonly spawnDeps: WorkflowSpawnHostDeps;
   readonly parentToolCallId: string;
   readonly resume?: WorkflowResumeLedger;
+  readonly resumeLease?: IDisposable;
   readonly graph?: WorkflowGraph | CompiledWorkflowGraph;
   readonly dagResume?: WorkflowDagJournalSummary;
   readonly fingerprintContext?: WorkflowFingerprintContext;
@@ -160,6 +163,7 @@ export class WorkflowTask implements AgentTask {
   private readonly spawnDeps: WorkflowSpawnHostDeps;
   private readonly parentToolCallId: string;
   private readonly resume: WorkflowResumeLedger | undefined;
+  private readonly resumeLease: IDisposable | undefined;
   private readonly graph: WorkflowGraph | CompiledWorkflowGraph | undefined;
   private readonly dagResume: WorkflowDagJournalSummary | undefined;
   private readonly fingerprintContext: WorkflowFingerprintContext | undefined;
@@ -184,6 +188,7 @@ export class WorkflowTask implements AgentTask {
     this.spawnDeps = options.spawnDeps;
     this.parentToolCallId = options.parentToolCallId;
     this.resume = options.resume;
+    this.resumeLease = options.resumeLease ?? options.resume?.lease;
     this.graph = options.graph;
     this.dagResume = options.dagResume;
     this.fingerprintContext = options.fingerprintContext;
@@ -203,12 +208,16 @@ export class WorkflowTask implements AgentTask {
       sink.signal.addEventListener('abort', requestAbort, { once: true });
     }
     const runStartedMs = Date.now();
+    let runLease: IDisposable | undefined;
+    let journalLease: IDisposable | undefined;
 
     try {
+      runLease = typeof this.journal.acquireRunLease === 'function' ? this.journal.acquireRunLease() : undefined;
       if (this.graph !== undefined) {
         await this.startGraph(sink, controller, runStartedMs);
         return;
       }
+      journalLease = typeof this.journal.acquire === 'function' ? this.journal.acquire() : undefined;
       const startedAt = isoNow();
       this.journal.writeWorkflowStarted({
         script: this.script,
@@ -299,6 +308,9 @@ export class WorkflowTask implements AgentTask {
       }
     } finally {
       sink.signal.removeEventListener('abort', requestAbort);
+      journalLease?.dispose();
+      runLease?.dispose();
+      this.resumeLease?.dispose();
     }
   }
 

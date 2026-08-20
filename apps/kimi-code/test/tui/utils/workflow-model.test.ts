@@ -216,6 +216,46 @@ describe('applyWorkflowProgressEvent', () => {
 });
 
 describe('runtime center projection', () => {
+  it('merges task snapshots and started events in either arrival order', () => {
+    const task = {
+      taskId: 'task-order', kind: 'workflow', runId: RUN_ID, workflowName: 'snapshot-name',
+      description: 'snapshot description', status: 'completed', startedAt: Date.now() - 1000,
+      endedAt: Date.now(), meta: {
+        name: 'snapshot-meta', description: 'snapshot meta', phases: [{ title: 'Snapshot' }],
+      },
+    } as never;
+    const started: Extract<WorkflowProgressEvent, { type: 'workflow.started' }> = {
+      ...startedEvent(),
+      meta: {
+        name: 'live-name', description: 'live description', phases: [{ title: 'Live' }],
+      },
+    };
+
+    const startedAfterSnapshot = applyWorkflowProgressEvent(
+      mergeWorkflowTaskSnapshots([], [task]),
+      started,
+    )[0];
+    expect(startedAfterSnapshot).toMatchObject({
+      taskId: 'task-order',
+      name: 'live-name',
+      description: 'live description',
+      phases: [{ title: 'Live' }],
+      status: 'completed',
+    });
+
+    const snapshotAfterStarted = mergeWorkflowTaskSnapshots(
+      applyWorkflowProgressEvent([], started),
+      [task],
+    )[0];
+    expect(snapshotAfterStarted).toMatchObject({
+      taskId: 'task-order',
+      name: 'live-name',
+      description: 'live description',
+      phases: [{ title: 'Live' }],
+      status: 'completed',
+    });
+  });
+
   it('uses the same task snapshot fallback for replay and live task updates', () => {
     const task = {
       taskId: 'task-wf', kind: 'workflow', runId: RUN_ID, workflowName: 'demo-run',
@@ -260,6 +300,24 @@ describe('runtime center projection', () => {
     const projection = projectRuntimeCenter({ tasks: [], workflows: withAgent });
     expect(projection.agents.find((agent) => agent.agentId === 'agent-owned')).toMatchObject({
       taskId: 'task-owned',
+      actions: { output: { enabled: true } },
+    });
+
+    const workflowOwnedRun = applyWorkflowProgressEvent(EMPTY_WORKFLOW_RUNS, {
+      ...startedEvent(),
+      taskId: 'task-workflow-owner',
+    });
+    const workflowOwnedWithAgent = applyWorkflowProgressEvent(workflowOwnedRun, {
+      type: 'workflow.agent_spawned',
+      runId: RUN_ID,
+      agentId: 'agent-run-owned',
+    });
+    const workflowOwnedProjection = projectRuntimeCenter({
+      tasks: [],
+      workflows: workflowOwnedWithAgent,
+    });
+    expect(workflowOwnedProjection.agents.find((agent) => agent.agentId === 'agent-run-owned')).toMatchObject({
+      taskId: 'task-workflow-owner',
       actions: { output: { enabled: true } },
     });
 

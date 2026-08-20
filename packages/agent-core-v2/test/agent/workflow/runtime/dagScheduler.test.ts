@@ -127,6 +127,66 @@ describe('WorkflowDagScheduler', () => {
     expect(calls).toEqual(['selected']);
   });
 
+  it('recursively skips an unselected branch but executes a shared diamond node', async () => {
+    const graph = compile({
+      version: '1',
+      root: 'shared',
+      nodes: [
+        { id: 'condition', kind: 'condition', condition: { value: false }, whenTrue: 'left', whenFalse: 'right' },
+        { id: 'left', kind: 'agent', prompt: 'left' },
+        { id: 'left-downstream', kind: 'agent', prompt: 'left-downstream', dependsOn: ['left'] },
+        { id: 'right', kind: 'agent', prompt: 'right' },
+        { id: 'shared', kind: 'agent', prompt: 'shared', dependsOn: ['left', 'right'] },
+      ],
+    });
+    const calls: string[] = [];
+    const result = await new WorkflowDagScheduler({
+      graph,
+      executeAgent: async (node) => {
+        calls.push(node.id);
+        return { ok: true, agentId: node.id, output: node.id, durationMs: 1 };
+      },
+      budget: { total: 100 },
+    }).run();
+
+    expect(result.nodes.get('left')?.status).toBe('skipped');
+    expect(result.nodes.get('left-downstream')?.status).toBe('blocked');
+    expect(result.nodes.get('right')?.status).toBe('completed');
+    expect(result.nodes.get('shared')?.status).toBe('completed');
+    expect(calls).toEqual(['right', 'shared']);
+  });
+
+  it('follows sequence and join children while skipping only the unselected side', async () => {
+    const graph = compile({
+      version: '1',
+      root: 'merge',
+      nodes: [
+        { id: 'condition', kind: 'condition', condition: { value: true }, whenTrue: 'selected-sequence', whenFalse: 'skipped-join' },
+        { id: 'skipped-leaf', kind: 'agent', prompt: 'skipped-leaf' },
+        { id: 'skipped-join', kind: 'join', children: ['skipped-leaf'], strategy: 'all' },
+        { id: 'selected-leaf', kind: 'agent', prompt: 'selected-leaf' },
+        { id: 'selected-sequence', kind: 'sequence', children: ['selected-leaf'] },
+        { id: 'merge', kind: 'sequence', children: ['skipped-join', 'selected-sequence'] },
+      ],
+    });
+    const calls: string[] = [];
+    const result = await new WorkflowDagScheduler({
+      graph,
+      executeAgent: async (node) => {
+        calls.push(node.id);
+        return { ok: true, agentId: node.id, output: node.id, durationMs: 1 };
+      },
+      budget: { total: 100 },
+    }).run();
+
+    expect(result.nodes.get('skipped-leaf')?.status).toBe('skipped');
+    expect(result.nodes.get('skipped-join')?.status).toBe('skipped');
+    expect(result.nodes.get('selected-leaf')?.status).toBe('completed');
+    expect(result.nodes.get('selected-sequence')?.status).toBe('completed');
+    expect(result.nodes.get('merge')?.status).toBe('completed');
+    expect(calls).toEqual(['selected-leaf']);
+  });
+
   it('resumes only a completed node with a matching cacheable fingerprint', async () => {
     const graph = compile({ version: '1', root: 'a', nodes: [{ id: 'a', kind: 'agent', prompt: 'a' }] });
     const node = graph.graph.nodes[0]!;

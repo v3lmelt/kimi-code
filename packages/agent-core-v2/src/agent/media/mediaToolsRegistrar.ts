@@ -123,6 +123,14 @@ export class AgentMediaToolsRegistrar extends Service implements IAgentMediaTool
             ? path
             : workspaceCtx.assertAllowed(path, operation === 'search' ? 'read' : operation);
         },
+        assertIsolationAllowedAsync(path, operation) {
+          return workspaceCtx.isolation === undefined
+            ? Promise.resolve(path)
+            : workspaceCtx.assertAllowedRealPath?.(
+                  path,
+                  operation === 'search' ? 'read' : operation,
+                ) ?? Promise.resolve(workspaceCtx.assertAllowed(path, operation === 'search' ? 'read' : operation));
+        },
       },
       capabilities,
       videoUploader: createVideoUploader(requester, {

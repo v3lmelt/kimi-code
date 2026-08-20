@@ -28,6 +28,7 @@ import {
 import { ToolCallComponent } from '#/tui/components/messages/tool-call';
 import { ReadGroupComponent } from '#/tui/components/messages/read-group';
 import { replayBackgroundProjection } from '#/tui/utils/message-replay';
+import { WORKFLOW_LEDGER_LIMITS } from '#/tui/utils/workflow-model';
 import type { TaskNotificationOrigin } from '#/tui/utils/message-replay';
 import type { AgentRecord } from '../../../../packages/agent-core/src/agent/records';
 import { reduceWireRecords } from '../../../../packages/agent-core/src/services/message/transcript';
@@ -1113,6 +1114,24 @@ describe('KimiTUI resume message replay', () => {
     expect(driver.sessionEventHandler.backgroundTasks.has('agent-bg1')).toBe(true);
     expect(driver.sessionEventHandler.backgroundTasks.has('bash-bg1')).toBe(true);
     expect(driver.sessionEventHandler.backgroundTaskTranscriptedTerminal.has('bash-bg1')).toBe(true);
+  });
+
+  it('hydrates workflow snapshots into the footer badge without exceeding the ledger cap', async () => {
+    const workflowTasks = Array.from({ length: WORKFLOW_LEDGER_LIMITS.runs + 1 }, (_, index) => ({
+      taskId: `workflow-task-${String(index)}`,
+      kind: 'workflow',
+      runId: `workflow-run-${String(index)}`,
+      workflowName: `workflow-${String(index)}`,
+      description: 'Replay workflow',
+      status: 'running',
+      startedAt: index + 1,
+      endedAt: null,
+    } as unknown as BackgroundTaskInfo));
+    const driver = await replayIntoDriver([], { background: workflowTasks });
+    const footer = stripAnsi(driver.state.footer.render(160).join('\n'));
+
+    expect(driver.sessionEventHandler.workflowBackgroundTasks.size).toBe(WORKFLOW_LEDGER_LIMITS.runs);
+    expect(footer).toContain(`[${String(WORKFLOW_LEDGER_LIMITS.runs)} workflows running]`);
   });
 
   it('matches completed resumed background agents by agent id when task id differs', async () => {

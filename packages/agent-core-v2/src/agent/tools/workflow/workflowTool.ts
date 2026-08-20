@@ -31,6 +31,7 @@
  */
 
 import { ILogService } from '#/_base/log/log';
+import type { IDisposable } from '#/_base/di/lifecycle';
 import { Error2, ErrorCodes } from '#/errors';
 import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
@@ -222,6 +223,7 @@ export class WorkflowTool implements IWorkflowTool {
     ctx: ExecutableToolContext,
     scriptPath: string | undefined,
   ): Promise<ExecutableToolResult> {
+    let resumeLease: IDisposable | undefined;
     try {
       ctx.signal.throwIfAborted();
 
@@ -239,6 +241,7 @@ export class WorkflowTool implements IWorkflowTool {
       await this.persistScript(runId, source);
 
       const resume = await this.loadResume(args.resumeFromRunId, source, scriptSha256);
+      resumeLease = resume?.lease;
 
       const task = new WorkflowTask({
         runId,
@@ -266,9 +269,11 @@ export class WorkflowTool implements IWorkflowTool {
         detached: true,
       };
       const taskId = this.tasks.registerTask(task, registerOptions);
+      resumeLease = undefined;
 
       return { output: formatWorkflowLaunch(taskId, runId, compiled.meta) };
     } catch (error) {
+      resumeLease?.dispose();
       return { output: `workflow error: ${errorMessage(error)}`, isError: true };
     }
   }
@@ -355,8 +360,14 @@ export class WorkflowTool implements IWorkflowTool {
       log: this.logStore,
     });
     const summary = await dagJournal.readDagSummary({ recoverRunning: true, lostAt: new Date().toISOString() });
-    if (summary.nodes.size === 0 && summary.graphVersion === undefined) {
+    if (!summary.started && summary.nodes.size === 0 && summary.graphVersion === undefined) {
       throw new Error2(ErrorCodes.VALIDATION_FAILED, `No workflow run "${priorRunId}" was found to resume.`);
+    }
+    if (summary.terminal === undefined) {
+      throw new Error2(
+        ErrorCodes.VALIDATION_FAILED,
+        `Workflow run "${priorRunId}" is still running and cannot be resumed.`,
+      );
     }
     return summary;
   }

@@ -155,56 +155,79 @@ export async function spawnWorkflowAgent(
       callerData.modelAlias,
     );
   }
-  child.accessor
-    .get(IAgentPermissionModeService)
-    .setMode(caller.accessor.get(IAgentPermissionModeService).mode);
-  child.accessor
-    .get(IAgentUserToolService)
-    .inheritUserTools(caller.accessor.get(IAgentUserToolService));
-
-  const description = opts?.label ?? summarizePrompt(prompt);
-  emitAgentRunSpawned(caller, child.id, {
-    profileName,
-    parentToolCallId,
-    description,
-    runInBackground: false,
-    model: subagentDisplayModel(deps.config, binding.model),
-  });
-  // The child now exists and its spawn mirror has landed on the caller's
-  // record stream — report the spawn before the turn starts so progress
-  // ledgers see the agent as running for the whole turn.
-  hooks?.onSpawned?.(child.id);
-
-  const promptText = await applyProfilePromptPrefix(profile, prompt, {
-    cwd: deps.sessionContext.cwd,
-    runner: deps.processRunner,
-    log: deps.log,
-  });
-
-  const run = await deps.subagents.run(
-    child.id,
-    { kind: 'prompt', prompt: promptText },
-    {
-      signal,
-      requiresStructuredOutput: opts?.schema !== undefined,
-      structuredSchema: opts?.schema,
-    },
-  );
-  const mirrored = mirrorAgentRun(caller, run, {
-    profileName,
-    prompt: promptText,
-    signal,
-  });
-
-  const completion = await mirrored;
-  return {
-    ok: true,
-    agentId: child.id,
-    output: completion.output === undefined ? completion.summary : completion.output,
-    durationMs: 0,
-    model: subagentDisplayModel(deps.config, binding.model),
-    ...(completion.usage === undefined ? {} : { usage: completion.usage }),
+  let cleanupStarted = false;
+  const cleanupChild = async (): Promise<void> => {
+    if (cleanupStarted) return;
+    cleanupStarted = true;
+    try {
+      await deps.lifecycle.remove(child.id);
+    } catch (cleanupError) {
+      try {
+        deps.log.warn('workflow subagent cleanup failed', {
+          agentId: child.id,
+          error: cleanupError,
+        });
+      } catch {
+        // Preserve the original spawn error even when cleanup diagnostics fail.
+      }
+    }
   };
+
+  try {
+    child.accessor
+      .get(IAgentPermissionModeService)
+      .setMode(caller.accessor.get(IAgentPermissionModeService).mode);
+    child.accessor
+      .get(IAgentUserToolService)
+      .inheritUserTools(caller.accessor.get(IAgentUserToolService));
+
+    const description = opts?.label ?? summarizePrompt(prompt);
+    emitAgentRunSpawned(caller, child.id, {
+      profileName,
+      parentToolCallId,
+      description,
+      runInBackground: false,
+      model: subagentDisplayModel(deps.config, binding.model),
+    });
+    // The child now exists and its spawn mirror has landed on the caller's
+    // record stream — report the spawn before the turn starts so progress
+    // ledgers see the agent as running for the whole turn.
+    hooks?.onSpawned?.(child.id);
+
+    const promptText = await applyProfilePromptPrefix(profile, prompt, {
+      cwd: deps.sessionContext.cwd,
+      runner: deps.processRunner,
+      log: deps.log,
+    });
+
+    const run = await deps.subagents.run(
+      child.id,
+      { kind: 'prompt', prompt: promptText },
+      {
+        signal,
+        requiresStructuredOutput: opts?.schema !== undefined,
+        structuredSchema: opts?.schema,
+      },
+    );
+    const mirrored = mirrorAgentRun(caller, run, {
+      profileName,
+      prompt: promptText,
+      signal,
+    });
+
+    const completion = await mirrored;
+    return {
+      ok: true,
+      agentId: child.id,
+      output: completion.output === undefined ? completion.summary : completion.output,
+      durationMs: 0,
+      model: subagentDisplayModel(deps.config, binding.model),
+      ...(completion.usage === undefined ? {} : { usage: completion.usage }),
+    };
+  } catch (error) {
+    await cleanupChild();
+    throw error;
+  }
 }
 
 /** Resolve the subagent type for a spawn: `opts.agentType` or the caller's own. */

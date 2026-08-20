@@ -30,7 +30,10 @@ import { IFileEditService } from '#/app/edit/fileEdit';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
-import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import {
+  assertWorkspacePathBeforeIO,
+  ISessionWorkspaceContext,
+} from '#/session/workspaceContext/workspaceContext';
 import { IAgentReadStateService } from '#/agent/readState/readState';
 import '#/agent/readState/readStateService';
 import {
@@ -101,6 +104,11 @@ export class EditTool implements IEditTool {
   }
 
   private async execution(args: EditInput, safePath: string): Promise<ExecutableToolResult> {
+    try {
+      safePath = await assertWorkspacePathBeforeIO(this.workspaceCtx, safePath, 'write');
+    } catch (error) {
+      return { isError: true, output: error instanceof Error ? error.message : String(error) };
+    }
     if (args.old_string === args.new_string) {
       return {
         isError: true,

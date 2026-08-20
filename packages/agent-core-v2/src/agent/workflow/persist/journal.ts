@@ -39,6 +39,11 @@ import type {
 } from '#/agent/workflow/types';
 import type { WorkflowNodeJournalRecord, WorkflowNodeJournalRecordError } from './dagJournal';
 import {
+  acquireWorkflowRunLease,
+  workflowRunLeaseState,
+  type WorkflowRunLease,
+  type WorkflowRunLeaseState,
+  type WorkflowRunTerminal,
   assertWorkflowNodeJournalRecord,
   foldWorkflowJournal,
   WorkflowJournalCorruptionError,
@@ -149,6 +154,19 @@ export type WorkflowJournalRecord =
       readonly result?: unknown;
       readonly error?: string;
       readonly completedAt: string;
+    }
+  | {
+      readonly kind: 'workflow.failed';
+      readonly runId: WorkflowRunId;
+      readonly error?: string;
+      readonly result?: unknown;
+      readonly failedAt: string;
+    }
+  | {
+      readonly kind: 'workflow.cancelled';
+      readonly runId: WorkflowRunId;
+      readonly reason?: string;
+      readonly cancelledAt: string;
     }
   | WorkflowNodeJournalRecord;
 
@@ -291,6 +309,8 @@ export interface WorkflowJournalSummary {
   readonly phases?: readonly WorkflowPhaseMeta[];
   readonly args?: unknown;
   readonly status: WorkflowRunStatus;
+  readonly terminal: WorkflowRunTerminal | undefined;
+  readonly lease: WorkflowRunLeaseState;
   readonly startedAt: string;
   readonly completedAt?: string;
   readonly ok?: boolean;
@@ -366,6 +386,11 @@ export class WorkflowJournal {
     return this.options.log.acquire(this.options.scope, WORKFLOW_JOURNAL_KEY);
   }
 
+  /** Reserve this run while it is being executed or used as a resume source. */
+  acquireRunLease(): WorkflowRunLease {
+    return acquireWorkflowRunLease(this.options.scope, this.options.runId);
+  }
+
   /** Record the run start, pinning the script by `scriptSha256`. */
   writeWorkflowStarted(started: WorkflowJournalStarted): void {
     this.write({
@@ -435,6 +460,7 @@ export class WorkflowJournal {
   async readJournal(): Promise<WorkflowJournalSummary | undefined> {
     let started: Extract<WorkflowJournalRecord, { readonly kind: 'workflow.started' }> | undefined;
     let completed: Extract<WorkflowJournalRecord, { readonly kind: 'workflow.completed' }> | undefined;
+    let terminal: WorkflowRunTerminal | undefined;
     const phaseTransitions: string[] = [];
     const agents = new Map<string, WorkflowJournalAgent>();
     const dagRecords: WorkflowNodeJournalRecord[] = [];
@@ -493,6 +519,13 @@ export class WorkflowJournal {
         }
         case 'workflow.completed':
           completed ??= record;
+          terminal ??= record.ok ? 'completed' : 'failed';
+          break;
+        case 'workflow.failed':
+          terminal ??= 'failed';
+          break;
+        case 'workflow.cancelled':
+          terminal ??= 'cancelled';
           break;
         case 'node.planned':
         case 'node.ready':
@@ -521,7 +554,9 @@ export class WorkflowJournal {
       description: started.description,
       ...(started.phases === undefined ? {} : { phases: started.phases }),
       ...(started.args === undefined ? {} : { args: started.args }),
-      status: completed === undefined ? 'running' : completed.ok ? 'completed' : 'failed',
+      status: terminal === undefined ? 'running' : terminal === 'completed' ? 'completed' : 'failed',
+      terminal,
+      lease: workflowRunLeaseState(this.options.scope, this.options.runId),
       startedAt: started.startedAt,
       ...(completed === undefined ? {} : { completedAt: completed.completedAt }),
       ...(completed === undefined
@@ -563,6 +598,8 @@ const WORKFLOW_JOURNAL_KINDS = new Set([
   'agent.spawned',
   'agent.completed',
   'workflow.completed',
+  'workflow.failed',
+  'workflow.cancelled',
   'node.planned',
   'node.ready',
   'node.running',

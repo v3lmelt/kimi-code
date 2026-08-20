@@ -65,6 +65,49 @@ const VALID_SCRIPT = [
   '}',
 ].join('\n');
 
+const RESUME_DAG_RUN_ID = 'wf_1111111111111111' as const;
+
+const RESUME_DAG_GRAPH = {
+  version: '1',
+  name: 'resume-graph',
+  root: 'condition',
+  nodes: [{ id: 'condition', kind: 'condition', condition: { value: true } }],
+};
+
+function resumeDagRecords(terminal: boolean, includeCheckpoint = true): readonly unknown[] {
+  return [
+    {
+      kind: 'workflow.started',
+      runId: RESUME_DAG_RUN_ID,
+      script: JSON.stringify(RESUME_DAG_GRAPH),
+      scriptSha256: 'sha256',
+      name: 'resume-graph',
+      description: 'resume graph',
+      startedAt: '2026-08-20T00:00:00.000Z',
+    },
+    ...(includeCheckpoint
+      ? [{
+          kind: 'checkpoint',
+          runId: RESUME_DAG_RUN_ID,
+          checkpointId: 'checkpoint-1',
+          graphVersion: '1',
+          nodes: [],
+          spent: 0,
+          reserved: 0,
+          at: '2026-08-20T00:00:01.000Z',
+        }]
+      : []),
+    ...(terminal
+      ? [{
+          kind: 'workflow.completed',
+          runId: RESUME_DAG_RUN_ID,
+          ok: true,
+          completedAt: '2026-08-20T00:00:02.000Z',
+        }]
+      : []),
+  ];
+}
+
 const INVALID_SCRIPT = [
   "export const meta = { name: 'bad', description: 'x' };",
   'export async function main() {',
@@ -108,6 +151,7 @@ describe('WorkflowTool', () => {
   let bytes: InMemoryStorageService;
   let readText: ReturnType<typeof vi.fn>;
   let dagEnabled: boolean;
+  let journalRecords: readonly unknown[];
 
   beforeEach(() => {
     disposables = new DisposableStore();
@@ -116,9 +160,15 @@ describe('WorkflowTool', () => {
     registeredTasks = [];
     readText = vi.fn(async () => VALID_SCRIPT);
     dagEnabled = false;
+    journalRecords = [];
 
     ix.stub(IFileSystemStorageService, bytes);
-    ix.set(IAppendLogStore, noopAppendLog);
+    ix.set(IAppendLogStore, {
+      ...noopAppendLog,
+      read: async function* <T>() {
+        for (const record of journalRecords) yield record as T;
+      },
+    });
     ix.stub(IHostFileSystem, { readText } as unknown as IHostFileSystem);
     ix.stub(IHostEnvironment, { pathClass: 'win32' } as unknown as IHostEnvironment);
     ix.stub(ISessionContext, SESSION);
@@ -227,6 +277,36 @@ describe('WorkflowTool', () => {
     const persistedGraph = JSON.parse(new TextDecoder().decode(persisted)) as { nodes: Array<{ provenance?: { cacheable?: boolean; unknownInputs?: string[] } }> };
     expect(persistedGraph.nodes[0]?.provenance?.cacheable).toBe(false);
     expect(persistedGraph.nodes[0]?.provenance?.unknownInputs).toContain('resolvedModel');
+  });
+
+  it('rejects an active DAG resume before registering a task', async () => {
+    dagEnabled = true;
+    journalRecords = resumeDagRecords(false, false);
+    const tool = ix.createInstance(WorkflowTool);
+
+    const result = await runTool(tool, {
+      graph: RESUME_DAG_GRAPH,
+      resumeFromRunId: RESUME_DAG_RUN_ID,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(String(result.output)).toContain('still running');
+    expect(registeredTasks).toHaveLength(0);
+  });
+
+  it('accepts a terminal DAG resume through the public WorkflowTool entry', async () => {
+    dagEnabled = true;
+    journalRecords = resumeDagRecords(true);
+    const tool = ix.createInstance(WorkflowTool);
+
+    const result = await runTool(tool, {
+      graph: RESUME_DAG_GRAPH,
+      resumeFromRunId: RESUME_DAG_RUN_ID,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(registeredTasks).toHaveLength(1);
+    expect(String(result.output)).toContain('status: running');
   });
 
   it('rejects a scriptPath that escapes the session directory', () => {

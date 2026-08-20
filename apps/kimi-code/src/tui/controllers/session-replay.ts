@@ -31,6 +31,7 @@ import {
   collectReplayMessageContent,
   contentPartsToText,
   countActiveBackgroundTasks,
+  countActiveWorkflowBackgroundTasks,
   createReplayRenderContext,
   formatHookResultMessageForTranscript,
   isTerminalBackgroundTask,
@@ -192,7 +193,11 @@ export class SessionReplayRenderer {
         sessionEventHandler.backgroundTaskTranscriptedTerminal.add(info.taskId);
       }
     }
-    state.footer.setBackgroundCounts(countActiveBackgroundTasks(sessionEventHandler.backgroundTasks));
+    const legacyCounts = countActiveBackgroundTasks(sessionEventHandler.backgroundTasks);
+    state.footer.setBackgroundCounts({
+      ...legacyCounts,
+      workflowTasks: countActiveWorkflowBackgroundTasks(sessionEventHandler.workflowBackgroundTasks.values()),
+    });
     const workflowRuns = mergeWorkflowTaskSnapshots(state.appState.workflowRuns, agent.background);
     if (workflowRuns !== state.appState.workflowRuns) this.host.setAppState({ workflowRuns });
     state.ui.requestRender();

@@ -15,6 +15,55 @@ import type {
   WorkflowRunId,
 } from '#/agent/workflow/types';
 
+export type WorkflowRunTerminal = 'completed' | 'failed' | 'cancelled';
+
+export interface WorkflowRunLeaseState {
+  readonly state: 'held' | 'available';
+  readonly held: boolean;
+  readonly owner?: string;
+}
+
+export class WorkflowRunAlreadyLeasedError extends Error {
+  readonly code = 'workflow.run_locked' as const;
+
+  constructor(readonly scope: string, readonly runId: WorkflowRunId) {
+    super(`Workflow run "${runId}" is already leased for execution.`);
+    this.name = 'WorkflowRunAlreadyLeasedError';
+  }
+}
+
+const workflowRunLeases = new Map<string, string>();
+let nextWorkflowLeaseId = 0;
+
+export interface WorkflowRunLease extends IDisposable {
+  readonly leaseId: string;
+  readonly state: 'held' | 'released';
+}
+
+export function acquireWorkflowRunLease(scope: string, runId: WorkflowRunId): WorkflowRunLease {
+  const key = `${scope}\n${runId}`;
+  if (workflowRunLeases.has(key)) throw new WorkflowRunAlreadyLeasedError(scope, runId);
+  const leaseId = `workflow-lease-${String(++nextWorkflowLeaseId)}`;
+  workflowRunLeases.set(key, leaseId);
+  let state: WorkflowRunLease['state'] = 'held';
+  return {
+    leaseId,
+    get state() { return state; },
+    dispose: () => {
+      if (state === 'released') return;
+      state = 'released';
+      if (workflowRunLeases.get(key) === leaseId) workflowRunLeases.delete(key);
+    },
+  };
+}
+
+export function workflowRunLeaseState(scope: string, runId: WorkflowRunId): WorkflowRunLeaseState {
+  const owner = workflowRunLeases.get(`${scope}\n${runId}`);
+  return owner === undefined
+    ? { state: 'available', held: false }
+    : { state: 'held', held: true, owner };
+}
+
 export type WorkflowNodeJournalRecord =
   | {
       readonly kind: 'node.planned';
@@ -117,6 +166,9 @@ export interface WorkflowDagNodeState extends WorkflowNodeCheckpoint {
 
 export interface WorkflowDagJournalSummary {
   readonly runId: WorkflowRunId | undefined;
+  readonly started: boolean;
+  readonly terminal: WorkflowRunTerminal | undefined;
+  readonly lease: WorkflowRunLeaseState;
   readonly graphVersion: string | undefined;
   readonly nodes: ReadonlyMap<WorkflowNodeId, WorkflowDagNodeState>;
   readonly checkpoints: readonly WorkflowNodeCheckpoint[];
@@ -127,6 +179,9 @@ export interface WorkflowDagJournalSummary {
 export interface FoldWorkflowJournalOptions {
   readonly recoverRunning?: boolean;
   readonly lostAt?: string;
+  readonly started?: boolean;
+  readonly terminal?: WorkflowRunTerminal;
+  readonly lease?: WorkflowRunLeaseState;
 }
 
 export function foldWorkflowJournal(
@@ -224,7 +279,17 @@ export function foldWorkflowJournal(
         break;
     }
   }
-  return { runId, graphVersion, nodes, checkpoints, spent, reserved };
+  return {
+    runId,
+    started: options.started ?? false,
+    terminal: options.terminal,
+    lease: options.lease ?? { state: 'available', held: false },
+    graphVersion,
+    nodes,
+    checkpoints,
+    spent,
+    reserved,
+  };
 }
 
 export interface WorkflowDagJournalOptions {
@@ -240,6 +305,10 @@ export class WorkflowDagJournal {
   get runId(): WorkflowRunId { return this.options.runId; }
 
   acquire(key = 'journal.jsonl'): IDisposable { return this.options.log.acquire(this.options.scope, key); }
+
+  acquireRunLease(): WorkflowRunLease {
+    return acquireWorkflowRunLease(this.options.scope, this.runId);
+  }
 
   writeNodePlanned(nodeId: WorkflowNodeId, fingerprint: string, provenance: WorkflowNodeProvenance, at: string): void {
     this.write({ kind: 'node.planned', runId: this.runId, nodeId, fingerprint, provenance, at });
@@ -275,14 +344,24 @@ export class WorkflowDagJournal {
 
   async readDagSummary(options?: FoldWorkflowJournalOptions): Promise<WorkflowDagJournalSummary> {
     const records: WorkflowNodeJournalRecord[] = [];
+    let started = false;
+    let terminal: WorkflowRunTerminal | undefined;
     for await (const record of this.options.log.read<unknown>(this.options.scope, 'journal.jsonl')) {
       if (isDagRecord(record)) {
         records.push(record);
       } else if (isNodeJournalEvent(record)) {
         throw new WorkflowJournalCorruptionError(`Unknown workflow DAG journal event "${String((record as { kind?: unknown }).kind)}".`);
+      } else if (isWorkflowRunLifecycleEvent(record)) {
+        if (record.kind === 'workflow.started') started = true;
+        else if (terminal === undefined) terminal = terminalForLifecycleEvent(record);
       }
     }
-    return foldWorkflowJournal(records, options);
+    return foldWorkflowJournal(records, {
+      ...options,
+      started,
+      ...(terminal === undefined ? {} : { terminal }),
+      lease: workflowRunLeaseState(this.options.scope, this.runId),
+    });
   }
 
   private write(record: WorkflowNodeJournalRecord): void {
@@ -367,6 +446,29 @@ function isWorkflowNodeJournalRecord(value: unknown): value is WorkflowNodeJourn
 function isNodeJournalEvent(value: unknown): boolean {
   return isRecord(value) && typeof value['kind'] === 'string' &&
     (value['kind'] === 'checkpoint' || value['kind'].startsWith('node.'));
+}
+
+type WorkflowRunLifecycleRecord =
+  | { readonly kind: 'workflow.started'; readonly runId: string }
+  | { readonly kind: 'workflow.completed'; readonly runId: string; readonly ok: boolean }
+  | { readonly kind: 'workflow.failed'; readonly runId: string }
+  | { readonly kind: 'workflow.cancelled'; readonly runId: string };
+
+function isWorkflowRunLifecycleEvent(value: unknown): value is WorkflowRunLifecycleRecord {
+  if (!isRecord(value) || typeof value['kind'] !== 'string' || typeof value['runId'] !== 'string') return false;
+  switch (value['kind']) {
+    case 'workflow.started': return true;
+    case 'workflow.completed': return typeof value['ok'] === 'boolean';
+    case 'workflow.failed':
+    case 'workflow.cancelled': return true;
+    default: return false;
+  }
+}
+
+function terminalForLifecycleEvent(record: Exclude<WorkflowRunLifecycleRecord, { readonly kind: 'workflow.started' }>): WorkflowRunTerminal {
+  if (record.kind === 'workflow.cancelled') return 'cancelled';
+  if (record.kind === 'workflow.failed') return 'failed';
+  return record.ok ? 'completed' : 'failed';
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

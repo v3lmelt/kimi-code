@@ -61,6 +61,15 @@ export function nodeDependencies(node: WorkflowNode): readonly WorkflowNodeId[] 
   return [...new Set(values)];
 }
 
+/** Structural child edges that belong to a node's branch-owned subgraph. */
+export function nodeChildren(node: WorkflowNode): readonly WorkflowNodeId[] {
+  return [
+    ...('children' in node ? (node.children ?? []) : []),
+    ...('itemNodeId' in node && node.itemNodeId !== undefined ? [node.itemNodeId] : []),
+    ...('target' in node && node.target !== undefined ? [node.target] : []),
+  ];
+}
+
 export function normalizeWorkflowGraph(graph: WorkflowGraph): WorkflowGraph {
   if (!isRecord(graph)) throw new WorkflowGraphError('WorkflowGraph must be an object.');
   if (typeof graph.version !== 'string' || graph.version.trim().length === 0) {
@@ -93,14 +102,23 @@ export function normalizeWorkflowGraph(graph: WorkflowGraph): WorkflowGraph {
       dependencies,
     } as WorkflowNode;
   });
-  const branchOwners = new Map<WorkflowNodeId, WorkflowNodeId[]>();
+  const branchOwners = new Map<WorkflowNodeId, Set<WorkflowNodeId>>();
   for (const node of nodes) {
     if (node.kind !== 'condition') continue;
     for (const branch of [node.whenTrue, node.whenFalse]) {
       if (branch === undefined) continue;
-      const owners = branchOwners.get(branch) ?? [];
-      owners.push(node.id);
-      branchOwners.set(branch, owners);
+      const pending = [branch];
+      const visited = new Set<WorkflowNodeId>();
+      while (pending.length > 0) {
+        const current = pending.pop()!;
+        if (visited.has(current)) continue;
+        visited.add(current);
+        const owners = branchOwners.get(current) ?? new Set<WorkflowNodeId>();
+        owners.add(node.id);
+        branchOwners.set(current, owners);
+        const currentNode = nodes.find((candidate) => candidate.id === current);
+        if (currentNode !== undefined) pending.push(...nodeChildren(currentNode));
+      }
     }
   }
   const normalizedNodes = nodes.map((node) => {
