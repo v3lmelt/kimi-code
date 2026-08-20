@@ -740,11 +740,12 @@ export class OpenAIResponsesStreamedMessage implements StreamedMessage {
     const outputTokens = readNumberField(usage, 'output_tokens') ?? 0;
     const details = readObjectField(usage, 'input_tokens_details');
     const cached = details ? (readNumberField(details, 'cached_tokens') ?? 0) : 0;
+    const cacheWrite = details ? (readNumberField(details, 'cache_write_tokens') ?? 0) : 0;
     this._usage = {
-      inputOther: inputTokens - cached,
+      inputOther: Math.max(0, inputTokens - cached - cacheWrite),
       output: outputTokens,
       inputCacheRead: cached,
-      inputCacheCreation: 0,
+      inputCacheCreation: cacheWrite,
     };
   }
 

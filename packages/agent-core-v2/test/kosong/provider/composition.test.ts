@@ -662,6 +662,42 @@ async function captureResponsesBody(
 }
 
 describe('per-turn intent wire encoding (behavior probes)', () => {
+  it('reports OpenAI Responses cache writes separately from uncached input', async () => {
+    const provider = registry.createChatProvider({
+      protocol: 'openai_responses',
+      modelName: 'gpt-5.6-sol',
+      apiKey: 'YOUR_API_KEY',
+    });
+    const client = sdkClient(provider) as { responses: { create: unknown } };
+    client.responses.create = vi.fn().mockImplementation(() => {
+      async function* events(): AsyncIterable<unknown> {
+        yield {
+          type: 'response.completed',
+          response: {
+            id: 'resp-cache-write',
+            status: 'completed',
+            usage: {
+              input_tokens: 100,
+              input_tokens_details: { cached_tokens: 40, cache_write_tokens: 35 },
+              output_tokens: 10,
+            },
+          },
+        };
+      }
+      return Promise.resolve(events());
+    });
+
+    const stream = await provider.generate('', [], PROBE_HISTORY);
+    await drain(stream);
+
+    expect(stream.usage).toEqual({
+      inputOther: 25,
+      output: 10,
+      inputCacheRead: 40,
+      inputCacheCreation: 35,
+    });
+  });
+
   it('encodes cacheKey + thinking + budget on the Kimi wire as prompt_cache_key + expanded thinking, never reasoning_effort', async () => {
     const provider = registry.createChatProvider({
       protocol: 'openai',
