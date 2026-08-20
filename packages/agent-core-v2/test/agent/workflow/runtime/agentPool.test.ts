@@ -98,6 +98,31 @@ describe('AgentRunPool.parallel', () => {
     const pool = new AgentRunPool({ maxConcurrency: 2 });
     await expect(pool.parallel([], async (item) => item)).resolves.toEqual([]);
   });
+
+  it('waits for a launched closure to settle after the pool is aborted', async () => {
+    const pool = new AgentRunPool({ maxConcurrency: 2 });
+    const started = deferred<void>();
+    const release = deferred<void>();
+    const run = pool.parallel([0], async () => {
+      started.resolve(undefined);
+      await release.promise;
+      return 'done';
+    });
+
+    await started.promise;
+    pool.abort(new Error('workflow completed'));
+    await expect(run).rejects.toThrow('workflow completed');
+
+    let idle = false;
+    const idlePromise = pool.waitForIdle().then(() => {
+      idle = true;
+    });
+    await flush();
+    expect(idle).toBe(false);
+    release.resolve(undefined);
+    await idlePromise;
+    expect(idle).toBe(true);
+  });
 });
 
 describe('AgentRunPool.pipeline', () => {

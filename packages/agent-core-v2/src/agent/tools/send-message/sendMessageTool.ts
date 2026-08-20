@@ -28,6 +28,7 @@ import { MessageStepRequest } from '#/agent/loop/stepRequest';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
 import type { IAgentScopeHandle } from '#/_base/di/scope';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
+import { IAgentCoordinationService } from '#/session/agentCoordination/agentCoordination';
 import {
   isSubagentMeta,
   subagentParentAgentId,
@@ -74,6 +75,7 @@ export class SendMessageTool implements ISendMessageTool {
     @IAgentLifecycleService private readonly lifecycle: IAgentLifecycleService,
     @ISessionMetadata private readonly sessionMetadata: ISessionMetadata,
     @IAgentScopeContext scopeContext: IAgentScopeContext,
+    @IAgentCoordinationService private readonly coordination?: IAgentCoordinationService,
   ) {
     this.callerAgentId = scopeContext.agentId;
   }
@@ -136,6 +138,10 @@ export class SendMessageTool implements ISendMessageTool {
       signal.throwIfAborted();
       if (args.message.length > SEND_MESSAGE_MAX_CHARS) {
         return errorResult(MESSAGE_TOO_LONG_MESSAGE(SEND_MESSAGE_MAX_CHARS));
+      }
+      if (this.coordination?.isEnabled() === true) {
+        await this.coordination.sendMessage(this.callerAgentId, args.to, args.message);
+        return { output: MESSAGE_DELIVERED_MESSAGE(args.to) };
       }
       const handle = await this.validateTarget(args.to);
       handle.accessor

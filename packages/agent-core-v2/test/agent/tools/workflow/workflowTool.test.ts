@@ -1,8 +1,9 @@
 /**
  * `tools` domain — unit tests for the `Workflow` tool (`WorkflowTool`).
  *
- * Covers the non-blocking launch contract: `resolveExecution` returns
- * `ToolAccesses.none()` with the tool's approval rule; a valid script compiles,
+ * Covers the non-blocking launch contract: inline scripts return
+ * `ToolAccesses.none()` while `scriptPath` declares a normalized file read;
+ * a valid script compiles,
  * persists to the session dir (`<sessionDir>/workflows/<runId>/script.js`),
  * registers a detached `WorkflowTask`, and returns `{task_id, run_id}` without
  * awaiting the run; an invalid script fails fast with a compile error; and a
@@ -21,6 +22,7 @@ import { ISessionContext, makeSessionContext } from '#/session/sessionContext/se
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IWireService } from '#/wire/wire';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import { IConfigService } from '#/app/config/config';
@@ -43,6 +45,7 @@ import {
   WorkflowTool,
   WORKFLOW_SCRIPT_KEY,
 } from '#/agent/tools/workflow/workflowTool';
+import { WorkflowToolInputSchema } from '#/agent/workflow/types';
 import { WorkflowTask } from '#/agent/tools/workflow/workflowTask';
 
 const SESSION = makeSessionContext({
@@ -89,7 +92,7 @@ function toolContext(toolCallId = 'tc-1'): ExecutableToolContext {
 
 async function runTool(
   tool: WorkflowTool,
-  args: { script: string; scriptPath?: string; resumeFromRunId?: string },
+  args: { script?: string; scriptPath?: string; resumeFromRunId?: string },
   ctx: ExecutableToolContext = toolContext(),
 ): Promise<ExecutableToolResult> {
   const execution = tool.resolveExecution(args);
@@ -114,6 +117,7 @@ describe('WorkflowTool', () => {
     ix.stub(IFileSystemStorageService, bytes);
     ix.set(IAppendLogStore, noopAppendLog);
     ix.stub(IHostFileSystem, { readText } as unknown as IHostFileSystem);
+    ix.stub(IHostEnvironment, { pathClass: 'win32' } as unknown as IHostEnvironment);
     ix.stub(ISessionContext, SESSION);
     ix.stub(IAgentScopeContext, { agentId: 'main' } as unknown as IAgentScopeContext);
     ix.stub(IAgentTaskService, {
@@ -193,11 +197,32 @@ describe('WorkflowTool', () => {
 
   it('loads the script from scriptPath when only a path is provided', async () => {
     const tool = ix.createInstance(WorkflowTool);
-    const result = await runTool(tool, { script: '', scriptPath: '/tmp/wf.js' });
+    const execution = tool.resolveExecution({ scriptPath: 'workflows/input.js' });
+    if (execution.isError === true) throw new Error(String(execution.output));
+    expect(execution.accesses).toEqual(ToolAccesses.readFile('D:/sessions/s1/workflows/input.js'));
+    const result = await execution.execute(toolContext());
 
     expect(result.isError).toBeFalsy();
-    expect(readText).toHaveBeenCalledWith('/tmp/wf.js');
+    expect(readText).toHaveBeenCalledWith('D:/sessions/s1/workflows/input.js');
     expect(registeredTasks).toHaveLength(1);
+  });
+
+  it('rejects a scriptPath that escapes the session directory', () => {
+    const tool = ix.createInstance(WorkflowTool);
+    expect(() => tool.resolveExecution({ scriptPath: '../outside.js' })).toThrow(/escapes the session directory/);
+  });
+
+  it('rejects a call that does not provide exactly one script source', () => {
+    const tool = ix.createInstance(WorkflowTool);
+    expect(() => WorkflowToolInputSchema.parse({})).toThrow(/exactly one/);
+    expect(() => WorkflowToolInputSchema.parse({ script: VALID_SCRIPT, scriptPath: 'input.js' })).toThrow(/exactly one/);
+    expect(WorkflowToolInputSchema.parse({ scriptPath: 'input.js' })).toMatchObject({ scriptPath: 'input.js' });
+    expect(tool.parameters).toMatchObject({
+      oneOf: [
+        { required: ['script'] },
+        { required: ['scriptPath'] },
+      ],
+    });
   });
 
   it('fails fast with a compile error for a script that violates the determinism contract', async () => {

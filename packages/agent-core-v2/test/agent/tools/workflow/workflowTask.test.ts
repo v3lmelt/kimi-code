@@ -38,6 +38,7 @@ import type {
   WorkflowRunId,
   WorkflowScriptMeta,
 } from '#/agent/workflow/types';
+import { grandTotal, type TokenUsage } from '#/kosong/contract/usage';
 import type { IWireService } from '#/wire/wire';
 import { IEventBus } from '#/app/event/eventBus';
 import { EventBusService } from '#/app/event/eventBusService';
@@ -321,13 +322,20 @@ describe('WorkflowTask', () => {
   });
 
   it('reports the spawn when the child agent exists and the completion when its turn ends', async () => {
-    let resolveSpawn!: (result: WorkflowAgentResult) => void;
+    const usage: TokenUsage = {
+      inputOther: 20,
+      output: 5,
+      inputCacheRead: 3,
+      inputCacheCreation: 2,
+    };
+    const onSubagentUsage = vi.fn();
+    let resolveSpawn!: (result: WorkflowAgentResult & { readonly usage?: TokenUsage }) => void;
     const spawnPending = new Promise<void>((resolve) => {
       vi.mocked(spawnWorkflowAgent).mockImplementation(
         async (_deps, _prompt, _opts, _signal, _parentToolCallId, hooks) => {
           hooks?.onSpawned?.('live-1');
           resolve();
-          return await new Promise<WorkflowAgentResult>((res) => {
+          return await new Promise<WorkflowAgentResult & { readonly usage?: TokenUsage }>((res) => {
             resolveSpawn = res;
           });
         },
@@ -349,8 +357,10 @@ describe('WorkflowTask', () => {
       log: { info: vi.fn(), warn: vi.fn() } as unknown as ILogService,
       spawnDeps: {} as unknown as WorkflowSpawnHostDeps,
       parentToolCallId: 'tc-1',
+      onSubagentUsage,
     });
 
+    const dispatch = vi.spyOn(wire, 'dispatch');
     const { sink, settle } = makeSink();
     const startPromise = task.start(sink);
 
@@ -361,7 +371,7 @@ describe('WorkflowTask', () => {
     expect(progress.get(RUN_ID)?.spawnedAgents).toBe(1);
     expect(progress.get(RUN_ID)?.completedAgents).toBe(0);
 
-    resolveSpawn({ ok: true, agentId: 'live-1', output: 'fresh-summary', durationMs: 0 });
+    resolveSpawn({ ok: true, agentId: 'live-1', output: 'fresh-summary', durationMs: 0, usage });
     await startPromise;
 
     expect(settle).toHaveBeenCalledWith({ status: 'completed' });
@@ -369,6 +379,14 @@ describe('WorkflowTask', () => {
     const settled = wire.getModel(WorkflowProgressModel);
     expect(settled.get(RUN_ID)?.spawnedAgents).toBe(1);
     expect(settled.get(RUN_ID)?.completedAgents).toBe(1);
+    expect(onSubagentUsage).toHaveBeenCalledTimes(1);
+    expect(onSubagentUsage).toHaveBeenCalledWith(usage);
+    expect(dispatch).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: 'workflow.completed',
+        payload: expect.objectContaining({ tokensSpent: grandTotal(usage) }),
+      }),
+    );
 
     await logStore.flush();
     const summary = await journal.readJournal();

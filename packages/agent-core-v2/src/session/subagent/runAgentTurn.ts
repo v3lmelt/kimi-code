@@ -10,7 +10,8 @@
  * The lifecycle is imperative — the caller awaits the returned `completion`
  * promise. Turn hooks are not used because there is exactly one observer (the
  * caller who requested the run); a hook indirection would only obscure the
- * flow.
+ * flow. Usage snapshots are taken before prompt enqueueing so synchronous
+ * prompt work is included in the reported child delta.
  */
 
 import { APIProviderRateLimitError, isProviderRateLimitError } from '#/kosong/contract/errors';
@@ -31,6 +32,7 @@ import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import {
   STRUCTURED_OUTPUT_TOOL_NAME,
   StructuredOutputTool,
+  StructuredOutputValidationError,
 } from '#/agent/workflow/structured/structuredOutputTool';
 
 import type { AgentRunHandle, AgentRunRequest } from './subagent';
@@ -62,6 +64,7 @@ export async function runAgentTurn(
   options: RunAgentTurnOptions,
 ): Promise<AgentRunHandle> {
   options.signal.throwIfAborted();
+  const usageBefore = target.accessor.get(IAgentUsageService)?.status().total;
   const structured = setupStructuredOutput(target, options);
   const promptService = target.accessor.get(IAgentPromptService);
   let turn: Turn | undefined;
@@ -90,7 +93,7 @@ export async function runAgentTurn(
     void turn.ready.then(() => options.onReady?.()).catch(() => {});
   }
 
-  const completion = awaitRun(target, turn, options, structured);
+  const completion = awaitRun(target, turn, options, structured, usageBefore);
   const tracked = completion.finally(() => {
     structured?.registration.dispose();
     structured?.deactivate();
@@ -136,10 +139,15 @@ async function awaitRun(
   turn: Turn,
   options: RunAgentTurnOptions,
   structured: StructuredOutputTurn | undefined,
-): Promise<{ summary: string; usage?: TokenUsage }> {
+  usageBefore: TokenUsage | undefined,
+): Promise<{ summary: string; output?: unknown; usage?: TokenUsage }> {
   const controller = new AbortController();
   const unlink = linkAbortSignal(options.signal, controller);
   const loop = target.accessor.get(IAgentLoopService);
+  const completion = (output: unknown): { summary: string; output: unknown; usage?: TokenUsage } => {
+    const usage = usageSince(usageBefore, target.accessor.get(IAgentUsageService)?.status().total);
+    return { summary: stringifyStructuredValue(output), output, usage };
+  };
   const cancelTurn = (turnToCancel: Turn, reason: unknown): void => {
     loop.cancel(turnToCancel.id, reason);
   };
@@ -148,11 +156,10 @@ async function awaitRun(
     const result = await awaitTurn(turnRef, controller, cancelTurn);
     classifyTurnResult(result);
     if (structured !== undefined && structured.tool.validated) {
-      const usage = target.accessor.get(IAgentUsageService)?.status().total;
-      return { summary: stringifyStructuredValue(structured.tool.value), usage };
+      return completion(structured.tool.value);
     }
     if (structured !== undefined && structured.tool.retryable) {
-      const retried = await retryStructuredOutput(
+      await retryStructuredOutput(
         target,
         controller,
         structured,
@@ -161,10 +168,19 @@ async function awaitRun(
         },
         cancelTurn,
       );
-      if (retried !== undefined) {
-        const usage = target.accessor.get(IAgentUsageService)?.status().total;
-        return { summary: retried, usage };
-      }
+      if (structured.tool.validated) return completion(structured.tool.value);
+      throw new StructuredOutputValidationError(
+        'Structured output was not produced after the retry limit.',
+        structured.tool.errors,
+        usageSince(usageBefore, target.accessor.get(IAgentUsageService)?.status().total),
+      );
+    }
+    if (structured !== undefined) {
+      throw new StructuredOutputValidationError(
+        'Structured output could not be validated because its schema is invalid.',
+        structured.tool.errors,
+        usageSince(usageBefore, target.accessor.get(IAgentUsageService)?.status().total),
+      );
     }
     const summary = await distillSummary(
       target,
@@ -175,7 +191,7 @@ async function awaitRun(
       },
       cancelTurn,
     );
-    const usage = target.accessor.get(IAgentUsageService)?.status().total;
+    const usage = usageSince(usageBefore, target.accessor.get(IAgentUsageService)?.status().total);
     return { summary, usage };
   } finally {
     unlink();
@@ -191,14 +207,25 @@ function stringifyStructuredValue(value: unknown): string {
   return JSON.stringify(value);
 }
 
+function usageSince(before: TokenUsage | undefined, after: TokenUsage | undefined): TokenUsage | undefined {
+  if (after === undefined) return undefined;
+  if (before === undefined) return after;
+  return {
+    inputOther: Math.max(0, after.inputOther - before.inputOther),
+    output: Math.max(0, after.output - before.output),
+    inputCacheRead: Math.max(0, after.inputCacheRead - before.inputCacheRead),
+    inputCacheCreation: Math.max(0, after.inputCacheCreation - before.inputCacheCreation),
+  };
+}
+
 /** Cap on driver-initiated structured-output retry rounds (continuation turns). */
 const STRUCTURED_RETRY_LIMIT = 3;
 
 /**
  * Drive additional continuation turns (reusing the same enqueue-a-user-message
  * channel as the summary policy) until the model produces a schema-valid
- * `StructuredOutput` value, then return it stringified. Returns `undefined`
- * when every retry round settles without a valid value.
+ * `StructuredOutput` value. The caller owns the terminal failure when every
+ * retry round settles without a valid value.
  */
 async function retryStructuredOutput(
   target: IAgentScopeHandle,
@@ -206,7 +233,7 @@ async function retryStructuredOutput(
   structured: StructuredOutputTurn,
   setTurn: (turn: Turn) => void,
   cancelTurn: (turn: Turn, reason: unknown) => void,
-): Promise<string | undefined> {
+): Promise<void> {
   const promptService = target.accessor.get(IAgentPromptService);
   for (let attempt = 0; attempt < STRUCTURED_RETRY_LIMIT; attempt++) {
     if (structured.tool.validated) break;
@@ -224,9 +251,6 @@ async function retryStructuredOutput(
     const result = await awaitTurn(turn, controller, cancelTurn);
     classifyTurnResult(result);
   }
-  return structured.tool.validated
-    ? stringifyStructuredValue(structured.tool.value)
-    : undefined;
 }
 
 function structuredRetryPrompt(tool: StructuredOutputTool): string {

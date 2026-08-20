@@ -15,6 +15,8 @@
  * immediately. The task drives the real run in the background — sandbox
  * execution, subagent fan-out, progress Ops, run journal — and the task
  * service delivers the terminal `<task-notification>` with the run summary.
+ * The model-facing JSON Schema preserves the input union between `script` and
+ * `scriptPath`, including the refinement that exactly one source is required.
  *
  * The tool's `when` predicate activates it by default: the `[agent]`
  * `workflowToolEnabled` switch (default `true`) keeps it in every session's
@@ -37,6 +39,7 @@ import { IWireService } from '#/wire/wire';
 import { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
+import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import {
   ToolAccesses,
   type ExecutableToolContext,
@@ -44,6 +47,7 @@ import {
   type ToolExecution,
 } from '#/tool/toolContract';
 import { toInputJsonSchema } from '#/tool/input-schema';
+import { canonicalizePath, isWithinDirectory } from '#/tool/path-access';
 import { registerAgentToolService } from '#/agent/toolRegistry/toolContribution';
 import { IAgentTaskService, type RegisterAgentTaskOptions } from '#/agent/task/task';
 import { IAgentUltracodeService } from '#/agent/ultracode/ultracode';
@@ -86,7 +90,13 @@ import WORKFLOW_DESCRIPTION from './workflow-doc.md?raw';
 /** Storage key the inline script is persisted to: `<sessionDir>/workflows/<runId>/script.js`. */
 export const WORKFLOW_SCRIPT_KEY = 'script.js';
 
-const WORKFLOW_PARAMETERS = toInputJsonSchema(WorkflowToolInputSchema);
+const WORKFLOW_PARAMETERS = {
+  ...toInputJsonSchema(WorkflowToolInputSchema),
+  oneOf: [
+    { required: ['script'], not: { required: ['scriptPath'] } },
+    { required: ['scriptPath'], not: { required: ['script'] } },
+  ],
+};
 const textEncoder = new TextEncoder();
 
 export class WorkflowTool implements IWorkflowTool {
@@ -99,6 +109,7 @@ export class WorkflowTool implements IWorkflowTool {
   private readonly logStore: IAppendLogStore;
   private readonly bytes: IFileSystemStorageService;
   private readonly hostFs: IHostFileSystem;
+  private readonly hostEnvironment: IHostEnvironment;
   private readonly wire: IWireService;
   private readonly telemetry: ITelemetryService;
   private readonly log: ILogService;
@@ -113,6 +124,7 @@ export class WorkflowTool implements IWorkflowTool {
     @IAppendLogStore logStore: IAppendLogStore,
     @IFileSystemStorageService bytes: IFileSystemStorageService,
     @IHostFileSystem hostFs: IHostFileSystem,
+    @IHostEnvironment hostEnvironment: IHostEnvironment,
     @IWireService wire: IWireService,
     @ITelemetryService telemetry: ITelemetryService,
     @ILogService log: ILogService,
@@ -132,6 +144,7 @@ export class WorkflowTool implements IWorkflowTool {
     this.logStore = logStore;
     this.bytes = bytes;
     this.hostFs = hostFs;
+    this.hostEnvironment = hostEnvironment;
     this.wire = wire;
     this.telemetry = telemetry;
     this.log = log;
@@ -161,23 +174,30 @@ export class WorkflowTool implements IWorkflowTool {
   }
 
   resolveExecution(args: WorkflowToolInput): ToolExecution {
+    const inline = args.script?.trim();
+    const rawScriptPath = args.scriptPath?.trim();
+    if (inline !== undefined && inline.length > 0 && rawScriptPath !== undefined && rawScriptPath.length > 0) {
+      throw new Error2(ErrorCodes.VALIDATION_FAILED, 'Provide either `script` or `scriptPath`, not both.');
+    }
     const hint = scriptNameHint(args);
+    const scriptPath = this.resolveScriptPath(rawScriptPath);
     return {
       description: `Running workflow${hint === undefined ? '' : `: ${hint}`}`,
-      accesses: ToolAccesses.none(),
+      accesses: scriptPath === undefined ? ToolAccesses.none() : ToolAccesses.readFile(scriptPath),
       approvalRule: this.name,
-      execute: (ctx) => this.execution(args, ctx),
+      execute: (ctx) => this.execution(args, ctx, scriptPath),
     };
   }
 
   private async execution(
     args: WorkflowToolInput,
     ctx: ExecutableToolContext,
+    scriptPath: string | undefined,
   ): Promise<ExecutableToolResult> {
     try {
       ctx.signal.throwIfAborted();
 
-      const source = await this.resolveSource(args);
+      const source = await this.resolveSource(args, scriptPath);
       const compiled = compileWorkflowScript(source);
       if ('error' in compiled) {
         return { output: formatCompileFailure(compiled.error), isError: true };
@@ -197,6 +217,7 @@ export class WorkflowTool implements IWorkflowTool {
         name: compiled.meta.name,
         description: workflowTaskDescription(compiled.meta),
         phases: compiled.meta.phases,
+        phaseTitles: compiled.phaseTitles,
         args: args.args,
         meta: compiled.meta,
         tokenBudgetTotal: this.budget.total(),
@@ -222,18 +243,32 @@ export class WorkflowTool implements IWorkflowTool {
     }
   }
 
-  private async resolveSource(args: WorkflowToolInput): Promise<string> {
+  private async resolveSource(args: WorkflowToolInput, resolvedScriptPath?: string): Promise<string> {
     const inline = args.script?.trim();
     const path = args.scriptPath?.trim();
     if (inline !== undefined && inline.length > 0 && path !== undefined && path.length > 0) {
       throw new Error2(ErrorCodes.VALIDATION_FAILED, 'Provide either `script` or `scriptPath`, not both.');
     }
     if (inline !== undefined && inline.length > 0) return inline;
-    if (path !== undefined && path.length > 0) {
-      rejectControlCharacters(path);
-      return this.hostFs.readText(path);
+    if (path !== undefined && path.length > 0 && resolvedScriptPath !== undefined) {
+      return this.hostFs.readText(resolvedScriptPath);
     }
     throw new Error2(ErrorCodes.VALIDATION_FAILED, 'Workflow requires a `script` (or `scriptPath`).');
+  }
+
+  private resolveScriptPath(rawPath: string | undefined): string | undefined {
+    const path = rawPath?.trim();
+    if (path === undefined || path.length === 0) return undefined;
+    rejectControlCharacters(path);
+    const normalized = canonicalizePath(path, this.session.sessionDir, this.hostEnvironment.pathClass);
+    if (!isWithinDirectory(normalized, this.session.sessionDir, this.hostEnvironment.pathClass)) {
+      throw new Error2(
+        ErrorCodes.FS_PATH_ESCAPES,
+        `Workflow scriptPath escapes the session directory: ${normalized}`,
+        { details: { path: normalized, sessionDir: this.session.sessionDir } },
+      );
+    }
+    return normalized;
   }
 
   private createJournal(runId: WorkflowRunId): WorkflowJournal {

@@ -26,6 +26,7 @@ type SubagentCompletion = {
 
 export type SubagentHandle = {
   readonly agentId: string;
+  readonly taskPath?: string;
   readonly profileName: string;
   readonly model?: string;
   readonly thinkingEffort?: string;

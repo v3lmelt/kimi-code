@@ -81,6 +81,7 @@ import { IFlagService } from '#/app/flag/flag';
 import { IModelCatalog } from '#/kosong/model/catalog';
 import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle';
 import { isSubagentMeta, subagentLabels, subagentParentAgentId } from '#/session/agentLifecycle/subagentMetadata';
+import { IAgentCoordinationService } from '#/session/agentCoordination/agentCoordination';
 import { ISessionProcessRunner } from '#/session/process/processRunner';
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
@@ -102,6 +103,7 @@ import {
   BACKGROUND_AGENT_UNAVAILABLE,
   DEFAULT_PROFILE_NAME,
   ISubagentTool,
+  LegacySubagentToolInputSchema,
   RESUME_WITH_TYPE_UNAVAILABLE,
   RESUMED_LABEL,
   SUBAGENT_STOPPED_MESSAGE,
@@ -117,6 +119,10 @@ import AGENT_DESCRIPTION_BASE from './agent.md?raw';
 
 const SUBAGENT_TOOL_PARAMETERS = toInputJsonSchema(SubagentToolInputSchema);
 const SUBAGENT_TOOL_PARAMETERS_NO_MODEL = stripSubagentModelParameter(SUBAGENT_TOOL_PARAMETERS);
+const LEGACY_SUBAGENT_TOOL_PARAMETERS = toInputJsonSchema(LegacySubagentToolInputSchema);
+const LEGACY_SUBAGENT_TOOL_PARAMETERS_NO_MODEL = stripSubagentModelParameter(
+  LEGACY_SUBAGENT_TOOL_PARAMETERS,
+);
 
 /** Total char budget for the parent-context digest block prepended to a child prompt. */
 const PARENT_CONTEXT_DIGEST_CHAR_BUDGET = 4_000;
@@ -124,15 +130,26 @@ const PARENT_CONTEXT_DIGEST_CHAR_BUDGET = 4_000;
 const PARENT_CONTEXT_DIGEST_MESSAGES = 5;
 /** Per-message char cap within the digest. */
 const PARENT_CONTEXT_DIGEST_MESSAGE_CHARS = 800;
+const COORDINATION_TOOL_NAMES = new Set([
+  'followup_task',
+  'list_agents',
+  'interrupt_agent',
+  'wait_agent',
+]);
 
 export class SubagentTool implements ISubagentTool {
   declare readonly _serviceBrand: undefined;
   readonly name: string = 'Agent';
 
   get parameters(): Record<string, unknown> {
+    if (this.coordination.isEnabled()) {
+      return this.flags.enabled(SECONDARY_MODEL_FLAG_ID)
+        ? SUBAGENT_TOOL_PARAMETERS
+        : SUBAGENT_TOOL_PARAMETERS_NO_MODEL;
+    }
     return this.flags.enabled(SECONDARY_MODEL_FLAG_ID)
-      ? SUBAGENT_TOOL_PARAMETERS
-      : SUBAGENT_TOOL_PARAMETERS_NO_MODEL;
+      ? LEGACY_SUBAGENT_TOOL_PARAMETERS
+      : LEGACY_SUBAGENT_TOOL_PARAMETERS_NO_MODEL;
   }
 
   private readonly callerAgentId: string;
@@ -157,6 +174,7 @@ export class SubagentTool implements ISubagentTool {
     @IConfigService private readonly config: IConfigService,
     @IFlagService private readonly flags: IFlagService,
     @IModelCatalog private readonly modelCatalog: IModelCatalog,
+    @IAgentCoordinationService private readonly coordination: IAgentCoordinationService,
   ) {
     this.callerAgentId = scopeContext.agentId;
     this.canRunInBackground = () =>
@@ -185,6 +203,7 @@ export class SubagentTool implements ISubagentTool {
       (profile, name, source) =>
         this.toolPolicy.isToolActiveForProfile(profile, name, source),
       this.flags.enabled(SECONDARY_MODEL_FLAG_ID),
+      this.coordination.isEnabled() ? undefined : COORDINATION_TOOL_NAMES,
     );
     if (typeLines) {
       description += `\n\nAvailable agent types (pass via subagent_type):\n${typeLines}`;
@@ -213,6 +232,9 @@ export class SubagentTool implements ISubagentTool {
   private knownToolReferences(): ToolReference[] {
     const refs = new Map<string, ToolReference>();
     for (const contribution of getAgentToolContributions()) {
+      if (!this.coordination.isEnabled() && COORDINATION_TOOL_NAMES.has(contribution.options.name)) {
+        continue;
+      }
       refs.set(contribution.options.name, {
         name: contribution.options.name,
         source: contribution.options.source ?? 'builtin',
@@ -332,14 +354,26 @@ export class SubagentTool implements ISubagentTool {
       let created: IAgentScopeHandle;
       try {
         this.modelCatalog.get(binding.model);
-        created = await this.lifecycle.create({
-          binding: {
-            profile: profile.name,
-            model: binding.model,
-            thinking: binding.thinking,
-          },
-          labels: subagentLabels(this.callerAgentId),
-        });
+        const createBinding = {
+          profile: profile.name,
+          model: binding.model,
+          thinking: binding.thinking,
+        };
+        if (this.coordination.isEnabled()) {
+          created = (
+            await this.coordination.spawn({
+              callerAgentId: this.callerAgentId,
+              taskName: args.task_name,
+              binding: createBinding,
+              contextPolicy: args.context_policy,
+            })
+          ).handle;
+        } else {
+          created = await this.lifecycle.create({
+            binding: createBinding,
+            labels: subagentLabels(this.callerAgentId),
+          });
+        }
       } catch (error) {
         throw wrapSubagentModelError(
           error,
@@ -355,7 +389,9 @@ export class SubagentTool implements ISubagentTool {
       agentId = created.id;
       profileName = profile.name;
       displayModel = binding.displayModel;
-      const digest = buildParentContextDigest(requester, this.workspace.workDir);
+      const digest = this.coordination.isEnabled()
+        ? ''
+        : buildParentContextDigest(requester, this.workspace.workDir);
       const prompted = digest.length > 0 ? `${digest}\n\n${args.prompt}` : args.prompt;
       promptText = await applyProfilePromptPrefix(profile, prompted, {
         cwd: this.workspace.workDir,
@@ -373,11 +409,20 @@ export class SubagentTool implements ISubagentTool {
       model: displayModel,
     });
 
-    const run = await this.subagents.run(
-      agentId,
-      { kind: 'prompt', prompt: promptText },
-      { signal: controller.signal },
-    );
+    let run: Awaited<ReturnType<ISessionSubagentService['run']>>;
+    try {
+      run = await this.subagents.run(
+        agentId,
+        { kind: 'prompt', prompt: promptText },
+        { signal: controller.signal },
+      );
+    } catch (error) {
+      if (this.coordination.isEnabled()) {
+        this.coordination.markRunFinished(agentId, controller.signal.aborted ? 'interrupted' : 'failed');
+      }
+      throw error;
+    }
+    if (this.coordination.isEnabled()) this.coordination.markRunStarted(agentId);
     const mirrored = mirrorAgentRun(requester, run, {
       profileName,
       prompt: promptText,
@@ -386,15 +431,27 @@ export class SubagentTool implements ISubagentTool {
         controller.abort(reason);
       },
     });
+    const completion = mirrored.then((r) => {
+      if (this.coordination.isEnabled()) this.coordination.markRunFinished(agentId, 'completed');
+      return { result: r.summary, usage: r.usage };
+    });
+    void completion.catch(() => {
+      if (this.coordination.isEnabled()) {
+        this.coordination.markRunFinished(agentId, controller.signal.aborted ? 'interrupted' : 'failed');
+      }
+    });
     return {
       agentId,
+      taskPath: this.coordination.isEnabled()
+        ? this.coordination.resolve(agentId)?.taskPath
+        : undefined,
       profileName,
       model: displayModel,
       thinkingEffort: this.lifecycle
         .get(agentId)
         ?.accessor.get(IAgentProfileService)
         .getEffectiveThinkingLevel(),
-      completion: mirrored.then((r) => ({ result: r.summary, usage: r.usage })),
+      completion,
     };
   }
 
@@ -553,6 +610,7 @@ function buildProfileDescriptions(
     source: ToolReference['source'],
   ) => boolean,
   showModelPreferences: boolean,
+  hiddenToolNames?: ReadonlySet<string>,
 ): string {
   return profiles
     .map((profile) => {
@@ -564,7 +622,9 @@ function buildProfileDescriptions(
         !showModelPreferences || profile.modelPreference === undefined
           ? header
           : `${header}\n  Model preference: ${profile.modelPreference}`;
-      const activeTools = resolveActiveToolNames(profile);
+      const activeTools = resolveActiveToolNames(profile)?.filter(
+        (name) => hiddenToolNames?.has(name) !== true,
+      );
       const externallyRestricted = tools.some(
         (tool) =>
           evaluateToolActive(profile, tool.name, tool.source) &&
@@ -603,6 +663,7 @@ function formatBackgroundAgentResult(
     `task_id: ${taskId}`,
     'status: running',
     `agent_id: ${handle.agentId}`,
+    ...(handle.taskPath === undefined ? [] : [`task_path: ${handle.taskPath}`]),
     `actual_subagent_type: ${handle.profileName}`,
     'automatic_notification: true',
     '',
@@ -618,6 +679,7 @@ function formatBackgroundAgentResult(
 function formatForegroundAgentSuccess(handle: SubagentHandle, result: string): string {
   return [
     `agent_id: ${handle.agentId}`,
+    ...(handle.taskPath === undefined ? [] : [`task_path: ${handle.taskPath}`]),
     `actual_subagent_type: ${handle.profileName}`,
     'status: completed',
     '',
@@ -633,6 +695,7 @@ function formatForegroundAgentFailure(
 ): string {
   const lines = [
     `agent_id: ${handle.agentId}`,
+    ...(handle.taskPath === undefined ? [] : [`task_path: ${handle.taskPath}`]),
     `actual_subagent_type: ${handle.profileName}`,
     'status: failed',
     '',

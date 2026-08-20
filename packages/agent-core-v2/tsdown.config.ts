@@ -3,7 +3,7 @@ import { defineConfig } from 'tsdown';
 import { rawTextPlugin } from '../../build/raw-text-plugin.mjs';
 
 export default defineConfig({
-  entry: ['./src/index.ts'],
+  entry: ['./src/index.ts', './src/agent/workflow/runtime/workflowWorker.ts'],
   format: ['esm'],
   dts: true,
   outDir: 'dist',
