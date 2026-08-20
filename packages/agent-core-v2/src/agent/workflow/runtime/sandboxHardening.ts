@@ -25,28 +25,56 @@ export const WORKFLOW_RANDOM_ERROR =
  * becomes a shim that rejects `new Date()` and bare `Date()` while keeping
  * `new Date(x)` / `Date.parse` / `Date.UTC` usable, and the real `Date` is
  * frozen so the `(new Date(x)).constructor` backdoor cannot restore
- * `RealDate.now`.
+ * `RealDate.now`. The Math object, Date shim, their relevant properties, and
+ * the global references are non-writable so computed-property assignments
+ * cannot restore the non-deterministic builtins.
  */
 export const WORKFLOW_SANDBOX_PRELUDE = `(() => {
   const NOW_ERR = ${JSON.stringify(WORKFLOW_NOW_ERROR)};
   const RANDOM_ERR = ${JSON.stringify(WORKFLOW_RANDOM_ERROR)};
-  Math.random = function random() { throw new Error(RANDOM_ERR); };
+  const random = function random() { throw new Error(RANDOM_ERR); };
+  Object.defineProperty(Math, 'random', {
+    value: random,
+    writable: false,
+    configurable: false,
+  });
+  Object.freeze(Math);
   const RealDate = Date;
-  RealDate.now = function now() { throw new Error(NOW_ERR); };
+  const now = function now() { throw new Error(NOW_ERR); };
+  Object.defineProperty(RealDate, 'now', {
+    value: now,
+    writable: false,
+    configurable: false,
+  });
   function ShimDate(...a) {
     if (!new.target) throw new Error(NOW_ERR);
     if (a.length === 0) throw new Error(NOW_ERR);
     return Reflect.construct(RealDate, a, new.target);
   }
-  ShimDate.now = RealDate.now;
-  ShimDate.parse = RealDate.parse;
-  ShimDate.UTC = RealDate.UTC;
+  Object.defineProperties(ShimDate, {
+    now: { value: now, writable: false, configurable: false },
+    parse: { value: RealDate.parse, writable: false, configurable: false },
+    UTC: { value: RealDate.UTC, writable: false, configurable: false },
+  });
   ShimDate.prototype = RealDate.prototype;
-  // Close the (new Date(x)).constructor backdoor to RealDate.now — point
-  // .constructor at the shim, then freeze RealDate so it can't be undone.
-  RealDate.prototype.constructor = ShimDate;
+  Object.defineProperty(RealDate.prototype, 'constructor', {
+    value: ShimDate,
+    writable: false,
+    configurable: false,
+  });
+  Object.freeze(RealDate.prototype);
   Object.freeze(RealDate);
-  globalThis.Date = ShimDate;
+  Object.freeze(ShimDate);
+  Object.defineProperty(globalThis, 'Math', {
+    value: Math,
+    writable: false,
+    configurable: false,
+  });
+  Object.defineProperty(globalThis, 'Date', {
+    value: ShimDate,
+    writable: false,
+    configurable: false,
+  });
 })()`;
 
 /**
@@ -88,11 +116,9 @@ export function isFrozenWorkflowError(value: unknown): boolean {
 
 /**
  * Default wall-clock timeout (ms) for one `await`-free slice of script
- * execution. `vm.Script.runInContext({timeout})` bounds each synchronous
- * stretch between awaits — the only place a script can pin the host's event
- * loop (e.g. `while (true) {}`). Async waits (subagent `agent()` calls)
- * resolve from already-queued microtasks and are NOT bounded by this, so
- * long-running workflows are unaffected. The official engine uses the same
- * per-slice bound for its synchronous entry slice.
+ * execution. The Worker applies this to its initial vm slice and the host
+ * heartbeat watchdog terminates the Worker when a later synchronous slice
+ * stops heartbeats. Async waits remain live while the Worker event loop can
+ * make progress.
  */
 export const WORKFLOW_DEFAULT_TIMEOUT_MS = 30 * 1000;

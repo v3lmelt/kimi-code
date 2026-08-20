@@ -50,11 +50,13 @@ export const WorkflowToolInputSchema = z
     script: z
       .string()
       .min(1)
+      .optional()
       .describe(
         'Inline plain-JS workflow script. Must start with `export const meta = {name, description, phases?}` ' +
           'as a pure literal, declare an entry point as `export async function main(...)`, and use only the ' +
           'injected globals agent/parallel/pipeline/phase/log/args/budget/workflow. The script must be ' +
-          'deterministic: no Date.now/Math.random/new Date(), no require/import/process/fs/globalThis.',
+          'deterministic: no Date.now/Math.random/new Date(), no require/import/process/fs/globalThis. ' +
+          'Provide exactly one of `script` and `scriptPath`.',
       ),
     args: z
       .unknown()
@@ -65,9 +67,10 @@ export const WorkflowToolInputSchema = z
       .min(1)
       .optional()
       .describe(
-        'Path to a script file to load instead of the inline `script`. Every invocation also persists ' +
-          'the script under the session directory; edit that file and re-invoke with the same `scriptPath` ' +
-          'to iterate without resending the full script.',
+        'Path to a script file under the session directory to load instead of the inline `script`. The path ' +
+          'is normalized and cannot escape the session directory. Every invocation also persists the script ' +
+          'under the session directory; edit that file and re-invoke with the same `scriptPath` to iterate ' +
+          'without resending the full script. Provide exactly one of `script` and `scriptPath`.',
       ),
     resumeFromRunId: z
       .string()
@@ -79,15 +82,26 @@ export const WorkflowToolInputSchema = z
           'replay is keyed per agent() call, not per script.',
       ),
   })
-  .strict();
+  .strict()
+  .superRefine((value, context) => {
+    const hasScript = value.script !== undefined && value.script.trim().length > 0;
+    const hasScriptPath = value.scriptPath !== undefined && value.scriptPath.trim().length > 0;
+    if (hasScript === hasScriptPath) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Provide exactly one of `script` and `scriptPath`.',
+        path: ['script'],
+      });
+    }
+  });
 
 export type WorkflowToolInput = z.infer<typeof WorkflowToolInputSchema>;
 
 /**
  * Isolation requested for the subagents a workflow spawns.
  *
- * - `worktree`: each subagent gets an isolated git worktree on a scratch
- *   branch (the strongest isolation; mirrors a design-review decision).
+ * - `worktree`: requested worktree isolation; the current workflow host
+ *   rejects this value because worktree creation is not implemented.
  * - `session`: subagents share the parent agent's session state.
  * - `none`: no isolation guarantee.
  */
@@ -201,13 +215,16 @@ export type WorkflowSchema = Record<string, unknown>;
  * derives sensible defaults.
  *
  * - `label`: human-readable name shown in progress/UI (`workflow.agent_spawned`).
- * - `phase`: the workflow phase this agent belongs to (matched against
- *   `meta.phases[].title` when present).
+ * - `phase`: the workflow phase this agent belongs to; it must match a
+ *   declared `meta.phases[].title`.
  * - `schema`: structured-output schema; enables `requiresStructuredOutput`
- *   on the subagent (single mandatory call, retry cap, text fallback).
+ *   on the subagent (single mandatory call, retry cap, terminal typed failure).
  * - `model`: model alias override for this subagent.
- * - `effort`: thinking-effort level for this subagent.
- * - `isolation`: `'worktree' | 'session' | 'none'` subagent isolation.
+ * - `effort`: thinking-effort level for this subagent; forwarded to the
+ *   subagent binding.
+ * - `isolation`: `'session' | 'none'` are supported by the current same-session
+ *   runtime. `'worktree'` is rejected explicitly because worktree creation is
+ *   not implemented.
  * - `agentType`: subagent type (e.g. `coder`, `readonly`); defaults to the
  *   parent's type when omitted.
  */

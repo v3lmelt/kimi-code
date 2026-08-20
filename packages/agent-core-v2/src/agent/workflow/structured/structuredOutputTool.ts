@@ -5,14 +5,16 @@
  * subagent's turn is given a single mandatory `StructuredOutput` tool. The
  * model must call it exactly once with `result` set to a value matching the
  * declared JSON schema; the tool validates the value and, on failure, returns
- * an error the model can fix and retry. After a retry cap the tool tells the
- * model to give up and return the result as plain text, and the run falls back
- * to the subagent's last text output.
+ * an error the model can fix and retry. After a retry cap the tool reports a
+ * terminal failure and the run does not fall back to the subagent's last text
+ * output.
  *
  * The tool carries its own per-run `StructuredOutputState` so the driver
  * (`runAgentTurn`) can read the validated value back after the turn settles.
  * Validation uses ajv (draft-07, the same target the repo's tool-parameter
- * helper renders) with `ajv-formats` registered for `format` keywords.
+ * helper renders) with `ajv-formats` registered for `format` keywords. Failed
+ * runs expose a stable code and a typed error carrying validation details and
+ * usage.
  */
 
 import Ajv, { type ValidateFunction } from 'ajv';
@@ -24,12 +26,32 @@ import {
   type ExecutableToolResult,
   type ToolExecution,
 } from '#/tool/toolContract';
+import type { TokenUsage } from '#/kosong/contract/usage';
 
 /** The tool's model-facing name. */
 export const STRUCTURED_OUTPUT_TOOL_NAME = 'StructuredOutput';
 
 /** How many failed validation attempts the tool tolerates before bailing. */
 export const STRUCTURED_OUTPUT_RETRY_CAP = 5;
+
+export const STRUCTURED_OUTPUT_FAILURE_CODE = 'workflow.structured_output_failed' as const;
+
+export class StructuredOutputValidationError extends Error {
+  readonly code = STRUCTURED_OUTPUT_FAILURE_CODE;
+  readonly validationErrors: readonly string[];
+  readonly usage?: TokenUsage;
+
+  constructor(
+    message: string,
+    validationErrors: readonly string[] = [],
+    usage?: TokenUsage,
+  ) {
+    super(message);
+    this.name = 'StructuredOutputValidationError';
+    this.validationErrors = [...validationErrors];
+    this.usage = usage;
+  }
+}
 
 /**
  * Per-run state the tool mutates and the driver reads back. A single tool
@@ -80,8 +102,8 @@ export class StructuredOutputTool implements ExecutableTool<StructuredOutputInpu
   readonly description =
     'Deliver the final result of this run as structured data. You MUST call this tool exactly ' +
     'once, passing `result` set to a value that satisfies the declared JSON schema. The value is ' +
-    'validated; a rejected value returns an error that you must fix and retry. If you cannot ' +
-    'produce a valid value after several attempts, return the result as plain text instead.';
+    'validated; a rejected value returns an error that you must fix and retry. If the bounded ' +
+    'retry protocol is exhausted, the run fails and must not return plain text as a substitute.';
 
   readonly parameters: Record<string, unknown>;
 
@@ -156,7 +178,7 @@ export class StructuredOutputTool implements ExecutableTool<StructuredOutputInpu
     if (this.schemaError !== undefined || this.validate === undefined) {
       this.state.errors.push(`invalid schema: ${this.schemaError ?? 'unknown error'}`);
       return {
-        output: `Structured output cannot be validated because the schema is invalid: ${this.schemaError ?? 'unknown error'}. Return the result as plain text in your final message instead.`,
+        output: `Structured output cannot be validated because the schema is invalid: ${this.schemaError ?? 'unknown error'}. The structured-output run will fail; do not substitute a plain-text result.`,
         isError: true,
       };
     }
@@ -174,7 +196,7 @@ export class StructuredOutputTool implements ExecutableTool<StructuredOutputInpu
       return {
         output:
           `Structured output was rejected after ${String(this.state.attempts)} attempts: ${message}. ` +
-          'Give up on StructuredOutput and return the result as plain text in your final message instead.',
+          'The structured-output run will fail; do not substitute a plain-text result.',
         isError: true,
       };
     }

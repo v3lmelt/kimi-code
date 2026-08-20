@@ -3,7 +3,7 @@
  *
  * Covers: schema-valid values are accepted and recorded on the tool's state,
  * invalid values are rejected with an error (so the model can retry), the
- * retry cap bails to plain-text fallback, a malformed schema fails closed
+ * retry cap fails closed, a malformed schema fails closed
  * instead of throwing, and the advertised parameter shape is an object with a
  * single required `result` property.
  */
@@ -69,7 +69,7 @@ describe('StructuredOutputTool', () => {
     expect(tool.value).toBeUndefined();
   });
 
-  it('bails to plain-text fallback after the retry cap', async () => {
+  it('reports a terminal structured-output failure after the retry cap', async () => {
     const tool = new StructuredOutputTool(SCHEMA, createStructuredOutputState(), 2);
     let last = '';
     for (let attempt = 0; attempt < 3; attempt++) {
@@ -78,7 +78,7 @@ describe('StructuredOutputTool', () => {
       );
       last = String(result.output);
     }
-    expect(last).toContain('Give up on StructuredOutput');
+    expect(last).toContain('structured-output run will fail');
     expect(tool.validated).toBe(false);
   });
 

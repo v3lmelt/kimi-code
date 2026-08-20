@@ -15,7 +15,9 @@ import {
   WorkflowAgentCapExceededError,
   WorkflowBudgetExceededError,
   WorkflowNestingExceededError,
+  WorkflowRunCancelledError,
   WorkflowRuntime,
+  WorkflowTimeoutError,
   installWorkflowGlobals,
   type WorkflowAgentSpawnResult,
 } from '#/agent/workflow/runtime/workflowRuntime';
@@ -70,6 +72,35 @@ export async function main() {
     expect(output.result).toEqual({ got: 'out-probe', id: 'a1', argsSeen: { from: 'test' } });
     expect(output.meta.name).toBe('returns');
     expect(output.agentsSpawned).toBe(1);
+  });
+
+  it('preserves structured agent output across the Worker RPC boundary', async () => {
+    const value = { answer: 'ok', nested: [1, { accepted: true }] };
+    const runtime = new WorkflowRuntime({
+      source: `
+export const meta = { name: 'structured-rpc', description: 'x' };
+
+export async function main() {
+  const result = await agent('structured');
+  return { ok: result.ok, output: result.output };
+}
+`,
+      args: undefined,
+      tokenBudgetTotal: 1_000,
+      agentSpawn: async () => ({
+        ok: true,
+        agentId: 'structured-agent',
+        output: value,
+        durationMs: 1,
+        usage: SAMPLE_USAGE,
+      }),
+      pool: new AgentRunPool({ maxConcurrency: 2 }),
+    });
+
+    await expect(runtime.run()).resolves.toMatchObject({
+      result: { ok: true, output: value },
+      tokensSpent: grandTotal(SAMPLE_USAGE),
+    });
   });
 
   it('feeds real token accounting into budget.spent() / remaining()', async () => {
@@ -180,6 +211,68 @@ export async function main() {
 `);
     const output = await runtime.run();
     expect(output.result).toBe('out-inner');
+  });
+
+  it('enforces a nested workflow budget and rejects unsupported isolation', async () => {
+    const budgetRuntime = runtimeFor(`
+export const meta = { name: 'nested-budget', description: 'x' };
+
+export async function main() {
+  return await workflow({ budget: 150, fn: async () => {
+    await agent('first');
+    try {
+      await agent('second');
+      return 'unexpected';
+    } catch (error) {
+      return { total: budget.total, spent: budget.spent(), name: error.name };
+    }
+  }});
+}
+`);
+    await expect(budgetRuntime.run()).resolves.toMatchObject({
+      result: { total: 150, spent: 150, name: 'WorkflowBudgetExceededError' },
+    });
+
+    const isolationRuntime = runtimeFor(`
+export const meta = { name: 'nested-isolation', description: 'x' };
+
+export async function main() {
+  try {
+    await workflow({ isolation: 'worktree', fn: async () => 'never' });
+    return 'unexpected';
+  } catch (error) {
+    return error.name;
+  }
+}
+`);
+    await expect(isolationRuntime.run()).resolves.toMatchObject({
+      result: 'WorkflowIsolationUnsupportedError',
+    });
+  });
+
+  it('rejects non-positive nested workflow budgets at the input boundary', async () => {
+    const runtime = runtimeFor(`
+export const meta = { name: 'invalid-nested-budget', description: 'x' };
+
+export async function main() {
+  const failures = [];
+  for (const value of [0, -1]) {
+    try {
+      await workflow({ budget: value, fn: async () => 'unexpected' });
+      failures.push({ value, accepted: true });
+    } catch (error) {
+      failures.push({ value, name: error.name, message: error.message });
+    }
+  }
+  return failures;
+}
+`);
+    await expect(runtime.run()).resolves.toMatchObject({
+      result: [
+        { value: 0, name: 'WorkflowRunError', message: 'workflow() budget must be a finite positive number.' },
+        { value: -1, name: 'WorkflowRunError', message: 'workflow() budget must be a finite positive number.' },
+      ],
+    });
   });
 
   it('fans out parallel and pipeline through the sandbox globals', async () => {
@@ -317,6 +410,46 @@ export async function main() {
     expect(output.result).toEqual({ zeroArg: 'blocked', fixed: 0, parsed: 0 });
   });
 
+  it('keeps deterministic builtins blocked after computed-property assignments', async () => {
+    const runtime = runtimeFor(`
+export const meta = { name: 'immutable-hardening', description: 'x' };
+
+export async function main() {
+  const math = Math;
+  const date = Date;
+  const randomKey = 'ran' + 'dom';
+  const nowKey = 'no' + 'w';
+  try { math[randomKey] = () => 0.5; } catch {}
+  try { date[nowKey] = () => 0; } catch {}
+  try { Math = { [randomKey]: () => 0.5 }; } catch {}
+  try { Date = function FakeDate() {}; } catch {}
+  const call = (fn) => {
+    try { return fn(); } catch (error) {
+      return String(error.message).includes('non-deterministic') ? 'blocked' : 'unexpected';
+    }
+  };
+  return {
+    random: call(() => math[randomKey]()),
+    now: call(() => date[nowKey]()),
+    mathFrozen: Object.isFrozen(math),
+    dateFrozen: Object.isFrozen(date),
+    randomWritable: Object.getOwnPropertyDescriptor(math, randomKey).writable,
+    nowWritable: Object.getOwnPropertyDescriptor(date, nowKey).writable,
+  };
+}
+`);
+    await expect(runtime.run()).resolves.toMatchObject({
+      result: {
+        random: 'blocked',
+        now: 'blocked',
+        mathFrozen: true,
+        dateFrozen: true,
+        randomWritable: false,
+        nowWritable: false,
+      },
+    });
+  });
+
   it('bounds an await-free slice that pins the event loop (timeout)', async () => {
     const runtime = new WorkflowRuntime({
       source: `
@@ -335,6 +468,224 @@ export async function main() {
       pool: new AgentRunPool({ maxConcurrency: 2 }),
     });
     await expect(runtime.run()).rejects.toThrow(/timed out/i);
+  });
+
+  it('terminates a later synchronous slice after an awaited agent call', async () => {
+    const runtime = new WorkflowRuntime({
+      source: `
+export const meta = { name: 'post-await-spin', description: 'x' };
+
+export async function main() {
+  await agent('release');
+  while (true) {}
+}
+`,
+      args: undefined,
+      tokenBudgetTotal: 1_000,
+      timeoutMs: 100,
+      agentSpawn: async () => ({ ok: true, agentId: 'a1', output: 'ok', durationMs: 1 }),
+      pool: new AgentRunPool({ maxConcurrency: 2 }),
+    });
+    await expect(runtime.run()).rejects.toBeInstanceOf(WorkflowTimeoutError);
+  });
+
+  it('cancels only unfinished host RPCs after the Worker reports completion', async () => {
+    let completedSignal: AbortSignal | undefined;
+    let unfinishedSignal: AbortSignal | undefined;
+    let unfinishedStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      unfinishedStarted = resolve;
+    });
+    const usageEvents: TokenUsage[] = [];
+    const runtime = new WorkflowRuntime({
+      source: `
+export const meta = { name: 'fire-and-forget', description: 'x' };
+
+export async function main() {
+  const completed = await agent('completed');
+  agent('unfinished');
+  return completed.output;
+}
+`,
+      args: undefined,
+      tokenBudgetTotal: 1_000,
+      onSubagentUsage: (usage) => usageEvents.push(usage),
+      agentSpawn: async (prompt, _opts, signal) => {
+        if (prompt === 'completed') {
+          completedSignal = signal;
+          return { ok: true, agentId: 'completed', output: 'done', durationMs: 1, usage: SAMPLE_USAGE };
+        }
+        unfinishedSignal = signal;
+        unfinishedStarted();
+        return await new Promise<never>((_resolve, reject) => {
+          signal?.addEventListener('abort', () => reject(signal.reason), { once: true });
+        });
+      },
+      pool: new AgentRunPool({ maxConcurrency: 2 }),
+    });
+
+    const run = runtime.run();
+    await started;
+    await expect(run).resolves.toMatchObject({ result: 'done', tokensSpent: grandTotal(SAMPLE_USAGE) });
+    expect(completedSignal?.aborted).toBe(false);
+    expect(unfinishedSignal?.aborted).toBe(true);
+    expect(usageEvents).toEqual([SAMPLE_USAGE]);
+    await Promise.resolve();
+    expect(usageEvents).toHaveLength(1);
+  });
+
+  it('times out a microtask log flood without retaining every log entry', async () => {
+    const samples: unknown[][] = [];
+    const runtime = new WorkflowRuntime({
+      source: `
+export const meta = { name: 'log-flood', description: 'x' };
+
+export async function main() {
+  while (true) {
+    log('flood');
+    await Promise.resolve();
+  }
+}
+`,
+      args: undefined,
+      tokenBudgetTotal: 1_000,
+      timeoutMs: 80,
+      onLog: (parts) => {
+        if (samples.length < 4) samples.push([...parts]);
+      },
+      agentSpawn: async () => ({ ok: true, agentId: 'unused', output: null, durationMs: 1 }),
+      pool: new AgentRunPool({ maxConcurrency: 2 }),
+    });
+
+    await expect(runtime.run()).rejects.toBeInstanceOf(WorkflowTimeoutError);
+    expect(samples.length).toBeLessThanOrEqual(4);
+  });
+
+  it('keeps a long host agent RPC alive while Worker heartbeats continue', async () => {
+    let started!: () => void;
+    const rpcStarted = new Promise<void>((resolve) => {
+      started = resolve;
+    });
+    let release!: () => void;
+    const releaseRpc = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const runtime = new WorkflowRuntime({
+      source: `
+export const meta = { name: 'long-rpc', description: 'x' };
+
+export async function main() {
+  const result = await agent('slow');
+  return result.output;
+}
+`,
+      args: undefined,
+      tokenBudgetTotal: 1_000,
+      timeoutMs: 200,
+      agentSpawn: async () => {
+        started();
+        await releaseRpc;
+        return { ok: true, agentId: 'slow', output: 'released', durationMs: 1 };
+      },
+      pool: new AgentRunPool({ maxConcurrency: 2 }),
+    });
+
+    const run = runtime.run();
+    await rpcStarted;
+    await new Promise<void>((resolve) => setTimeout(resolve, 450));
+    release();
+    await expect(run).resolves.toMatchObject({ result: 'released' });
+  });
+
+  it('does not expose the Worker process through proxy function constructors', async () => {
+    const runtime = runtimeFor(`
+export const meta = { name: 'worker-boundary', description: 'x' };
+
+export async function main() {
+  const tryEscape = (run) => {
+    try { return run(); } catch { return 'blocked'; }
+  };
+  return {
+    objectEscape: tryEscape(() => ({})['constructor']['constructor']('return process')()),
+    proxyEscape: tryEscape(() => agent.constructor('return process')()),
+  };
+}
+`);
+    const output = await runtime.run();
+    expect(output.result).toEqual({ objectEscape: 'blocked', proxyEscape: 'blocked' });
+  });
+
+  it('terminates and settles the Worker when the run is cancelled', async () => {
+    const controller = new AbortController();
+    let spawnStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      spawnStarted = resolve;
+    });
+    const runtime = new WorkflowRuntime({
+      source: `
+export const meta = { name: 'cancel', description: 'x' };
+
+export async function main() {
+  await agent('wait');
+  return 'never';
+}
+`,
+      args: undefined,
+      signal: controller.signal,
+      tokenBudgetTotal: 1_000,
+      agentSpawn: async () => {
+        spawnStarted();
+        await new Promise<never>((_resolve, reject) => {
+          controller.signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+        });
+        return { ok: true, agentId: 'never', output: null, durationMs: 1 };
+      },
+      pool: new AgentRunPool({ maxConcurrency: 2 }),
+    });
+    const run = runtime.run();
+    await started;
+    controller.abort();
+    await expect(run).rejects.toBeInstanceOf(WorkflowRunCancelledError);
+  });
+
+  it('aborts an in-flight host RPC when a Worker-side host callback fails', async () => {
+    let rpcSignal: AbortSignal | undefined;
+    let rpcSettled = false;
+    const runtime = new WorkflowRuntime({
+      source: `
+export const meta = { name: 'host-callback-failure', description: 'x' };
+
+export async function main() {
+  const pending = agent('wait');
+  phase('boom');
+  return await pending;
+}
+`,
+      args: undefined,
+      signal: undefined,
+      tokenBudgetTotal: 1_000,
+      onPhaseChanged: () => {
+        throw new Error('phase callback failed');
+      },
+      agentSpawn: async (_prompt, _opts, signal) => {
+        rpcSignal = signal;
+        return await new Promise<WorkflowAgentSpawnResult>((_resolve, reject) => {
+          signal?.addEventListener(
+            'abort',
+            () => {
+              rpcSettled = true;
+              reject(signal.reason);
+            },
+            { once: true },
+          );
+        });
+      },
+      pool: new AgentRunPool({ maxConcurrency: 2 }),
+    });
+
+    await expect(runtime.run()).rejects.toThrow('phase callback failed');
+    expect(rpcSignal?.aborted).toBe(true);
+    expect(rpcSettled).toBe(true);
   });
 
   it('hard-stops new agent() calls once the token budget is exhausted', async () => {

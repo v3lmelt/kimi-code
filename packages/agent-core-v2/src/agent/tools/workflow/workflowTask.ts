@@ -100,6 +100,7 @@ export interface WorkflowTaskOptions {
   readonly name: string;
   readonly description: string;
   readonly phases?: readonly WorkflowPhaseMeta[];
+  readonly phaseTitles?: ReadonlySet<string>;
   readonly args?: unknown;
   readonly meta: WorkflowScriptMeta;
   readonly tokenBudgetTotal: number;
@@ -138,6 +139,7 @@ export class WorkflowTask implements AgentTask {
   private readonly script: string;
   private readonly name: string;
   private readonly phases: readonly WorkflowPhaseMeta[] | undefined;
+  private readonly phaseTitles: ReadonlySet<string> | undefined;
   private readonly args: unknown;
   private readonly meta: WorkflowScriptMeta;
   private readonly tokenBudgetTotal: number;
@@ -158,6 +160,7 @@ export class WorkflowTask implements AgentTask {
     this.name = options.name;
     this.description = options.description;
     this.phases = options.phases;
+    this.phaseTitles = options.phaseTitles ?? new Set(options.meta.phases?.map((phase) => phase.title) ?? []);
     this.args = options.args;
     this.meta = options.meta;
     this.tokenBudgetTotal = options.tokenBudgetTotal;
@@ -208,9 +211,13 @@ export class WorkflowTask implements AgentTask {
         tokenBudgetTotal: this.tokenBudgetTotal,
         budget: this.budget,
         onSubagentUsage: this.onSubagentUsage,
-        agentSpawn: (prompt, opts) => this.agentSpawn(prompt, opts, controller.signal, resume),
+        agentSpawn: (prompt, opts, runtimeSignal) =>
+          this.agentSpawn(prompt, opts, runtimeSignal ?? controller.signal, resume),
         pool,
         onPhaseChanged: (title) => {
+          if (this.phaseTitles?.has(title) !== true) {
+            throw new Error(`Workflow phase "${title}" is not declared in meta.phases.`);
+          }
           this.journal.writePhaseChanged(title, isoNow());
           this.wire.dispatch(workflowPhaseChanged({ runId: this.runId, phase: title }));
         },
@@ -304,10 +311,12 @@ export class WorkflowTask implements AgentTask {
     signal: AbortSignal,
     resume: WorkflowResumeLedger | undefined,
   ): Promise<WorkflowAgentSpawnResult> {
-    const cacheKey = workflowAgentCacheKey(prompt, opts);
+    const effectiveOpts = this.effectiveAgentOpts(opts);
+    this.assertAgentOpts(effectiveOpts);
+    const cacheKey = workflowAgentCacheKey(prompt, effectiveOpts);
     const prior = resume?.completedByCacheKey.get(cacheKey);
     if (prior !== undefined) {
-      return this.replayResumedAgent(prior, cacheKey, opts);
+      return this.replayResumedAgent(prior, cacheKey, effectiveOpts);
     }
 
     const startedAt = Date.now();
@@ -316,13 +325,13 @@ export class WorkflowTask implements AgentTask {
       const result = await spawnWorkflowAgent(
         this.spawnDeps,
         prompt,
-        opts,
+        effectiveOpts,
         signal,
         this.parentToolCallId,
         {
           onSpawned: (agentId) => {
             spawnedAgentId = agentId;
-            this.recordAgentSpawn(agentId, cacheKey, opts);
+            this.recordAgentSpawn(agentId, cacheKey, effectiveOpts);
           },
         },
       );
@@ -336,10 +345,12 @@ export class WorkflowTask implements AgentTask {
         agentId: result.agentId,
         output: result.output,
         durationMs,
+        ...(result.usage === undefined ? {} : { usage: result.usage }),
         ...(result.error === undefined ? {} : { error: result.error }),
       };
     } catch (error) {
       const message = errorMessage(error);
+      const usage = errorTokenUsage(error);
       this.log.warn('workflow subagent spawn failed', { runId: this.runId, error });
       const durationMs = Date.now() - startedAt;
       if (spawnedAgentId !== undefined) {
@@ -349,8 +360,16 @@ export class WorkflowTask implements AgentTask {
           { ok: false, agentId: spawnedAgentId, output: null, error: message, durationMs },
           cacheKey,
           durationMs,
+          usage === undefined ? undefined : { tokens: grandTotal(usage) },
         );
-        return { ok: false, agentId: spawnedAgentId, output: null, error: message, durationMs };
+        return {
+          ok: false,
+          agentId: spawnedAgentId,
+          output: null,
+          error: message,
+          durationMs,
+          ...(usage === undefined ? {} : { usage }),
+        };
       }
       return {
         ok: false,
@@ -358,7 +377,23 @@ export class WorkflowTask implements AgentTask {
         output: null,
         error: message,
         durationMs,
+        ...(usage === undefined ? {} : { usage }),
       };
+    }
+  }
+
+  private effectiveAgentOpts(opts: WorkflowAgentOpts | undefined): WorkflowAgentOpts | undefined {
+    if (this.meta.model === undefined || opts?.model !== undefined) return opts;
+    return { ...(opts ?? {}), model: this.meta.model };
+  }
+
+  private assertAgentOpts(opts: WorkflowAgentOpts | undefined): void {
+    if (opts?.isolation === 'worktree') {
+      throw new Error('Workflow agent isolation "worktree" is not available in this runtime.');
+    }
+    if (opts?.phase === undefined) return;
+    if (this.phaseTitles?.has(opts.phase) !== true) {
+      throw new Error(`Workflow agent phase "${opts.phase}" is not declared in meta.phases.`);
     }
   }
 
@@ -518,6 +553,27 @@ function errorMessage(error: unknown): string | undefined {
   if (error === undefined || error === null) return undefined;
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function errorTokenUsage(error: unknown): TokenUsage | undefined {
+  if (typeof error !== 'object' || error === null) return undefined;
+  const usage = (error as { readonly usage?: unknown }).usage;
+  if (typeof usage !== 'object' || usage === null) return undefined;
+  const value = usage as Partial<TokenUsage>;
+  if (
+    typeof value.inputOther !== 'number' ||
+    typeof value.output !== 'number' ||
+    typeof value.inputCacheRead !== 'number' ||
+    typeof value.inputCacheCreation !== 'number'
+  ) {
+    return undefined;
+  }
+  return {
+    inputOther: value.inputOther,
+    output: value.output,
+    inputCacheRead: value.inputCacheRead,
+    inputCacheCreation: value.inputCacheCreation,
+  };
 }
 
 function isoNow(): string {

@@ -16,7 +16,9 @@
  * Unlike `SessionSwarmService` the host spawns exactly one subagent per call
  * (the workflow fan-out scheduler, `AgentRunPool`, already owns concurrency)
  * and does not use a `SessionSwarmTask` batch — the schema passthrough is a
- * direct `RunAgentOptions` field that the swarm task shape does not carry.
+ * direct `RunAgentOptions` field that the swarm task shape does not carry. A
+ * validated structured result is returned as its original value while plain
+ * runs retain the text summary handoff.
  */
 
 import { Error2, ErrorCodes } from '#/errors';
@@ -100,6 +102,13 @@ export async function spawnWorkflowAgent(
   hooks?: WorkflowSpawnHooks,
 ): Promise<WorkflowSpawnOutcome> {
   signal.throwIfAborted();
+  if (opts?.isolation === 'worktree') {
+    throw new Error2(
+      ErrorCodes.VALIDATION_FAILED,
+      'Workflow agent isolation "worktree" is not available in this runtime.',
+      { details: { field: 'isolation', value: opts.isolation } },
+    );
+  }
   const caller = deps.lifecycle.get(deps.callerAgentId);
   if (caller === undefined) {
     throw new Error2(ErrorCodes.AGENT_NOT_FOUND, `Caller agent "${deps.callerAgentId}" does not exist`, {
@@ -135,7 +144,7 @@ export async function spawnWorkflowAgent(
       binding: {
         profile: profile.name,
         model: binding.model,
-        thinking: binding.thinking,
+        thinking: opts?.effort ?? binding.thinking,
       },
       labels: subagentLabels(deps.callerAgentId),
     });
@@ -191,7 +200,7 @@ export async function spawnWorkflowAgent(
   return {
     ok: true,
     agentId: child.id,
-    output: completion.summary,
+    output: completion.output === undefined ? completion.summary : completion.output,
     durationMs: 0,
     model: subagentDisplayModel(deps.config, binding.model),
     ...(completion.usage === undefined ? {} : { usage: completion.usage }),

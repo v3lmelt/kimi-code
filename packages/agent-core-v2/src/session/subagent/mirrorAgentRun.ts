@@ -133,7 +133,7 @@ export async function mirrorAgentRun(
   requester: IAgentScopeHandle,
   run: AgentRunHandle,
   options: MirrorAgentRunOptions,
-): Promise<{ summary: string; usage?: TokenUsage }> {
+): Promise<{ summary: string; output?: unknown; usage?: TokenUsage }> {
   const eventBus = requester.accessor.get(IEventBus);
   const subagents = requester.accessor.get(ISessionSubagentService);
   const agentLifecycle = requester.accessor.get(IAgentLifecycleService);

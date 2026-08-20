@@ -21,7 +21,8 @@
  * functions authored by a workflow script that call `agent()` to spawn real
  * subagents), not subagent spawns themselves. Concurrency is clamped to
  * `min(16, max(2, cores - 2))` and the run's `AbortSignal` threads through
- * every batch.
+ * every batch. The pool exposes cloneable scheduler limits for the isolated
+ * Worker and can abort all batches owned by a run.
  */
 
 import os from 'node:os';
@@ -66,6 +67,11 @@ export interface AgentRunPoolOptions {
   readonly maxItemsPerFanOut?: number;
 }
 
+export interface AgentRunPoolRuntimeConfig {
+  readonly maxConcurrency: number;
+  readonly maxItemsPerFanOut: number;
+}
+
 /** Thrown when a `parallel()` / `pipeline()` call exceeds the item cap. */
 export class WorkflowItemCapExceededError extends Error {
   constructor(readonly cap: number) {
@@ -88,18 +94,45 @@ export interface WorkflowPoolTaskData {
  * subagents, and the pool only decides *when* each closure runs.
  */
 export class AgentRunPool {
-  private readonly signal: AbortSignal | undefined;
+  private readonly controller = new AbortController();
+  private readonly signal: AbortSignal;
   private readonly defaultConcurrency: number;
   private readonly maxItems: number;
   private batchSequence = 0;
+  private readonly activeBatches = new Set<Promise<unknown>>();
+  private readonly activeAttempts = new Set<Promise<unknown>>();
+  private unlinkExternalAbort: (() => void) | undefined;
 
   constructor(options: AgentRunPoolOptions = {}) {
-    this.signal = options.signal;
+    this.signal = this.controller.signal;
+    if (options.signal !== undefined) {
+      const onAbort = (): void => this.abort(options.signal?.reason);
+      options.signal.addEventListener('abort', onAbort, { once: true });
+      this.unlinkExternalAbort = () => options.signal?.removeEventListener('abort', onAbort);
+      if (options.signal.aborted) this.abort(options.signal.reason);
+    }
     this.defaultConcurrency =
       options.maxConcurrency === undefined
         ? WORKFLOW_DEFAULT_MAX_CONCURRENCY
         : resolveMaxConcurrency(options.maxConcurrency);
     this.maxItems = options.maxItemsPerFanOut ?? WORKFLOW_MAX_ITEMS_PER_FAN_OUT;
+  }
+
+  runtimeConfig(): AgentRunPoolRuntimeConfig {
+    return { maxConcurrency: this.defaultConcurrency, maxItemsPerFanOut: this.maxItems };
+  }
+
+  abort(reason?: unknown): void {
+    if (this.controller.signal.aborted) return;
+    this.unlinkExternalAbort?.();
+    this.unlinkExternalAbort = undefined;
+    this.controller.abort(reason);
+  }
+
+  async waitForIdle(): Promise<void> {
+    while (this.activeBatches.size > 0 || this.activeAttempts.size > 0) {
+      await Promise.allSettled([...this.activeBatches, ...this.activeAttempts]);
+    }
   }
 
   /**
@@ -188,7 +221,14 @@ export class AgentRunPool {
         ? this.defaultConcurrency
         : resolveMaxConcurrency(opts.maxConcurrency);
     const batch = new AgentRunBatch(launcher, tasks, { maxConcurrency });
-    const results = await batch.run();
+    const running = batch.run();
+    this.activeBatches.add(running);
+    let results: Awaited<typeof running>;
+    try {
+      results = await running;
+    } finally {
+      this.activeBatches.delete(running);
+    }
 
     return results.map((result, index) => {
       if (result.status === 'completed') {
@@ -216,6 +256,7 @@ export class AgentRunPool {
       try {
         prev = await stage(prev, item, index);
       } catch {
+        signal?.throwIfAborted();
         return null;
       }
     }
@@ -240,7 +281,11 @@ export class AgentRunPool {
       values[index] = value;
       return { result: 'ok' };
     })();
-    return { agentId, profileName: 'workflow', completion };
+    const trackedCompletion = completion.finally(() => {
+      this.activeAttempts.delete(trackedCompletion);
+    });
+    this.activeAttempts.add(trackedCompletion);
+    return { agentId, profileName: 'workflow', completion: trackedCompletion };
   }
 
   private assertItemCap(count: number): void {

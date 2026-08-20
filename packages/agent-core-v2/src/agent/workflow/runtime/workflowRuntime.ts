@@ -1,66 +1,41 @@
 /**
- * `workflow.runtime` — the Workflow runtime executor.
+ * `workflow.runtime` domain — the isolated Workflow host executor.
  *
- * Executes a compiled workflow script inside a `node:vm` sandbox, fanning out
- * real subagent work through the host-provided spawn callback and the
- * `AgentRunPool`. The sandbox is deliberately sealed down:
- *
- * - the script is compiled as `vm.Script` (filename `workflow.js`) — no module
- *   loader, no `require`, no `import`;
- * - every DSL global (`agent` / `parallel` / `pipeline` / `phase` / `log` /
- *   `args` / `budget` / `workflow`) is installed non-enumerably via
- *   `Object.defineProperty` so `for...in` over the sandbox stays clean;
- * - `codeGeneration` is disabled on the context (`strings: false`,
- *   `wasm: false`), so `eval` / `new Function` / WebAssembly are unavailable;
- * - the top level of the script runs inside an `async` IIFE, so the script's
- *   entry point (`export async function main(...)`) is awaited and its return
- *   value resolves the run.
- *
- * The runtime enforces the workflow's hard budgets: a total agent counter
- * (default cap 1000, throw beyond), a one-level `workflow()` nesting guard
- * (a child `workflow()` call throws), and a `budget` object whose
- * `spent()` / `remaining()` are wired to real token accounting (tokens are
- * accumulated from every subagent completion reported through the spawn
- * callback). The per-`parallel()`/`pipeline()` item cap is enforced by the
- * `AgentRunPool`.
+ * Compiles a workflow on the host, then runs it in a fresh Worker containing
+ * its own `node:vm` context. The Worker receives only structured-cloneable
+ * data. Host capabilities are proxy call handles backed by structured RPC, so
+ * no host realm function or process object is placed in the sandbox. The host
+ * watchdog terminates the Worker when its heartbeat stops, covering a sync
+ * loop entered after an `await`; cancellation uses the same hard termination.
  */
 
-import vm from 'node:vm';
+import fs from 'node:fs';
+import { Worker } from 'node:worker_threads';
 import type { Program } from 'acorn';
 
 import { grandTotal, type TokenUsage } from '#/kosong/contract/usage';
+import { linkAbortSignal } from '#/_base/utils/abort';
 
 import { compileWorkflowScript } from '../compile/index';
-import type {
-  AgentFn,
-  LogFn,
-  ParallelFn,
-  PhaseFn,
-  PipelineFn,
-  WorkflowAgentOpts,
-  WorkflowAgentResult,
-  WorkflowBudget,
-  WorkflowFn,
-  WorkflowPipelineOpts,
-  WorkflowSandboxGlobals,
-  WorkflowScriptMeta,
-  WorkflowStageFn,
-} from '../types';
-import { WorkflowCompileError } from '../types';
+import type { WorkflowAgentOpts, WorkflowBudget, WorkflowSandboxGlobals, WorkflowScriptMeta } from '../types';
 
-import { AgentRunPool } from './agentPool';
 import {
-  WORKFLOW_DEFAULT_TIMEOUT_MS,
-  WORKFLOW_SANDBOX_PRELUDE,
-} from './sandboxHardening';
+  AgentRunPool,
+  WorkflowItemCapExceededError,
+} from './agentPool';
+import { WORKFLOW_DEFAULT_TIMEOUT_MS, WORKFLOW_SANDBOX_PRELUDE } from './sandboxHardening';
+import {
+  WORKFLOW_WORKER_PROTOCOL_VERSION,
+  type WorkflowWorkerAgentResult,
+  type WorkflowWorkerControlMessage,
+  type WorkflowWorkerData,
+  type WorkflowWorkerErrorPayload,
+  type WorkflowWorkerMessage,
+} from './workflowWorkerProtocol';
 
-/** Filename the sandbox sees in stack traces / error messages. */
 export const WORKFLOW_SANDBOX_FILENAME = 'workflow.js';
-
-/** Default ceiling on the total number of agents one run may spawn. */
 export const WORKFLOW_DEFAULT_AGENT_CAP = 1000;
 
-/** Runtime error base for workflow execution failures. */
 export class WorkflowRunError extends Error {
   constructor(message: string) {
     super(message);
@@ -68,17 +43,13 @@ export class WorkflowRunError extends Error {
   }
 }
 
-/** Thrown when a run exceeds the total agent budget ceiling. */
 export class WorkflowAgentCapExceededError extends WorkflowRunError {
   constructor(readonly cap: number) {
-    super(
-      `Workflow agent budget ceiling exceeded: no more than ${String(cap)} agents may be spawned per workflow run.`,
-    );
+    super(`Workflow agent budget ceiling exceeded: no more than ${String(cap)} agents may be spawned per workflow run.`);
     this.name = 'WorkflowAgentCapExceededError';
   }
 }
 
-/** Thrown when a nested `workflow()` body calls `workflow()` again. */
 export class WorkflowNestingExceededError extends WorkflowRunError {
   constructor() {
     super('workflow() may only be nested one level deep.');
@@ -86,18 +57,8 @@ export class WorkflowNestingExceededError extends WorkflowRunError {
   }
 }
 
-/**
- * Thrown by `agent()` once the run's token budget is exhausted. In-flight
- * agents still complete and their results are preserved; only *new* spawns
- * are refused. A run only gets this hard stop when it has a real token target
- * (`budget.total > 0`) — with no target, the budget global is advisory and
- * the script's own `budget.remaining()` checks are the guardrail.
- */
 export class WorkflowBudgetExceededError extends WorkflowRunError {
-  constructor(
-    readonly spent: number,
-    readonly total: number,
-  ) {
+  constructor(readonly spent: number, readonly total: number) {
     super(
       `Workflow token budget exceeded (${spent.toLocaleString()} / ${total.toLocaleString()} tokens). ` +
         `Stopping further agent() calls. In-flight agents will complete; their results are preserved.`,
@@ -106,11 +67,20 @@ export class WorkflowBudgetExceededError extends WorkflowRunError {
   }
 }
 
-/**
- * Host-facing result of one `agent()` spawn. Carries the `WorkflowAgentResult`
- * the sandbox sees plus the subagent's `TokenUsage` so the runtime can feed
- * real token accounting into the `budget` global.
- */
+export class WorkflowRunCancelledError extends WorkflowRunError {
+  constructor() {
+    super('Workflow run was cancelled.');
+    this.name = 'WorkflowRunCancelledError';
+  }
+}
+
+export class WorkflowTimeoutError extends WorkflowRunError {
+  constructor(readonly timeoutMs: number) {
+    super(`Workflow execution timed out after ${String(timeoutMs)}ms.`);
+    this.name = 'WorkflowTimeoutError';
+  }
+}
+
 export interface WorkflowAgentSpawnResult {
   readonly ok: boolean;
   readonly agentId: string;
@@ -120,79 +90,40 @@ export interface WorkflowAgentSpawnResult {
   readonly usage?: TokenUsage;
 }
 
-/** Options for constructing a `WorkflowRuntime`. */
 export interface WorkflowRuntimeOptions {
-  /** The workflow script source (compiled + validated at `run()`). */
   readonly source: string;
-  /** Structured value exposed to the script as the `args` global. */
   readonly args?: unknown;
-  /** Run-level abort signal threaded through every subagent spawn. */
   readonly signal?: AbortSignal;
-  /** Token budget ceiling the `budget` global reports as `total`. */
   readonly tokenBudgetTotal: number;
-  /**
-   * Optional live budget source (REAL main-loop accounting). When provided it
-   * overrides the default `budget` global: `total` and `spent()` come from the
-   * host's `WorkflowBudget` (a `+500k`-style target and the agent's actual
-   * consumption) instead of the static `tokenBudgetTotal` + subagent-only
-   * counter.
-   */
   readonly budget?: WorkflowBudget;
-  /** Host spawn callback — creates/drives one real subagent. */
   readonly agentSpawn: (
     prompt: string,
     opts: WorkflowAgentOpts | undefined,
+    signal?: AbortSignal,
   ) => Promise<WorkflowAgentSpawnResult>;
-  /** Fan-out scheduler behind `parallel()` / `pipeline()`. */
   readonly pool: AgentRunPool;
-  /** Emitted on every `phase(title)` call (e.g. `workflow.phase_changed`). */
   readonly onPhaseChanged?: (title: string) => void;
-  /** Emitted on every `log(...)` call with the stringified parts. */
   readonly onLog?: (parts: readonly unknown[]) => void;
-  /**
-   * Called with each subagent's `TokenUsage` so the host budget accounting can
-   * fold subagent spend into its own `spent()` (the budget the script sees).
-   */
   readonly onSubagentUsage?: (usage: TokenUsage) => void;
-  /** Total agent budget ceiling; defaults to 1000. */
   readonly agentCap?: number;
-  /**
-   * Wall-clock bound (ms) for one `await`-free slice of script execution
-   * (each synchronous stretch between awaits); defaults to 30s. Guards
-   * against a script that pins the event loop (`while (true) {}`) without
-   * bounding how long the workflow may await subagents overall.
-   */
   readonly timeoutMs?: number;
 }
 
-/** The settled result of a workflow run. */
 export interface WorkflowRunOutput {
-  /** The value `main(...)` returned. */
   readonly result: unknown;
-  /** The validated `meta` extracted from the script preamble. */
   readonly meta: WorkflowScriptMeta;
-  /** How many agents the run spawned (cap-counted attempts). */
   readonly agentsSpawned: number;
-  /** Tokens consumed by subagents, as reported through the spawn callback. */
   readonly tokensSpent: number;
 }
 
-/**
- * One-shot executor for a workflow script. Each instance is bound to the
- * source, spawn host and pool it was constructed with; `run()` creates a fresh
- * sandbox context, executes the script, awaits `main(...)`, and resolves with
- * the script's return value. `run()` may be called at most once per instance —
- * the caps and token counters are per-run state.
- */
 export class WorkflowRuntime {
   private spentTokens = 0;
   private agentsSpawned = 0;
-  private nestingDepth = 0;
   private readonly source: string;
   private readonly args: unknown;
   private readonly signal: AbortSignal | undefined;
   private readonly tokenBudgetTotal: number;
-  private readonly externalBudget: WorkflowBudget | undefined;
+  private readonly externalBudget: WorkflowRuntimeOptions['budget'];
   private readonly agentSpawn: WorkflowRuntimeOptions['agentSpawn'];
   private readonly pool: AgentRunPool;
   private readonly onPhaseChanged?: (title: string) => void;
@@ -213,159 +144,292 @@ export class WorkflowRuntime {
     this.onLog = options.onLog;
     this.onSubagentUsage = options.onSubagentUsage;
     this.agentCap = options.agentCap ?? WORKFLOW_DEFAULT_AGENT_CAP;
-    this.timeoutMs = options.timeoutMs ?? WORKFLOW_DEFAULT_TIMEOUT_MS;
+    this.timeoutMs = Math.max(1, options.timeoutMs ?? WORKFLOW_DEFAULT_TIMEOUT_MS);
   }
 
-  /**
-   * Compile, sandbox and run the script. Compile failures throw
-   * `WorkflowCompileError`; sandbox/DSL violations throw the documented
-   * runtime errors; the script's own exceptions propagate as-is.
-   */
   async run(): Promise<WorkflowRunOutput> {
+    if (this.signal?.aborted) throw new WorkflowRunCancelledError();
     const compiled = compileWorkflowScript(this.source);
     if ('error' in compiled) throw compiled.error;
-    const compiledSource = compiled.source;
-
-    const wrapped = buildWrappedSource(compiledSource, compiled.ast);
-    const context = this.createContext(compiled.meta);
-    const script = new vm.Script(wrapped, { filename: WORKFLOW_SANDBOX_FILENAME });
-
-    const result = await script.runInContext(context, {
-      timeout: this.timeoutMs,
-    });
-
-    return {
-      result,
-      meta: compiled.meta,
-      agentsSpawned: this.agentsSpawned,
-      tokensSpent: this.spentTokens,
+    const wrappedSource = buildWrappedSource(compiled.source, compiled.ast);
+    let args: unknown;
+    try {
+      args = structuredClone(this.args);
+    } catch (error) {
+      throw new WorkflowRunError(
+        `Workflow args must be structured-cloneable: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+    const budgetTotal = this.externalBudget?.total ?? this.tokenBudgetTotal;
+    const initialBudgetSpent = this.externalBudget?.spent() ?? this.spentTokens;
+    const poolConfig = this.pool.runtimeConfig();
+    const workerData: WorkflowWorkerData = {
+      protocolVersion: WORKFLOW_WORKER_PROTOCOL_VERSION,
+      wrappedSource,
+      args,
+      sandboxPrelude: WORKFLOW_SANDBOX_PRELUDE,
+      tokenBudgetTotal: budgetTotal,
+      initialBudgetSpent,
+      agentCap: this.agentCap,
+      maxItemsPerFanOut: poolConfig.maxItemsPerFanOut,
+      maxConcurrency: poolConfig.maxConcurrency,
+      timeoutMs: this.timeoutMs,
     };
+    return this.runInWorker(workerData, compiled.meta);
   }
 
-  private createContext(meta: WorkflowScriptMeta): vm.Context {
-    const context: Record<string, unknown> = {};
-    installWorkflowGlobals(context, this.buildGlobals(meta));
-    const sandbox = vm.createContext(context, {
-      codeGeneration: { strings: false, wasm: false },
-    });
-    // Defense in depth behind the compile-time determinism check: break
-    // Date.now/Math.random/new Date() inside the sandbox so a static-analysis
-    // bypass fails loudly instead of silently breaking resume caching.
-    new vm.Script(WORKFLOW_SANDBOX_PRELUDE, { filename: 'workflow-prelude.js' }).runInContext(
-      sandbox,
-    );
-    return sandbox;
-  }
+  private runInWorker(data: WorkflowWorkerData, meta: WorkflowScriptMeta): Promise<WorkflowRunOutput> {
+    const entry = resolveWorkerEntry();
+    let worker: Worker;
+    try {
+      worker = new Worker(entry.url, {
+        workerData: data,
+        execArgv: entry.source
+          ? ['--experimental-transform-types', '--disable-warning=ExperimentalWarning']
+          : [],
+      });
+    } catch (error) {
+      throw new WorkflowRunError(
+        `Unable to start the workflow Worker: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
 
-  private buildGlobals(_meta: WorkflowScriptMeta): WorkflowSandboxGlobals {
-    const budget: WorkflowBudget =
-      this.externalBudget ?? {
-        total: this.tokenBudgetTotal,
-        spent: () => this.spentTokens,
-        remaining: () => Math.max(0, this.tokenBudgetTotal - this.spentTokens),
+    return new Promise<WorkflowRunOutput>((resolve, reject) => {
+      let settled = false;
+      let watchdog: ReturnType<typeof setTimeout> | null = null;
+      let ownerAbort: (() => void) | null = null;
+      const runController = new AbortController();
+      const unlinkRunAbort = this.signal === undefined ? undefined : linkAbortSignal(this.signal, runController);
+      const inFlightHostCalls = new Map<number, {
+        readonly controller: AbortController;
+        readonly unlink: () => void;
+      }>();
+      const inFlightHostHandlers = new Set<Promise<void>>();
+      const abortInFlight = (reason: unknown): void => {
+        if (!runController.signal.aborted) runController.abort(reason);
+        for (const call of inFlightHostCalls.values()) call.controller.abort(reason);
+        this.pool.abort(reason);
       };
-
-    const agent: AgentFn = async (prompt, opts) => {
-      this.signal?.throwIfAborted();
-      if (this.agentsSpawned >= this.agentCap) {
-        throw new WorkflowAgentCapExceededError(this.agentCap);
-      }
-      const budgetTotal = budget.total;
-      if (budgetTotal > 0) {
-        const spent = budget.spent();
-        if (spent >= budgetTotal) {
-          throw new WorkflowBudgetExceededError(spent, budgetTotal);
+      const waitForCleanup = async (reason: unknown): Promise<void> => {
+        abortInFlight(reason);
+        while (inFlightHostHandlers.size > 0) {
+          await Promise.allSettled([...inFlightHostHandlers]);
         }
-      }
-      this.agentsSpawned += 1;
-      const outcome = await this.agentSpawn(prompt, opts);
-      if (outcome.usage !== undefined) {
-        this.spentTokens += grandTotal(outcome.usage);
-        this.onSubagentUsage?.(outcome.usage);
-      }
-      const result: WorkflowAgentResult = {
-        ok: outcome.ok,
-        agentId: outcome.agentId,
-        output: outcome.output,
-        durationMs: outcome.durationMs,
-        ...(outcome.error !== undefined ? { error: outcome.error } : {}),
+        await this.pool.waitForIdle();
       };
-      return result;
-    };
-
-    const parallel: ParallelFn = async (items, fn, opts) => this.pool.parallel(items, fn, opts);
-
-    const pipeline: PipelineFn = async <O>(
-      stages: readonly WorkflowStageFn<unknown, unknown, O>[],
-      opts?: WorkflowPipelineOpts,
-    ): Promise<O | null> => (await this.pool.pipeline<O>(stages, opts)) as O | null;
-
-    const phase: PhaseFn = (title) => {
-      this.onPhaseChanged?.(title);
-    };
-
-    const log: LogFn = (...parts) => {
-      this.onLog?.(parts);
-    };
-
-    const workflow: WorkflowFn = async (spec) => {
-      if (this.nestingDepth >= 1) {
-        throw new WorkflowNestingExceededError();
+      const resetWatchdog = (): void => {
+        if (watchdog !== null) clearTimeout(watchdog);
+        watchdog = setTimeout(() => {
+          void finishError(new WorkflowTimeoutError(this.timeoutMs));
+        }, this.timeoutMs + Math.max(10, Math.min(100, Math.floor(this.timeoutMs / 4))));
+      };
+      const cleanup = (): void => {
+        if (watchdog !== null) clearTimeout(watchdog);
+        watchdog = null;
+        if (ownerAbort !== null && this.signal !== undefined) this.signal.removeEventListener('abort', ownerAbort);
+        unlinkRunAbort?.();
+        worker.off('message', onMessage);
+        worker.off('error', onError);
+        worker.off('exit', onExit);
+      };
+      const finish = async (value: WorkflowRunOutput): Promise<void> => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        await waitForCleanup(new WorkflowRunCancelledError());
+        await worker.terminate().catch(() => undefined);
+        resolve(value);
+      };
+      const finishError = async (error: unknown): Promise<void> => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        await waitForCleanup(error);
+        await worker.terminate().catch(() => undefined);
+        reject(error);
+      };
+      const sendControl = (message: WorkflowWorkerControlMessage): void => {
+        if (settled) return;
+        try {
+          worker.postMessage(message);
+        } catch (error) {
+          void finishError(error);
+        }
+      };
+      const handleAgent = async (message: Extract<WorkflowWorkerMessage, { type: 'agent' }>): Promise<void> => {
+        if (settled) return;
+        const rpcController = new AbortController();
+        const unlinkRpcAbort = linkAbortSignal(runController.signal, rpcController);
+        inFlightHostCalls.set(message.id, { controller: rpcController, unlink: unlinkRpcAbort });
+        let hostCallReleased = false;
+        const releaseHostCall = (): void => {
+          if (hostCallReleased) return;
+          hostCallReleased = true;
+          inFlightHostCalls.delete(message.id);
+          unlinkRpcAbort();
+        };
+        try {
+          if (this.agentsSpawned >= this.agentCap) {
+            sendControl({ type: 'agentResult', id: message.id, ok: false, error: errorPayload(new WorkflowAgentCapExceededError(this.agentCap)) });
+            return;
+          }
+          const budgetTotal = this.externalBudget?.total ?? this.tokenBudgetTotal;
+          const spent = this.externalBudget?.spent() ?? this.spentTokens;
+          if (budgetTotal > 0 && spent >= budgetTotal) {
+            sendControl({ type: 'agentResult', id: message.id, ok: false, error: errorPayload(new WorkflowBudgetExceededError(spent, budgetTotal)) });
+            return;
+          }
+          this.agentsSpawned += 1;
+          const outcome = await this.agentSpawn(message.prompt, message.opts, rpcController.signal);
+          releaseHostCall();
+          if (settled || rpcController.signal.aborted) return;
+          if (outcome.usage !== undefined) {
+            this.spentTokens += grandTotal(outcome.usage);
+            this.onSubagentUsage?.(outcome.usage);
+          }
+          const result: WorkflowWorkerAgentResult = {
+            ok: outcome.ok,
+            agentId: outcome.agentId,
+            output: outcome.output,
+            durationMs: outcome.durationMs,
+            ...(outcome.error === undefined ? {} : { error: outcome.error }),
+            ...(outcome.usage === undefined ? {} : { usage: outcome.usage }),
+          };
+          const budgetSpent = this.externalBudget?.spent() ?? this.spentTokens;
+          let cloned: WorkflowWorkerAgentResult;
+          try {
+            cloned = structuredClone(result);
+          } catch {
+            cloned = { ok: false, agentId: outcome.agentId, output: null, error: 'Workflow agent result is not structured-cloneable.', durationMs: outcome.durationMs };
+          }
+          sendControl({ type: 'agentResult', id: message.id, ok: true, result: cloned, budgetSpent });
+        } catch (error) {
+          releaseHostCall();
+          if (settled) return;
+          sendControl({ type: 'agentResult', id: message.id, ok: false, error: errorPayload(error) });
+        } finally {
+          releaseHostCall();
+        }
+      };
+      const trackHostHandler = (handler: Promise<void>): void => {
+        inFlightHostHandlers.add(handler);
+        void handler.then(
+          () => inFlightHostHandlers.delete(handler),
+          () => inFlightHostHandlers.delete(handler),
+        );
+      };
+      const onMessage = (message: WorkflowWorkerMessage): void => {
+        if (message.type === 'ready') {
+          resetWatchdog();
+          return;
+        }
+        if (message.type === 'heartbeat') {
+          resetWatchdog();
+          if (this.externalBudget !== undefined) sendControl({ type: 'budgetUpdate', spent: this.externalBudget.spent() });
+          return;
+        }
+        if (message.type === 'agent') {
+          trackHostHandler(handleAgent(message));
+          return;
+        }
+        if (message.type === 'phase') {
+          try {
+            this.onPhaseChanged?.(typeof message.title === 'string' ? message.title : String(message.title));
+          } catch (error) {
+            void finishError(error);
+          }
+          return;
+        }
+        if (message.type === 'log') {
+          try {
+            this.onLog?.(message.parts);
+          } catch (error) {
+            void finishError(error);
+          }
+          return;
+        }
+        if (message.type === 'done') {
+          void finish({ result: message.result, meta, agentsSpawned: this.agentsSpawned, tokensSpent: this.spentTokens });
+          return;
+        }
+        if (message.type === 'error') void finishError(errorFromPayload(message.error));
+      };
+      function onError(error: Error): void {
+        void finishError(error);
       }
-      const body = typeof spec === 'function' ? spec : spec.fn;
-      this.nestingDepth += 1;
-      try {
-        return await body();
-      } finally {
-        this.nestingDepth -= 1;
+      function onExit(code: number): void {
+        if (!settled) void finishError(new WorkflowRunError(`Workflow Worker exited before completion (code ${String(code)}).`));
       }
-    };
-
-    return { agent, parallel, pipeline, phase, log, args: this.args, budget, workflow };
+      worker.on('message', onMessage);
+      worker.on('error', onError);
+      worker.on('exit', onExit);
+      ownerAbort = () => {
+        if (settled) return;
+        abortInFlight(this.signal?.reason ?? new WorkflowRunCancelledError());
+        try {
+          worker.postMessage({ type: 'cancel' } satisfies WorkflowWorkerControlMessage);
+        } catch {
+        }
+        void finishError(new WorkflowRunCancelledError());
+      };
+      if (this.signal !== undefined) {
+        if (this.signal.aborted) ownerAbort();
+        else this.signal.addEventListener('abort', ownerAbort, { once: true });
+      }
+      resetWatchdog();
+    });
   }
 }
 
-/**
- * Build the source handed to `node:vm.Script`: strip the top-level `export`
- * keyword (the script is authored as an ES module but `vm.Script` runs in
- * script mode) and wrap it in an async IIFE that awaits the `main` entry point
- * with the `args` global.
- */
+function resolveWorkerEntry(): { readonly url: URL; readonly source: boolean } {
+  for (const pathname of ['./workflowWorker.mjs', './agent/workflow/runtime/workflowWorker.mjs']) {
+    const packaged = new URL(pathname, import.meta.url);
+    if (fs.existsSync(packaged)) return { url: packaged, source: false };
+  }
+  const source = new URL('./workflowWorker.ts', import.meta.url);
+  if (fs.existsSync(source)) return { url: source, source: true };
+  throw new WorkflowRunError('Workflow Worker entry is not available.');
+}
+
+function errorPayload(error: unknown): WorkflowWorkerErrorPayload {
+  const value = error as { name?: unknown; message?: unknown; stack?: unknown; cap?: unknown; spent?: unknown; total?: unknown };
+  return {
+    name: typeof value?.name === 'string' ? value.name : 'Error',
+    message: typeof value?.message === 'string' ? value.message : String(error),
+    ...(typeof value?.stack === 'string' ? { stack: value.stack } : {}),
+    ...(typeof value?.cap === 'number' ? { cap: value.cap } : {}),
+    ...(typeof value?.spent === 'number' ? { spent: value.spent } : {}),
+    ...(typeof value?.total === 'number' ? { total: value.total } : {}),
+  };
+}
+
+function errorFromPayload(payload: WorkflowWorkerErrorPayload): Error {
+  let error: Error;
+  if (payload.name === 'WorkflowAgentCapExceededError' && payload.cap !== undefined) error = new WorkflowAgentCapExceededError(payload.cap);
+  else if (payload.name === 'WorkflowBudgetExceededError' && payload.spent !== undefined && payload.total !== undefined) error = new WorkflowBudgetExceededError(payload.spent, payload.total);
+  else if (payload.name === 'WorkflowNestingExceededError') error = new WorkflowNestingExceededError();
+  else if (payload.name === 'WorkflowItemCapExceededError' && payload.cap !== undefined) error = new WorkflowItemCapExceededError(payload.cap);
+  else {
+    error = new WorkflowRunError(payload.message);
+    error.name = payload.name;
+  }
+  if (payload.stack !== undefined) error.stack = payload.stack;
+  return error;
+}
+
 export function buildWrappedSource(source: string, ast: Program): string {
   const stripped = stripExports(source, ast);
   return `(async () => {\n'use strict';\n${stripped}\nreturn await main(args);\n})()\n`;
 }
 
-/**
- * Install the DSL globals onto a sandbox context non-enumerably. Every global
- * is a non-enumerable, non-configurable own property so `for...in` /
- * `Object.keys` over the sandbox's global object stays clean while bare
- * identifiers (`agent`, `args`, …) still resolve.
- */
-export function installWorkflowGlobals(
-  context: Record<string, unknown>,
-  globals: WorkflowSandboxGlobals,
-): void {
+export function installWorkflowGlobals(context: Record<string, unknown>, globals: WorkflowSandboxGlobals): void {
   for (const name of Object.keys(globals)) {
-    Object.defineProperty(context, name, {
-      value: globals[name as keyof WorkflowSandboxGlobals],
-      enumerable: false,
-      configurable: false,
-      writable: true,
-    });
+    Object.defineProperty(context, name, { value: globals[name as keyof WorkflowSandboxGlobals], enumerable: false, configurable: false, writable: true });
   }
 }
 
-/**
- * Remove the `export ` keyword from every top-level export declaration so the
- * source becomes valid script-mode code. `export` is 6 characters; the single
- * separating space/tab is dropped too. Offsets come from the parsed AST, so
- * `export` inside strings/comments is never touched.
- */
 export function stripExports(source: string, ast: Program): string {
-  const exports = ast.body.filter(
-    (node) => node.type === 'ExportNamedDeclaration' || node.type === 'ExportDefaultDeclaration',
-  );
+  const exports = ast.body.filter((node) => node.type === 'ExportNamedDeclaration' || node.type === 'ExportDefaultDeclaration');
   let stripped = source;
   for (const node of exports.reverse() as readonly { readonly start: number }[]) {
     const start = node.start;

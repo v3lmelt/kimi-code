@@ -27,8 +27,8 @@ export interface RunAgentOptions {
   /**
    * When true (with `structuredSchema`), the target agent's turn is given a
    * single mandatory `StructuredOutput` tool and the run resolves to the
-   * validated structured value (falling back to the last text output when the
-   * model never produces a valid value).
+   * validated structured value. A run that cannot produce a valid value
+   * rejects with a typed structured-output validation error.
    */
   readonly requiresStructuredOutput?: boolean;
   /** JSON-schema object the structured result must satisfy. */
@@ -38,7 +38,13 @@ export interface RunAgentOptions {
 export interface AgentRunHandle {
   readonly agentId: string;
   readonly turn: Turn;
-  readonly completion: Promise<{ readonly summary: string; readonly usage?: TokenUsage }>;
+  readonly completion: Promise<{
+    /** Text summary retained for existing transcript, hook, and wire consumers. */
+    readonly summary: string;
+    /** Validated structured value, present only for `agent({ schema })` runs. */
+    readonly output?: unknown;
+    readonly usage?: TokenUsage;
+  }>;
 }
 
 export interface AgentTaskStartHookContext {
