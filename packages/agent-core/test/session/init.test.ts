@@ -48,7 +48,7 @@ describe('Session.init', () => {
       id: 'test-provider-scope',
       kaos: testKaos,
       homedir: await makeTempDir(),
-      rpc: createSessionRpc(),
+      rpc: createSessionRpc([]),
       providerManager,
       initializeMainAgent: false,
     });

@@ -14,11 +14,13 @@ function resolveRuntimeProvider(input: {
   readonly model?: string;
   readonly kimiRequestHeaders?: Record<string, string>;
   readonly promptCacheKey?: string;
+  readonly responsesWebSocket?: boolean;
 }): ReturnType<ProviderManager['resolveProviderConfig']> {
   const manager = new ProviderManager({
     config: input.config,
     kimiRequestHeaders: input.kimiRequestHeaders,
     promptCacheKey: input.promptCacheKey,
+    responsesWebSocket: input.responsesWebSocket,
   });
   const model = input.model ?? input.config.defaultModel;
   if (model === undefined) {
@@ -891,6 +893,7 @@ describe('resolveRuntimeProvider customHeaders propagation', () => {
   it('maps openai-codex to Responses Lite with session headers', () => {
     const resolved = resolveRuntimeProvider({
       promptCacheKey: 'session-test',
+      responsesWebSocket: true,
       config: {
         defaultModel: 'codex',
         providers: {
@@ -913,6 +916,7 @@ describe('resolveRuntimeProvider customHeaders propagation', () => {
     expect(resolved.provider).toMatchObject({
       type: 'openai_responses',
       codex: { responsesLite: true },
+      responsesWebSocket: true,
       defaultHeaders: {
         conversation_id: 'session-test',
         session_id: 'session-test',
