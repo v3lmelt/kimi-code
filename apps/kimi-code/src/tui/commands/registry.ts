@@ -205,6 +205,20 @@ export const BUILTIN_SLASH_COMMANDS = [
     availability: 'always',
   },
   {
+    name: 'runtime',
+    aliases: ['center'],
+    description: 'Open the unified Tasks, Agents, and Workflows runtime center',
+    priority: 90,
+    availability: 'always',
+  },
+  {
+    name: 'agents',
+    aliases: ['agent-tree'],
+    description: 'Browse the runtime agent tree',
+    priority: 85,
+    availability: 'always',
+  },
+  {
     name: 'model',
     aliases: [],
     description: 'Switch LLM model',

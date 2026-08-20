@@ -52,8 +52,18 @@ export const TENGU_WORKFLOW_COMPLETED = 'tengu_workflow_completed' as const;
  */
 export interface WorkflowRunProgressState {
   readonly runId: WorkflowRunId;
+  readonly taskId?: string;
+  readonly taskPath?: string;
+  readonly nodeId?: string;
   readonly status: WorkflowRunStatus;
   readonly phase?: string;
+  readonly model?: string;
+  readonly usageTokens?: number;
+  readonly durationMs?: number;
+  readonly cache?: string;
+  readonly replayed?: boolean;
+  readonly isolationLease?: string;
+  readonly worktreePath?: string;
   readonly spawnedAgents: number;
   readonly completedAgents: number;
   readonly startedAt: string;
@@ -106,12 +116,24 @@ export interface WorkflowStartedPayload {
   readonly runId: WorkflowRunId;
   readonly meta: WorkflowScriptMeta;
   readonly startedAt: string;
+  readonly taskId?: string;
+  readonly taskPath?: string;
+  readonly nodeId?: string;
+  readonly model?: string;
+  readonly isolationLease?: string;
+  readonly worktreePath?: string;
 }
 
 const workflowStartedSchema = z.object({
   runId: z.custom<WorkflowRunId>(),
   meta: z.custom<WorkflowScriptMeta>(),
   startedAt: z.string(),
+  taskId: z.string().optional(),
+  taskPath: z.string().optional(),
+  nodeId: z.string().optional(),
+  model: z.string().optional(),
+  isolationLease: z.string().optional(),
+  worktreePath: z.string().optional(),
 });
 
 /** Start a workflow run: seeds the ledger with a `running` entry. */
@@ -124,6 +146,12 @@ export const workflowStarted = WorkflowProgressModel.defineOp('workflow.started'
     next.set(p.runId, {
       runId: p.runId,
       status: 'running',
+      taskId: p.taskId,
+      taskPath: p.taskPath,
+      nodeId: p.nodeId,
+      model: p.model,
+      isolationLease: p.isolationLease,
+      worktreePath: p.worktreePath,
       spawnedAgents: 0,
       completedAgents: 0,
       startedAt: p.startedAt,
@@ -136,17 +164,27 @@ export const workflowStarted = WorkflowProgressModel.defineOp('workflow.started'
       runId: p.runId,
       meta: p.meta,
       startedAt: p.startedAt,
+      ...(p.taskId === undefined ? {} : { taskId: p.taskId }),
+      ...(p.taskPath === undefined ? {} : { taskPath: p.taskPath }),
+      ...(p.nodeId === undefined ? {} : { nodeId: p.nodeId }),
+      ...(p.model === undefined ? {} : { model: p.model }),
+      ...(p.isolationLease === undefined ? {} : { isolationLease: p.isolationLease }),
+      ...(p.worktreePath === undefined ? {} : { worktreePath: p.worktreePath }),
     }),
 });
 
 export interface WorkflowPhaseChangedPayload {
   readonly runId: WorkflowRunId;
   readonly phase: string;
+  readonly nodeId?: string;
+  readonly dependencies?: readonly string[];
 }
 
 const workflowPhaseChangedSchema = z.object({
   runId: z.custom<WorkflowRunId>(),
   phase: z.string(),
+  nodeId: z.string().optional(),
+  dependencies: z.array(z.string()).optional(),
 });
 
 /** Mark the run's active phase. Re-emitting the current phase is a no-op. */
@@ -163,7 +201,13 @@ export const workflowPhaseChanged = WorkflowProgressModel.defineOp(
       return next;
     },
     toEvent: (p) =>
-      progressBusEvent({ type: 'workflow.phase_changed', runId: p.runId, phase: p.phase }),
+      progressBusEvent({
+        type: 'workflow.phase_changed',
+        runId: p.runId,
+        phase: p.phase,
+        ...(p.nodeId === undefined ? {} : { nodeId: p.nodeId }),
+        ...(p.dependencies === undefined ? {} : { dependencies: p.dependencies }),
+      }),
   },
 );
 
@@ -172,6 +216,14 @@ export interface WorkflowAgentSpawnedPayload {
   readonly agentId: string;
   readonly label?: string;
   readonly phase?: string;
+  readonly taskId?: string;
+  readonly taskPath?: string;
+  readonly nodeId?: string;
+  readonly model?: string;
+  readonly isolationLease?: string;
+  readonly worktreePath?: string;
+  readonly cache?: string;
+  readonly replayed?: boolean;
 }
 
 const workflowAgentSpawnedSchema = z.object({
@@ -179,6 +231,14 @@ const workflowAgentSpawnedSchema = z.object({
   agentId: z.string(),
   label: z.string().optional(),
   phase: z.string().optional(),
+  taskId: z.string().optional(),
+  taskPath: z.string().optional(),
+  nodeId: z.string().optional(),
+  model: z.string().optional(),
+  isolationLease: z.string().optional(),
+  worktreePath: z.string().optional(),
+  cache: z.string().optional(),
+  replayed: z.boolean().optional(),
 });
 
 /** Record one subagent spawn; bumps the spawned counter for the run. */
@@ -199,8 +259,16 @@ export const workflowAgentSpawned = WorkflowProgressModel.defineOp(
         type: 'workflow.agent_spawned',
         runId: p.runId,
         agentId: p.agentId,
-        label: p.label,
-        phase: p.phase,
+        ...(p.label === undefined ? {} : { label: p.label }),
+        ...(p.phase === undefined ? {} : { phase: p.phase }),
+        ...(p.taskId === undefined ? {} : { taskId: p.taskId }),
+        ...(p.taskPath === undefined ? {} : { taskPath: p.taskPath }),
+        ...(p.nodeId === undefined ? {} : { nodeId: p.nodeId }),
+        ...(p.model === undefined ? {} : { model: p.model }),
+        ...(p.isolationLease === undefined ? {} : { isolationLease: p.isolationLease }),
+        ...(p.worktreePath === undefined ? {} : { worktreePath: p.worktreePath }),
+        ...(p.cache === undefined ? {} : { cache: p.cache }),
+        ...(p.replayed === undefined ? {} : { replayed: p.replayed }),
       }),
   },
 );
@@ -213,6 +281,13 @@ export interface WorkflowAgentCompletedPayload {
   readonly model?: string;
   readonly tokens?: number;
   readonly summary?: string;
+  readonly taskId?: string;
+  readonly taskPath?: string;
+  readonly nodeId?: string;
+  readonly cache?: string;
+  readonly replayed?: boolean;
+  readonly isolationLease?: string;
+  readonly worktreePath?: string;
 }
 
 const workflowAgentCompletedSchema = z.object({
@@ -223,6 +298,13 @@ const workflowAgentCompletedSchema = z.object({
   model: z.string().optional(),
   tokens: z.number().optional(),
   summary: z.string().optional(),
+  taskId: z.string().optional(),
+  taskPath: z.string().optional(),
+  nodeId: z.string().optional(),
+  cache: z.string().optional(),
+  replayed: z.boolean().optional(),
+  isolationLease: z.string().optional(),
+  worktreePath: z.string().optional(),
 });
 
 /** Record one subagent completion; bumps the completed counter for the run. */
@@ -248,6 +330,13 @@ export const workflowAgentCompleted = WorkflowProgressModel.defineOp(
         ...(p.model === undefined ? {} : { model: p.model }),
         ...(p.tokens === undefined ? {} : { tokens: p.tokens }),
         ...(p.summary === undefined ? {} : { summary: p.summary }),
+        ...(p.taskId === undefined ? {} : { taskId: p.taskId }),
+        ...(p.taskPath === undefined ? {} : { taskPath: p.taskPath }),
+        ...(p.nodeId === undefined ? {} : { nodeId: p.nodeId }),
+        ...(p.cache === undefined ? {} : { cache: p.cache }),
+        ...(p.replayed === undefined ? {} : { replayed: p.replayed }),
+        ...(p.isolationLease === undefined ? {} : { isolationLease: p.isolationLease }),
+        ...(p.worktreePath === undefined ? {} : { worktreePath: p.worktreePath }),
       }),
   },
 );
@@ -284,6 +373,13 @@ export interface WorkflowCompletedPayload {
   readonly agentsSpawned?: number;
   readonly tokensSpent?: number;
   readonly durationMs?: number;
+  readonly taskId?: string;
+  readonly taskPath?: string;
+  readonly nodeId?: string;
+  readonly cache?: string;
+  readonly replayed?: boolean;
+  readonly isolationLease?: string;
+  readonly worktreePath?: string;
 }
 
 const workflowCompletedSchema = z.object({
@@ -294,6 +390,13 @@ const workflowCompletedSchema = z.object({
   agentsSpawned: z.number().optional(),
   tokensSpent: z.number().optional(),
   durationMs: z.number().optional(),
+  taskId: z.string().optional(),
+  taskPath: z.string().optional(),
+  nodeId: z.string().optional(),
+  cache: z.string().optional(),
+  replayed: z.boolean().optional(),
+  isolationLease: z.string().optional(),
+  worktreePath: z.string().optional(),
 });
 
 /** Settle the run: `ok` → `completed`, otherwise `failed`. Terminal runs ignore later settles. */
@@ -307,6 +410,13 @@ export const workflowCompleted = WorkflowProgressModel.defineOp('workflow.comple
     next.set(p.runId, {
       ...current,
       status: p.ok ? 'completed' : 'failed',
+      taskId: p.taskId ?? current.taskId,
+      taskPath: p.taskPath ?? current.taskPath,
+      nodeId: p.nodeId ?? current.nodeId,
+      cache: p.cache ?? current.cache,
+      replayed: p.replayed ?? current.replayed,
+      isolationLease: p.isolationLease ?? current.isolationLease,
+      worktreePath: p.worktreePath ?? current.worktreePath,
       ...(p.result === undefined ? {} : { result: p.result }),
       ...(p.error === undefined ? {} : { error: p.error }),
     });
@@ -322,6 +432,13 @@ export const workflowCompleted = WorkflowProgressModel.defineOp('workflow.comple
       ...(p.agentsSpawned === undefined ? {} : { agentsSpawned: p.agentsSpawned }),
       ...(p.tokensSpent === undefined ? {} : { tokensSpent: p.tokensSpent }),
       ...(p.durationMs === undefined ? {} : { durationMs: p.durationMs }),
+      ...(p.taskId === undefined ? {} : { taskId: p.taskId }),
+      ...(p.taskPath === undefined ? {} : { taskPath: p.taskPath }),
+      ...(p.nodeId === undefined ? {} : { nodeId: p.nodeId }),
+      ...(p.cache === undefined ? {} : { cache: p.cache }),
+      ...(p.replayed === undefined ? {} : { replayed: p.replayed }),
+      ...(p.isolationLease === undefined ? {} : { isolationLease: p.isolationLease }),
+      ...(p.worktreePath === undefined ? {} : { worktreePath: p.worktreePath }),
     }),
 });
 

@@ -16,6 +16,10 @@
  */
 import type { Event } from '@moonshot-ai/agent-core';
 import type { DomainEvent } from '@moonshot-ai/agent-core-v2';
+import {
+  isWorkflowProgressEventEnvelope,
+  type WorkflowProgressEventEnvelope,
+} from '#/events';
 
 /**
  * DomainEvent types the v1 SDK event stream never carries:
@@ -65,9 +69,27 @@ export function translateDomainEvent(
   sessionId: string,
   agentId: string,
 ): Event | undefined {
+  // Workflow progress has an additive SDK channel. Returning it through the
+  // legacy mapper would make old `Event` subscribers receive a value outside
+  // their closed union and break exhaustive switches at runtime.
+  if (event.type === 'workflow.progress') return undefined;
   if (DROPPED_DOMAIN_EVENT_TYPES.has(event.type)) return undefined;
   const type = RENAMED_DOMAIN_EVENT_TYPES[event.type] ?? event.type;
   return { ...event, type, sessionId, agentId } as unknown as Event;
+}
+
+/**
+ * Translate a v2 workflow event without narrowing away additive fields. This
+ * helper is useful to callers that opt into the v2 event surface while the
+ * legacy mapper above continues returning `Event` for source compatibility.
+ */
+export function translateWorkflowProgressEvent(
+  event: WorkflowProgressEventEnvelope | DomainEvent,
+  sessionId: string,
+  agentId: string,
+): WorkflowProgressEventEnvelope | undefined {
+  const candidate = { ...event, sessionId, agentId } as unknown;
+  return isWorkflowProgressEventEnvelope(candidate) ? candidate : undefined;
 }
 
 /**

@@ -10,6 +10,7 @@
  *   - `runner`     — `ISessionProcessRunner`, spawns the shell process
  *   - `env`        — `IHostEnvironment`, host OS / shell probe (osKind / shellName / shellPath)
  *   - `ctx`        — `ISessionContext`, session cwd used to render the shell prompt
+ *   - `workspace`  — Agent workspace view used for lease cwd and command-boundary checks
  *   - `tasks`      — `IAgentTaskService`, owns foreground/detached task
  *                    lifecycle (timeouts, detach, user interrupt)
  *   - `toolPolicy` — `IAgentToolPolicyService`, gates background execution on
@@ -45,9 +46,11 @@ import { resolveAgentTaskConfig } from '#/agent/task/configSection';
 import { IConfigService } from '#/app/config/config';
 import { IBashParserService } from '#/app/bashParser/bashParser';
 import type { BashSyntaxNode } from '#/app/bashParser/bashParser';
+import { Error2, ErrorCodes } from '#/errors';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionProcessRunner, type IProcess } from '#/session/process/processRunner';
+import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import {
   ToolAccesses,
@@ -148,6 +151,7 @@ export class BashTool implements IBashTool {
     @IAgentToolPolicyService private readonly toolPolicy: IAgentToolPolicyService,
     @IConfigService private readonly config: IConfigService,
     @IBashParserService private readonly bashParser?: IBashParserService,
+    @ISessionWorkspaceContext private readonly workspace?: ISessionWorkspaceContext,
   ) {
     this.isWindowsBash = this.env.osKind === 'Windows';
     this.renderedDescription = renderBashDescription(this.env.shellName);
@@ -183,10 +187,13 @@ export class BashTool implements IBashTool {
     const preview = args.command.length > 50 ? `${args.command.slice(0, 50)}…` : args.command;
     // Parse once into per-subcommand argv so every `matchesRule` probe (one per
     // permission rule) reuses the same tree instead of re-parsing. Fails safe:
-    // an unavailable parser, a budget-aborted parse, or a tree with no command
-    // nodes degrades to whole-string matching and conservative `all()` accesses.
+    // an unavailable parser, a budget-aborted parse, a syntax-error tree, or a
+    // tree with no command nodes degrades to whole-string matching and
+    // conservative `all()` accesses. Isolation turns that uncertainty into a
+    // hard boundary error before a shell is spawned.
     const subcommands =
       this.bashParser === undefined ? undefined : splitCommandArgvs(args.command, this.bashParser);
+    this.assertIsolationCommandAccess(args, subcommands);
     const accesses =
       subcommands === undefined || subcommands.length === 0
         ? ToolAccesses.all()
@@ -198,7 +205,7 @@ export class BashTool implements IBashTool {
       display: {
         kind: 'command',
         command: args.command,
-        cwd: args.cwd ?? this.ctx.cwd,
+        cwd: args.cwd ?? this.workspaceCwd(),
         description: args.description,
         language: 'bash',
       },
@@ -229,7 +236,11 @@ export class BashTool implements IBashTool {
       SHELL: this.env.shellPath,
     };
 
-    return this.runner.exec(shellArgs, { env: noninteractiveEnv });
+    const options =
+      this.workspace?.isolation === undefined
+        ? { env: noninteractiveEnv }
+        : { cwd: effectiveCwd, env: noninteractiveEnv };
+    return this.runner.exec(shellArgs, options);
   }
 
   private async execution(
@@ -244,7 +255,12 @@ export class BashTool implements IBashTool {
     const startsInBackground = args.run_in_background === true;
     const foregroundTimeoutMs = normalizeTimeoutMs(args.timeout, false);
     const command = this.isWindowsBash ? rewriteWindowsNullRedirect(args.command) : args.command;
-    const effectiveCwd = args.cwd ?? this.ctx.cwd;
+    const effectiveCwd =
+      args.cwd === undefined
+        ? this.workspaceCwd()
+        : this.workspace?.isolation === undefined
+          ? args.cwd
+          : this.workspace.assertAllowed(args.cwd, 'execute');
     const description = startsInBackground ? args.description!.trim() : foregroundDescription(args);
     const timeoutMs = startsInBackground
       ? args.disable_timeout
@@ -361,6 +377,125 @@ export class BashTool implements IBashTool {
       };
     }
     return undefined;
+  }
+
+  private workspaceCwd(): string {
+    return this.workspace?.workDir ?? this.ctx.cwd;
+  }
+
+  private assertIsolationCommandAccess(
+    args: BashInput,
+    subcommands: readonly BashSubcommand[] | undefined,
+  ): void {
+    const workspace = this.workspace;
+    if (workspace?.isolation === undefined) return;
+    if (args.cwd !== undefined) workspace.assertAllowed(args.cwd, 'execute');
+    if (subcommands === undefined || subcommands.length === 0) {
+      throw isolationBoundaryError(
+        'The shell command could not be parsed, so its workspace access cannot be verified.',
+      );
+    }
+    for (const subcommand of subcommands) {
+      const name = commandName(subcommand.argv[0]);
+      if (name === undefined) {
+        throw isolationBoundaryError(
+          "A shell command without a command name cannot be safely analyzed inside an isolated workspace.",
+        );
+      }
+      if (DYNAMIC_COMMANDS.has(name)) {
+        throw isolationBoundaryError(
+          `The shell command '${name}' is a dynamic wrapper and is not allowed inside an isolated workspace.`,
+        );
+      }
+      if (!ISOLATION_SAFE_COMMANDS.has(name)) {
+        throw isolationBoundaryError(
+          `The shell command '${name}' cannot be safely analyzed inside an isolated workspace.`,
+        );
+      }
+      if (name === 'cd' || name === 'pushd') {
+        const target = subcommand.argv[1];
+        if (target === undefined) {
+          throw isolationBoundaryError(`The shell command '${name}' has an implicit directory target.`);
+        }
+        assertIsolationPath(workspace, target, 'execute');
+      }
+      if (name === 'git') this.assertGitIsolationAccess(subcommand.argv);
+      if (!workspace.isolation.writable && !READ_ONLY_COMMANDS.has(name)) {
+        throw isolationBoundaryError(
+          `The shell command '${name}' may write or otherwise mutate the workspace.`,
+        );
+      }
+      for (const redirect of subcommand.redirects) {
+        assertIsolationPath(
+          workspace,
+          redirect.target,
+          READ_REDIRECT_OPERATORS.has(redirect.operator) ? 'read' : 'write',
+        );
+        const operation = READ_REDIRECT_OPERATORS.has(redirect.operator) ? 'read' : 'write';
+        if (!workspace.isolation.writable && operation === 'write') {
+          throw isolationBoundaryError(
+            'The active workspace isolation lease is read-only; shell redirection may write files.',
+          );
+        }
+      }
+      if (PATH_ARG_COMMANDS.has(name)) {
+        const operation = READ_PATH_COMMANDS.has(name) ? 'read' : 'write';
+        for (const path of positionalPaths(subcommand.argv)) {
+          assertIsolationPath(workspace, path, operation);
+        }
+        if (!workspace.isolation.writable && operation === 'write') {
+          throw isolationBoundaryError(
+            `The active workspace isolation lease is read-only; '${name}' may write files.`,
+          );
+        }
+      }
+    }
+  }
+
+  private assertGitIsolationAccess(argv: readonly string[]): void {
+    const workspace = this.workspace;
+    if (workspace === undefined) return;
+    for (let index = 1; index < argv.length; index += 1) {
+      const option = argv[index]!;
+      if (option === '--global' || option === '--system') {
+        throw isolationBoundaryError(
+          'Git global and system configuration are outside the workspace isolation boundary.',
+        );
+      }
+      if (option.startsWith('-C/') || option.startsWith('-C\\')) {
+        assertIsolationPath(workspace, option.slice(2), 'execute');
+        continue;
+      }
+      const separateValue = GIT_PATH_OPTIONS.has(option);
+      const equalsValue = GIT_PATH_OPTIONS_WITH_EQUALS.find((prefix) => option.startsWith(prefix));
+      if (separateValue || equalsValue !== undefined) {
+        const target =
+          equalsValue === undefined ? argv[index + 1] : option.slice(equalsValue.length);
+        if (target === undefined || target.length === 0) {
+          throw isolationBoundaryError(`Git option '${option}' has no analyzable path.`);
+        }
+        assertIsolationPath(workspace, target, 'execute');
+        if (equalsValue === undefined) index += 1;
+      }
+    }
+    if (workspace.isolation?.writable === true) return;
+    let subcommand: string | undefined;
+    for (let index = 1; index < argv.length; index += 1) {
+      const arg = argv[index]!;
+      if (GIT_PATH_OPTIONS.has(arg)) {
+        index += 1;
+        continue;
+      }
+      if (GIT_PATH_OPTIONS_WITH_EQUALS.some((prefix) => arg.startsWith(prefix))) continue;
+      if (arg.startsWith('-')) continue;
+      subcommand = arg;
+      break;
+    }
+    if (subcommand === undefined || !READ_ONLY_GIT_COMMANDS.has(subcommand)) {
+      throw isolationBoundaryError(
+        'The active workspace isolation lease is read-only; this git command may write repository state.',
+      );
+    }
   }
 
   private async foregroundCompletionResult(
@@ -491,10 +626,11 @@ export interface BashSubcommand {
 const BASH_REDIRECT_OPERATORS = new Set(['<', '>', '>>', '>&', '<&', '&>', '&>>', '>|', '<>']);
 const READ_REDIRECT_OPERATORS = new Set(['<']);
 
-// Commands whose positional (non-flag) arguments are file paths. Kept to the
-// unambiguous set so a non-path positional (e.g. `sed`'s script or `chmod`'s
-// mode) is never mistaken for a sensitive file target.
+// Commands whose positional (non-flag) arguments are treated as paths by the
+// isolation boundary. Commands with ambiguous script or code arguments are
+// rejected above instead of being approximated by string matching.
 const PATH_ARG_COMMANDS = new Set([
+  'ls',
   'rm',
   'rmdir',
   'mv',
@@ -507,9 +643,120 @@ const PATH_ARG_COMMANDS = new Set([
   'less',
   'more',
   'wc',
+  'stat',
+  'file',
+  'du',
+  'grep',
+  'rg',
+  'mkdir',
+  'install',
+  'chmod',
+  'chown',
+  'truncate',
+  'tee',
 ]);
 
-const READ_PATH_COMMANDS = new Set(['cat', 'head', 'tail', 'less', 'more', 'wc']);
+const READ_PATH_COMMANDS = new Set([
+  'ls',
+  'cat',
+  'head',
+  'tail',
+  'less',
+  'more',
+  'wc',
+  'stat',
+  'file',
+  'du',
+  'grep',
+  'rg',
+]);
+const READ_ONLY_COMMANDS = new Set([
+  ...READ_PATH_COMMANDS,
+  'cd',
+  'pushd',
+  'echo',
+  'printf',
+  'pwd',
+  'true',
+  'false',
+  'test',
+  'git',
+]);
+const ISOLATION_SAFE_COMMANDS = new Set([
+  ...READ_ONLY_COMMANDS,
+  ...PATH_ARG_COMMANDS,
+]);
+const DYNAMIC_COMMANDS = new Set([
+  'bash',
+  'sh',
+  'dash',
+  'zsh',
+  'ksh',
+  'fish',
+  'python',
+  'python2',
+  'python3',
+  'pypy',
+  'node',
+  'nodejs',
+  'deno',
+  'bun',
+  'ruby',
+  'perl',
+  'php',
+  'find',
+  'xargs',
+  'parallel',
+  'eval',
+  'exec',
+  'source',
+  '.',
+  'env',
+  'sudo',
+  'doas',
+  'command',
+  'builtin',
+]);
+const UNSAFE_SYNTAX_NODE_TYPES = new Set([
+  'ERROR',
+  'error',
+  'arithmetic_expansion',
+  'command_substitution',
+  'process_substitution',
+  'expansion',
+  'simple_expansion',
+  'variable_assignment',
+  'variable_assignments',
+  'function_definition',
+  'subshell',
+  'if_statement',
+  'for_statement',
+  'while_statement',
+  'until_statement',
+  'case_statement',
+  'compound_statement',
+  'test_command',
+  'heredoc_redirect',
+  'herestring_redirect',
+  'coprocess',
+  'negated_command',
+]);
+const GIT_PATH_OPTIONS = new Set(['-C', '--git-dir', '--work-tree', '--file']);
+const GIT_PATH_OPTIONS_WITH_EQUALS = ['--git-dir=', '--work-tree=', '--file=', '-C='];
+const READ_ONLY_GIT_COMMANDS = new Set([
+  'status',
+  'diff',
+  'log',
+  'show',
+  'branch',
+  'rev-parse',
+  'ls-files',
+  'grep',
+  'cat-file',
+  'remote',
+  'describe',
+  'shortlog',
+]);
 
 /**
  * Split a bash command into its top-level subcommand argv lists using the
@@ -524,7 +771,7 @@ export function splitCommandArgvs(
 ): readonly BashSubcommand[] | undefined {
   if (source.trim().length === 0) return [];
   const parsed = parser.parse(source);
-  if (!parsed.ok) return undefined;
+  if (!parsed.ok || parsed.hasError || containsUnsafeSyntax(parsed.root)) return undefined;
   const subcommands = collectSubcommands(parsed.root);
   return subcommands.length === 0 ? undefined : subcommands;
 }
@@ -550,7 +797,7 @@ export function bashFileAccesses(
         path: redirect.target,
       });
     }
-    const name = subcommand.argv[0];
+    const name = commandName(subcommand.argv[0]);
     if (name === undefined || !PATH_ARG_COMMANDS.has(name)) continue;
     const operation: ToolFileAccessOperation = READ_PATH_COMMANDS.has(name) ? 'read' : 'write';
     for (const path of positionalPaths(subcommand.argv)) {
@@ -609,6 +856,16 @@ function collectSubcommands(root: BashSyntaxNode): BashSubcommand[] {
         for (const child of node.children) walk(child, pendingRedirects);
     }
   }
+}
+
+function containsUnsafeSyntax(root: BashSyntaxNode): boolean {
+  const stack: BashSyntaxNode[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (UNSAFE_SYNTAX_NODE_TYPES.has(node.type)) return true;
+    stack.push(...node.children);
+  }
+  return false;
 }
 
 function commandArgv(node: BashSyntaxNode): string[] {
@@ -673,6 +930,37 @@ function isPathLike(value: string): boolean {
   if (value === '~') return false;
   if (/[*?[\]{}]/.test(value)) return false;
   return true;
+}
+
+function commandName(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const slash = Math.max(value.lastIndexOf('/'), value.lastIndexOf('\\'));
+  return value.slice(slash + 1).toLowerCase();
+}
+
+function assertIsolationPath(
+  workspace: ISessionWorkspaceContext,
+  rawPath: string,
+  operation: 'read' | 'write' | 'execute',
+): void {
+  // Shell globbing and home expansion happen after parsing. Neither can be
+  // mapped to one boundary path without executing the shell, so reject them
+  // instead of attempting an incomplete string-based approximation.
+  if (
+    !isPathLike(rawPath) ||
+    rawPath === '~' ||
+    rawPath.startsWith('~/') ||
+    rawPath.startsWith('~\\')
+  ) {
+    throw isolationBoundaryError(
+      `The shell path '${rawPath}' cannot be safely resolved inside an isolated workspace.`,
+    );
+  }
+  workspace.assertAllowed(workspace.resolve(rawPath), operation);
+}
+
+function isolationBoundaryError(message: string): Error2 {
+  return new Error2(ErrorCodes.FS_PATH_ESCAPES, message);
 }
 
 function formatTimeoutLabel(timeoutMs: number): string {

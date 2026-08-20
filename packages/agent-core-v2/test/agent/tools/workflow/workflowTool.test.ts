@@ -44,8 +44,9 @@ import { IWorkflowBudgetService } from '#/agent/workflow/budget/workflowBudget';
 import {
   WorkflowTool,
   WORKFLOW_SCRIPT_KEY,
+  WORKFLOW_GRAPH_KEY,
 } from '#/agent/tools/workflow/workflowTool';
-import { WorkflowToolInputSchema } from '#/agent/workflow/types';
+import { WorkflowToolInputSchema, type WorkflowToolInput } from '#/agent/workflow/types';
 import { WorkflowTask } from '#/agent/tools/workflow/workflowTask';
 
 const SESSION = makeSessionContext({
@@ -92,7 +93,7 @@ function toolContext(toolCallId = 'tc-1'): ExecutableToolContext {
 
 async function runTool(
   tool: WorkflowTool,
-  args: { script?: string; scriptPath?: string; resumeFromRunId?: string },
+  args: WorkflowToolInput,
   ctx: ExecutableToolContext = toolContext(),
 ): Promise<ExecutableToolResult> {
   const execution = tool.resolveExecution(args);
@@ -106,6 +107,7 @@ describe('WorkflowTool', () => {
   let registeredTasks: AgentTask[];
   let bytes: InMemoryStorageService;
   let readText: ReturnType<typeof vi.fn>;
+  let dagEnabled: boolean;
 
   beforeEach(() => {
     disposables = new DisposableStore();
@@ -113,6 +115,7 @@ describe('WorkflowTool', () => {
     bytes = new InMemoryStorageService();
     registeredTasks = [];
     readText = vi.fn(async () => VALID_SCRIPT);
+    dagEnabled = false;
 
     ix.stub(IFileSystemStorageService, bytes);
     ix.set(IAppendLogStore, noopAppendLog);
@@ -145,7 +148,7 @@ describe('WorkflowTool', () => {
       budget: () => ({ total: 1_000_000, spent: () => 0, remaining: () => 1_000_000 }),
       recordSubagentUsage: vi.fn(),
     } as unknown as IWorkflowBudgetService);
-    ix.stub(IFlagService, { enabled: vi.fn(() => false) } as unknown as IFlagService);
+    ix.stub(IFlagService, { enabled: vi.fn(() => dagEnabled) } as unknown as IFlagService);
     ix.stub(IAgentLifecycleService, {} as unknown as IAgentLifecycleService);
     ix.stub(ISessionSubagentService, {} as unknown as ISessionSubagentService);
     ix.stub(ISessionAgentProfileCatalog, {
@@ -205,6 +208,25 @@ describe('WorkflowTool', () => {
     expect(result.isError).toBeFalsy();
     expect(readText).toHaveBeenCalledWith('D:/sessions/s1/workflows/input.js');
     expect(registeredTasks).toHaveLength(1);
+  });
+
+  it('compiles and launches a graph through the public WorkflowTool entry', async () => {
+    dagEnabled = true;
+    const tool = ix.createInstance(WorkflowTool);
+    const graph = {
+      version: '1',
+      name: 'public-graph',
+      root: 'condition',
+      nodes: [{ id: 'condition', kind: 'condition', condition: { value: true } }],
+    };
+    const result = await runTool(tool, { graph });
+    expect(result.isError).toBeFalsy();
+    expect(registeredTasks).toHaveLength(1);
+    const runId = /run_id: (wf_[a-f0-9]{16})/.exec(String(result.output))?.[1] as `wf_${string}`;
+    const persisted = await bytes.read(workflowJournalScope(SESSION.scope(), runId), WORKFLOW_GRAPH_KEY);
+    const persistedGraph = JSON.parse(new TextDecoder().decode(persisted)) as { nodes: Array<{ provenance?: { cacheable?: boolean; unknownInputs?: string[] } }> };
+    expect(persistedGraph.nodes[0]?.provenance?.cacheable).toBe(false);
+    expect(persistedGraph.nodes[0]?.provenance?.unknownInputs).toContain('resolvedModel');
   });
 
   it('rejects a scriptPath that escapes the session directory', () => {

@@ -23,7 +23,11 @@ import {
   type ISessionScopeHandle,
 } from '@moonshot-ai/agent-core-v2';
 
-import { SessionEventWiring, type SessionEventSink } from '#/v2/session-wiring';
+import {
+  SessionEventWiring,
+  type SessionEventSink,
+} from '#/v2/session-wiring';
+import type { WorkflowProgressEventEnvelope } from '#/events';
 
 // ---------------------------------------------------------------------------
 // Fakes
@@ -84,13 +88,22 @@ function makeSession(agents: FakeAgentHandle[]): ISessionScopeHandle {
   return { id: 's1', kind: 1, accessor, dispose: () => {} } as unknown as ISessionScopeHandle;
 }
 
-function collectingSink(): { sink: SessionEventSink; events: Event[] } {
+function collectingSink(): {
+  sink: SessionEventSink;
+  events: Event[];
+  workflowEvents: WorkflowProgressEventEnvelope[];
+} {
   const events: Event[] = [];
+  const workflowEvents: WorkflowProgressEventEnvelope[] = [];
   return {
     events,
+    workflowEvents,
     sink: {
       receiveEvent: (event) => {
         events.push(event);
+      },
+      receiveWorkflowProgress: (event) => {
+        workflowEvents.push(event);
       },
       requestApproval: () => Promise.resolve('cancelled' as never),
       requestQuestion: () => Promise.resolve(null),
@@ -195,5 +208,48 @@ describe('SessionEventWiring status snapshot fold', () => {
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({ type: 'agent.status.updated', usage: USAGE });
     expect(events[0]).not.toHaveProperty('model');
+  });
+});
+
+describe('SessionEventWiring workflow progress channel', () => {
+  it('keeps workflow.progress out of the closed legacy event stream', () => {
+    const sub = new FakeAgentHandle('agent-1');
+    const { sink, events, workflowEvents } = collectingSink();
+    const wiring = new SessionEventWiring(makeSession([sub]), sink);
+    try {
+      sub.bus.emit({
+        type: 'workflow.progress',
+        runId: 'wf_demo',
+        event: { type: 'workflow.log', runId: 'wf_demo', message: 'hello' },
+      });
+    } finally {
+      wiring.dispose();
+    }
+
+    expect(events).toEqual([]);
+    expect(workflowEvents).toHaveLength(1);
+    expect(workflowEvents[0]).toMatchObject({
+      type: 'workflow.progress',
+      runId: 'wf_demo',
+      sessionId: 's1',
+      agentId: 'agent-1',
+    });
+  });
+
+  it('drops a progress envelope whose outer and inner run ids disagree', () => {
+    const sub = new FakeAgentHandle('agent-1');
+    const { sink, workflowEvents } = collectingSink();
+    const wiring = new SessionEventWiring(makeSession([sub]), sink);
+    try {
+      sub.bus.emit({
+        type: 'workflow.progress',
+        runId: 'wf_outer',
+        event: { type: 'workflow.log', runId: 'wf_inner', message: 'ignored' },
+      });
+    } finally {
+      wiring.dispose();
+    }
+
+    expect(workflowEvents).toEqual([]);
   });
 });

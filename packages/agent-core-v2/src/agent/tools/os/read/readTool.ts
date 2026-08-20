@@ -250,6 +250,10 @@ export class ReadTool implements IReadTool {
       {
         workspaceDir: this.workspaceCtx.workDir,
         additionalDirs: this.workspaceCtx.additionalDirs,
+        assertIsolationAllowed: (path, operation) =>
+          this.workspaceCtx.isolation === undefined
+            ? path
+            : this.workspaceCtx.assertAllowed(path, operation === 'search' ? 'read' : operation),
       },
       this.skillCatalog?.catalog.getSkillRoots() ?? [],
       this.env.pathClass,

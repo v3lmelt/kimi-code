@@ -23,6 +23,18 @@ import { detectWorkflowViolations } from './determinismValidator';
 import { validateWorkflowMeta } from './metaValidator';
 import { parseWorkflowScript } from './scriptParser';
 
+export {
+  assertWorkflowGraphCompileError,
+  compileWorkflowAuthoring,
+  compileWorkflowDag,
+  compileWorkflowGraph,
+  compileWorkflowGraphResult,
+  type CompiledWorkflowGraph,
+  type WorkflowAuthoringCompileResult,
+  type WorkflowAuthoringCompileSuccess,
+  type WorkflowGraphCompileOptions,
+} from './graphCompiler';
+
 /** A successful compile: the validated AST, meta, and declared phase titles. */
 export interface WorkflowCompileSuccess {
   readonly source: string;

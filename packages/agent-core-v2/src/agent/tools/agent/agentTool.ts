@@ -313,6 +313,7 @@ export class SubagentTool implements ISubagentTool {
         });
       }
       await this.ensureOwnedIdleSubagent(resumeAgentId, target);
+      await this.lifecycle.ensureIsolation?.(resumeAgentId);
       agentId = target.id;
       const resumed = target.accessor.get(IAgentProfileService).data();
       profileName = resumed.profileName ?? RESUMED_LABEL;
@@ -366,11 +367,13 @@ export class SubagentTool implements ISubagentTool {
               taskName: args.task_name,
               binding: createBinding,
               contextPolicy: args.context_policy,
+              isolation: args.workspace_isolation,
             })
           ).handle;
         } else {
           created = await this.lifecycle.create({
             binding: createBinding,
+            isolation: args.workspace_isolation,
             labels: subagentLabels(this.callerAgentId),
           });
         }
@@ -393,11 +396,16 @@ export class SubagentTool implements ISubagentTool {
         ? ''
         : buildParentContextDigest(requester, this.workspace.workDir);
       const prompted = digest.length > 0 ? `${digest}\n\n${args.prompt}` : args.prompt;
-      promptText = await applyProfilePromptPrefix(profile, prompted, {
-        cwd: this.workspace.workDir,
-        runner: this.processRunner,
-        log: this.log,
-      });
+      try {
+        promptText = await applyProfilePromptPrefix(profile, prompted, {
+          cwd: this.workspace.workDir,
+          runner: this.processRunner,
+          log: this.log,
+        });
+      } catch (error) {
+        await this.releaseIsolation(agentId);
+        throw error;
+      }
     }
 
     const runInBackground = args.run_in_background === true;
@@ -417,6 +425,7 @@ export class SubagentTool implements ISubagentTool {
         { signal: controller.signal },
       );
     } catch (error) {
+      await this.releaseIsolation(agentId);
       if (this.coordination.isEnabled()) {
         this.coordination.markRunFinished(agentId, controller.signal.aborted ? 'interrupted' : 'failed');
       }
@@ -431,11 +440,13 @@ export class SubagentTool implements ISubagentTool {
         controller.abort(reason);
       },
     });
-    const completion = mirrored.then((r) => {
+    const completion = mirrored.then(async (r) => {
+      await this.releaseIsolation(agentId);
       if (this.coordination.isEnabled()) this.coordination.markRunFinished(agentId, 'completed');
       return { result: r.summary, usage: r.usage };
     });
     void completion.catch(() => {
+      void this.releaseIsolation(agentId);
       if (this.coordination.isEnabled()) {
         this.coordination.markRunFinished(agentId, controller.signal.aborted ? 'interrupted' : 'failed');
       }
@@ -453,6 +464,13 @@ export class SubagentTool implements ISubagentTool {
         .getEffectiveThinkingLevel(),
       completion,
     };
+  }
+
+  private async releaseIsolation(agentId: string): Promise<void> {
+    try {
+      await this.lifecycle.releaseIsolation?.(agentId);
+    } catch {
+    }
   }
 
   private async ensureOwnedIdleSubagent(

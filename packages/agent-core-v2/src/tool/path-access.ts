@@ -25,6 +25,10 @@ import type { IHostEnvironment } from '#/os/interface/hostEnvironment';
 export interface WorkspaceConfig {
   readonly workspaceDir: string;
   readonly additionalDirs: readonly string[];
+  readonly assertIsolationAllowed?: (
+    path: string,
+    operation: PathAccessOperation,
+  ) => string;
 }
 
 const SENSITIVE_BASENAMES = new Set<string>([
@@ -325,12 +329,13 @@ export function resolvePathAccessPath(
   options: ResolvePathAccessPathOptions,
 ): string {
   const { env, workspace, operation, policy, expandHome = true } = options;
-  return resolvePathAccess(path, workspace.workspaceDir, workspace, {
+  const resolved = resolvePathAccess(path, workspace.workspaceDir, workspace, {
     operation,
     policy,
     pathClass: env.pathClass,
     homeDir: expandHome ? env.homeDir : undefined,
   }).path;
+  return workspace.assertIsolationAllowed?.(resolved, operation) ?? resolved;
 }
 
 export function assertPathAllowed(

@@ -36,6 +36,7 @@ import {
   workflowAgentCacheKey,
   type WorkflowJournalAgent,
 } from '#/agent/workflow/persist/journal';
+import type { WorkflowDagJournalSummary } from '#/agent/workflow/persist/dagJournal';
 import {
   workflowAgentSpawned,
   workflowAgentCompleted,
@@ -46,6 +47,8 @@ import {
   type WorkflowTelemetryHook,
 } from '#/agent/workflow/progress/workflowProgress';
 import { AgentRunPool } from '#/agent/workflow/runtime/agentPool';
+import { WorkflowDagScheduler } from '#/agent/workflow/runtime/dagScheduler';
+import type { WorkflowDagRunResult } from '#/agent/workflow/runtime/dagScheduler';
 import {
   WorkflowRuntime,
   type WorkflowAgentSpawnResult,
@@ -58,7 +61,11 @@ import type {
   WorkflowPhaseMeta,
   WorkflowRunId,
   WorkflowScriptMeta,
+  WorkflowGraph,
+  WorkflowAgentNode,
 } from '#/agent/workflow/types';
+import type { CompiledWorkflowGraph } from '#/agent/workflow/compile/graphCompiler';
+import type { WorkflowFingerprintContext } from '#/agent/workflow/ir/fingerprint';
 import type { TokenUsage } from '#/kosong/contract/usage';
 import { grandTotal } from '#/kosong/contract/usage';
 
@@ -111,6 +118,9 @@ export interface WorkflowTaskOptions {
   readonly spawnDeps: WorkflowSpawnHostDeps;
   readonly parentToolCallId: string;
   readonly resume?: WorkflowResumeLedger;
+  readonly graph?: WorkflowGraph | CompiledWorkflowGraph;
+  readonly dagResume?: WorkflowDagJournalSummary;
+  readonly fingerprintContext?: WorkflowFingerprintContext;
   /**
    * Optional live budget source (REAL main-loop accounting). Forwarded to the
    * runtime so the sandbox `budget` global reads the host's token target and
@@ -150,6 +160,9 @@ export class WorkflowTask implements AgentTask {
   private readonly spawnDeps: WorkflowSpawnHostDeps;
   private readonly parentToolCallId: string;
   private readonly resume: WorkflowResumeLedger | undefined;
+  private readonly graph: WorkflowGraph | CompiledWorkflowGraph | undefined;
+  private readonly dagResume: WorkflowDagJournalSummary | undefined;
+  private readonly fingerprintContext: WorkflowFingerprintContext | undefined;
   private readonly budget: WorkflowBudget | undefined;
   private readonly onSubagentUsage: ((usage: TokenUsage) => void) | undefined;
 
@@ -171,6 +184,9 @@ export class WorkflowTask implements AgentTask {
     this.spawnDeps = options.spawnDeps;
     this.parentToolCallId = options.parentToolCallId;
     this.resume = options.resume;
+    this.graph = options.graph;
+    this.dagResume = options.dagResume;
+    this.fingerprintContext = options.fingerprintContext;
     this.budget = options.budget;
     this.onSubagentUsage = options.onSubagentUsage;
     this.workflowName = options.name;
@@ -189,6 +205,10 @@ export class WorkflowTask implements AgentTask {
     const runStartedMs = Date.now();
 
     try {
+      if (this.graph !== undefined) {
+        await this.startGraph(sink, controller, runStartedMs);
+        return;
+      }
       const startedAt = isoNow();
       this.journal.writeWorkflowStarted({
         script: this.script,
@@ -279,6 +299,75 @@ export class WorkflowTask implements AgentTask {
       }
     } finally {
       sink.signal.removeEventListener('abort', requestAbort);
+    }
+  }
+
+  private async startGraph(
+    sink: AgentTaskSink,
+    controller: AbortController,
+    runStartedMs: number,
+  ): Promise<void> {
+    let journalLease: { dispose(): void } | undefined;
+    try {
+      journalLease = typeof this.journal.acquire === 'function' ? this.journal.acquire() : undefined;
+      const startedAt = isoNow();
+      this.journal.writeWorkflowStarted({
+        script: this.script,
+        scriptSha256: this.scriptSha256,
+        name: this.name,
+        description: this.description,
+        ...(this.phases === undefined ? {} : { phases: this.phases }),
+        ...(this.args === undefined ? {} : { args: this.args }),
+        startedAt,
+      });
+      this.wire.dispatch(workflowStarted({ runId: this.runId, meta: this.meta, startedAt }));
+      this.telemetry.launched(this.runId, this.meta);
+      const scheduler = new WorkflowDagScheduler({
+        graph: this.graph!,
+        fingerprintContext: this.fingerprintContext,
+        signal: controller.signal,
+        journal: this.journal,
+        resume: this.dagResume,
+        budget: {
+          total: this.budget?.total ?? this.tokenBudgetTotal,
+          spent: this.dagResume?.spent ?? this.budget?.spent() ?? 0,
+        },
+        executeAgent: (node, context) => this.agentSpawn(
+          node.prompt,
+          workflowAgentOpts(node),
+          context.signal,
+          this.resume,
+        ),
+        onSubagentUsage: this.onSubagentUsage,
+      });
+      const output = await scheduler.run();
+      const summary = formatWorkflowGraphSummary(this.runId, this.name, output, this.journal.dir);
+      sink.appendOutput(summary);
+      const ok = output.status === 'completed';
+      this.journal.writeWorkflowCompleted({
+        ok,
+        ...(output.result === undefined ? {} : { result: output.result }),
+        ...(ok ? {} : { error: `Workflow DAG ${output.status}.` }),
+        completedAt: isoNow(),
+      });
+      this.wire.dispatch(workflowCompleted({
+        runId: this.runId,
+        ok,
+        ...(output.result === undefined ? {} : { result: output.result }),
+        tokensSpent: output.spent,
+        durationMs: Date.now() - runStartedMs,
+      }));
+      this.telemetry.completed(this.runId, ok, ok ? undefined : `Workflow DAG ${output.status}.`);
+      await sink.settle(ok ? { status: 'completed' } : { status: 'failed', stopReason: `Workflow DAG ${output.status}.` });
+    } catch (error) {
+      const message = errorMessage(error);
+      sink.appendOutput(`Workflow failed: ${this.name} (${this.runId})\nstatus: failed\n\nerror: ${message}`);
+      this.journal.writeWorkflowCompleted({ ok: false, error: message, completedAt: isoNow() });
+      this.wire.dispatch(workflowCompleted({ runId: this.runId, ok: false, error: message, durationMs: Date.now() - runStartedMs }));
+      this.telemetry.completed(this.runId, false, message);
+      await sink.settle({ status: 'failed', stopReason: message });
+    } finally {
+      journalLease?.dispose();
     }
   }
 
@@ -491,6 +580,35 @@ export class WorkflowTask implements AgentTask {
 }
 
 export const WORKFLOW_UNKNOWN_AGENT_ID = 'wf-unknown';
+
+function workflowAgentOpts(node: WorkflowAgentNode): WorkflowAgentOpts {
+  return {
+    ...(node.schema === undefined ? {} : { schema: node.schema }),
+    ...(node.model === undefined ? {} : { model: node.model }),
+    ...(node.effort === undefined ? {} : { effort: node.effort }),
+    ...(node.profile === undefined ? {} : { agentType: node.profile }),
+  };
+}
+
+function formatWorkflowGraphSummary(
+  runId: WorkflowRunId,
+  name: string,
+  output: WorkflowDagRunResult,
+  journalDir: string,
+): string {
+  return [
+    `Workflow completed: ${name} (${runId})`,
+    `status: ${output.status}`,
+    `nodes: ${String(output.nodes.size)}`,
+    `tokens_spent: ${String(output.spent)}`,
+    '',
+    '[result]',
+    stringifyResult(output.result),
+    '',
+    '[diagnostics]',
+    `Run journal: ${journalDir}/journal.jsonl — node state and checkpoint records are append-only.`,
+  ].join('\n');
+}
 
 function formatWorkflowRunSummary(
   runId: WorkflowRunId,

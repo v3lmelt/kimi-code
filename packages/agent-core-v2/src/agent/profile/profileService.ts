@@ -447,7 +447,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       agentsMdPaths,
       disallowedTools: snapshot.disallowedTools ?? [],
     });
-    this.agentsMdReminder.seedInjected(agentsMdPaths, this.sessionContext.cwd);
+    this.agentsMdReminder.seedInjected(agentsMdPaths, this.promptCwd());
   }
 
   async bind(input: BindAgentInput): Promise<void> {
@@ -654,7 +654,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
   private seedAgentsMdReminder(context: SystemPromptContext): void {
     this.agentsMdReminder.seedInjected(
       context.agentsMdPaths ?? [],
-      context.cwd ?? this.sessionContext.cwd,
+      context.cwd ?? this.promptCwd(),
     );
   }
 
@@ -1078,7 +1078,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     const preloadedAgentsMd = omitContext ? undefined : await this.workspaceInstructionsSnapshot();
     const base = await prepareSystemPromptContext(
       { fs: this.fs, homeDir: this.env.homeDir },
-      this.sessionContext.cwd,
+      this.promptCwd(),
       this.bootstrap.homeDir,
       {
         additionalDirs: options?.additionalDirs ?? this.workspace.additionalDirs,
@@ -1097,7 +1097,7 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
     const model = boundModel ?? this.tryResolveRawModel();
     return {
       ...base,
-      cwd: this.sessionContext.cwd,
+      cwd: this.promptCwd(),
       osKind: this.env.osKind,
       shellName: this.env.shellName,
       shellPath: this.env.shellPath,
@@ -1121,6 +1121,10 @@ export class AgentProfileService extends Disposable implements IAgentProfileServ
       warning: this.instructions.agentsMdWarning,
       paths: this.instructions.agentsMdPaths ?? [],
     };
+  }
+
+  private promptCwd(): string {
+    return this.workspace.isolation === undefined ? this.sessionContext.cwd : this.workspace.workDir;
   }
 
   private isToolActiveForProfile(

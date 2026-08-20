@@ -61,6 +61,12 @@ export const SubagentToolInputSchema = z.preprocess(
     context_policy: ContextPolicySchema
       .optional()
       .describe('Explicit context inherited from the caller: fresh, full, lastN, or digest.'),
+    workspace_isolation: z
+      .enum(['shared-readonly', 'shared-worktree', 'dedicated-worktree'])
+      .optional()
+      .describe(
+        'Workspace mode for this run. By default writing agents use a dedicated worktree and read-only agents share a read-only workspace. Use shared-worktree for a foreground agent that must write the current workspace.',
+      ),
     subagent_type: z
       .string()
       .optional()
@@ -115,6 +121,12 @@ export const LegacySubagentToolInputSchema = z.preprocess(
   z.object({
     prompt: z.string().describe('Full task prompt for the subagent'),
     description: z.string().describe('Short task description (3-5 words) for UI display'),
+    workspace_isolation: z
+      .enum(['shared-readonly', 'shared-worktree', 'dedicated-worktree'])
+      .optional()
+      .describe(
+        'Workspace mode for this run. By default writing agents use a dedicated worktree and read-only agents share a read-only workspace. Use shared-worktree for a foreground agent that must write the current workspace.',
+      ),
     subagent_type: z
       .string()
       .optional()

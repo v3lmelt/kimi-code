@@ -30,6 +30,7 @@ import type { IAgentScopeHandle } from '#/_base/di/scope';
 import type { Event } from '#/_base/event';
 import type { PermissionMode } from '#/agent/permissionPolicy/types';
 import type { BindAgentInput } from '#/agent/profile/profile';
+import type { WorkspaceIsolationMode, WorkspaceIsolationLease } from '#/workspace/workspaceIsolation/workspaceIsolation';
 
 export const MAIN_AGENT_ID = 'main';
 
@@ -41,6 +42,7 @@ export interface CreateAgentOptions {
   readonly binding?: BindAgentInput;
   readonly forkedFrom?: string;
   readonly labels?: Readonly<Record<string, string>>;
+  readonly isolation?: WorkspaceIsolationMode;
 }
 
 export interface ForkAgentOptions {
@@ -63,6 +65,9 @@ export interface IAgentLifecycleService {
   fork(sourceAgentId: string, opts?: ForkAgentOptions): Promise<IAgentScopeHandle>;
 
   get(agentId: string): IAgentScopeHandle | undefined;
+  getIsolationLease?(agentId: string): WorkspaceIsolationLease | undefined;
+  ensureIsolation?(agentId: string): Promise<WorkspaceIsolationLease | undefined>;
+  releaseIsolation?(agentId: string): Promise<WorkspaceIsolationLease | undefined>;
   list(filter?: AgentListFilter): readonly IAgentScopeHandle[];
   broadcastPermissionMode(mode: PermissionMode): void;
   remove(agentId: string): Promise<void>;

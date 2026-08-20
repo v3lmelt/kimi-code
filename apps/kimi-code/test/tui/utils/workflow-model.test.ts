@@ -29,13 +29,15 @@ vi.mock('#/tui/theme', () => ({
 import {
   applyWorkflowProgressEvent,
   EMPTY_WORKFLOW_RUNS,
+  WORKFLOW_LEDGER_LIMITS,
   type WorkflowRunView,
 } from '#/tui/utils/workflow-model';
+import { mergeWorkflowTaskSnapshots, projectRuntimeCenter } from '#/tui/utils/runtime-center-model';
 import { buildWorkflowReportLines } from '#/tui/commands/workflows';
 
 const RUN_ID = 'wf_0123456789abcdef';
 
-function startedEvent(): WorkflowProgressEvent {
+function startedEvent(): Extract<WorkflowProgressEvent, { type: 'workflow.started' }> {
   return {
     type: 'workflow.started',
     runId: RUN_ID,
@@ -150,6 +152,106 @@ describe('applyWorkflowProgressEvent', () => {
       }),
     ).toBe(runs);
     expect(applyWorkflowProgressEvent(runs, startedEvent())).toBe(runs);
+  });
+
+  it('folds optional node, identity, replay, and isolation fields without changing legacy events', () => {
+    const runs = applyWorkflowProgressEvent(EMPTY_WORKFLOW_RUNS, {
+      ...startedEvent(),
+      taskId: 'task-1',
+      taskPath: 'main/wf-1',
+      nodeId: 'root',
+      model: 'k2',
+      isolationLease: 'lease-1',
+      worktreePath: 'C:/worktree',
+    });
+    const next = applyWorkflowProgressEvent(runs, {
+      type: 'workflow.agent_spawned',
+      runId: RUN_ID,
+      agentId: 'a1',
+      nodeId: 'node-a',
+      taskPath: 'main/wf-1/node-a',
+      cache: 'hit',
+      replayed: true,
+    });
+    expect(next[0]).toMatchObject({ taskId: 'task-1', nodeId: 'root', model: 'k2' });
+    expect(next[0]?.agents[0]).toMatchObject({
+      nodeId: 'node-a', taskPath: 'main/wf-1/node-a', cache: 'hit', replayed: true,
+    });
+  });
+
+  it('bounds runs, agents, logs, and observed node identities', () => {
+    let runs = EMPTY_WORKFLOW_RUNS;
+    for (let index = 0; index < WORKFLOW_LEDGER_LIMITS.runs + 5; index += 1) {
+      runs = applyWorkflowProgressEvent(runs, {
+        ...startedEvent(),
+        runId: `wf_${String(index)}`,
+        nodeId: `node-${String(index)}`,
+      });
+    }
+    expect(runs).toHaveLength(WORKFLOW_LEDGER_LIMITS.runs);
+    let run = runs[0];
+    expect(run).toBeDefined();
+    for (let index = 0; index < WORKFLOW_LEDGER_LIMITS.agents + 5; index += 1) {
+      run = applyWorkflowProgressEvent(runs, {
+        type: 'workflow.agent_spawned',
+        runId: run!.runId as `wf_${string}`,
+        agentId: `agent-${String(index)}`,
+        nodeId: `node-agent-${String(index)}`,
+      })[0];
+      runs = run === undefined ? runs : [run, ...runs.slice(1)];
+    }
+    for (let index = 0; index < WORKFLOW_LEDGER_LIMITS.logs + 5; index += 1) {
+      runs = applyWorkflowProgressEvent(runs, {
+        type: 'workflow.log',
+        runId: run!.runId as `wf_${string}`,
+        message: `${String(index)} ${'x'.repeat(WORKFLOW_LEDGER_LIMITS.logLineCharacters + 10)}`,
+      });
+    }
+    const bounded = runs[0]!;
+    expect(bounded.agents.length).toBeLessThanOrEqual(WORKFLOW_LEDGER_LIMITS.agents);
+    expect(bounded.logLines.length).toBe(WORKFLOW_LEDGER_LIMITS.logs);
+    expect(bounded.logLines.every((line) => line.length <= WORKFLOW_LEDGER_LIMITS.logLineCharacters)).toBe(true);
+    expect(bounded.nodeIds?.length).toBeLessThanOrEqual(WORKFLOW_LEDGER_LIMITS.nodes);
+  });
+});
+
+describe('runtime center projection', () => {
+  it('uses the same task snapshot fallback for replay and live task updates', () => {
+    const task = {
+      taskId: 'task-wf', kind: 'workflow', runId: RUN_ID, workflowName: 'demo-run',
+      description: 'A demo workflow', status: 'completed', startedAt: Date.now() - 1000,
+      endedAt: Date.now(), agentsSpawned: 2, tokensSpent: 99,
+    } as never;
+    const runs = mergeWorkflowTaskSnapshots([], [task]);
+    expect(runs[0]).toMatchObject({ runId: RUN_ID, name: 'demo-run', status: 'completed', tokensSpent: 99 });
+    const projection = projectRuntimeCenter({ tasks: [task], workflows: runs });
+    expect(projection.workflows[0]).toMatchObject({ runId: RUN_ID, taskId: 'task-wf', status: 'completed' });
+    expect(projection.workflows[0]?.actions.resume).toMatchObject({ enabled: false });
+    expect(projection.workflows[0]?.actions.retry.reason).toContain('not exposed');
+  });
+
+  it('maps an agent output action to its explicit owning task', () => {
+    const run = runningLedger()[0]!;
+    const withAgent = applyWorkflowProgressEvent([run], {
+      type: 'workflow.agent_spawned',
+      runId: RUN_ID,
+      agentId: 'agent-owned',
+      taskId: 'task-owned',
+    });
+    const projection = projectRuntimeCenter({ tasks: [], workflows: withAgent });
+    expect(projection.agents.find((agent) => agent.agentId === 'agent-owned')).toMatchObject({
+      taskId: 'task-owned',
+      actions: { output: { enabled: true } },
+    });
+
+    const orphanProjection = projectRuntimeCenter({
+      tasks: [],
+      workflows: [runningLedger()[0]!],
+      agentMetadata: { orphan: { type: 'sub' } },
+    });
+    expect(orphanProjection.agents.find((agent) => agent.agentId === 'orphan')?.actions.output).toMatchObject({
+      enabled: false,
+    });
   });
 });
 

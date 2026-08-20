@@ -152,6 +152,7 @@ import { formatErrorMessage } from './utils/event-payload';
 import { pickForegroundTasks } from './utils/foreground-task';
 import { formatTurnUsage } from './utils/turn-usage';
 import { ImageAttachmentStore, type ImageAttachment } from './utils/image-attachment-store';
+import type { RuntimeCenterTaskInfo } from './utils/runtime-center-model';
 import { extractMediaAttachments, rewriteMediaPlaceholders } from './utils/image-placeholder';
 import type { ExtractionResult } from './utils/image-placeholder';
 import { installInputLatencyProbe } from './utils/input-latency';
@@ -1723,12 +1724,24 @@ export class KimiTUI {
     this.state.tasksBrowser = value;
   }
 
+  setRuntimeCenter(value: TUIState['runtimeCenter']): void {
+    this.state.runtimeCenter = value;
+  }
+
   appendStartupNotice(extra: string): void {
     this.startupNotice = combineStartupNotice(this.startupNotice, extra);
   }
 
   get backgroundTasks(): ReadonlyMap<string, BackgroundTaskInfo> {
     return this.sessionEventHandler.backgroundTasks;
+  }
+
+  get workflowTasks(): ReadonlyMap<string, RuntimeCenterTaskInfo> {
+    return this.sessionEventHandler.workflowBackgroundTasks;
+  }
+
+  get workflowRuns(): TUIState['appState']['workflowRuns'] {
+    return this.state.appState.workflowRuns;
   }
 
   getCurrentSessionId(): string {
@@ -2082,7 +2095,7 @@ export class KimiTUI {
     this.session = undefined;
     this.state.swarmModeEntry = undefined;
     this.harness.setTelemetryContext({ sessionId: null });
-    this.setAppState({ goal: null });
+    this.setAppState({ goal: null, workflowRuns: [] });
     return previous;
   }
 

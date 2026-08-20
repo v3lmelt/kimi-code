@@ -44,7 +44,10 @@ import {
 } from '#/agent/tools/os/grep/grep';
 import { GrepTool as ProductionGrepTool } from '#/agent/tools/os/grep/grepTool';
 import { ensureRgPath } from '#/os/backends/node-local/tools/rgLocator';
-import { stubWorkspaceContext } from '../../../../session/workspaceContext/stub-workspace-context';
+import {
+  stubAgentWorkspaceContext,
+  stubWorkspaceContext,
+} from '../../../../session/workspaceContext/stub-workspace-context';
 import { recordingTelemetry, type TelemetryRecord } from '../../../../app/telemetry/stubs';
 import { registerStateServices } from '../../../../state/stubs';
 
@@ -296,6 +299,14 @@ afterEach(() => {
 });
 
 describe('GrepTool', () => {
+  it('rejects a dedicated search outside the leased worktree', () => {
+    const { tool } = makeTool(stubAgentWorkspaceContext('dedicated-worktree'));
+
+    expect(() => tool.resolveExecution({ pattern: 'needle', path: '/workspace/outside' })).toThrow(
+      /worktree|workspace/i,
+    );
+  });
+
   it('registers contribution metadata through the production DI path', async () => {
     const savedContributions = [...getAgentToolContributions()];
     const disposables = new DisposableStore();

@@ -32,6 +32,18 @@ import { BugIndicatingError } from '#/errors';
 import type { IDisposable } from '#/_base/di/lifecycle';
 import type { IAppendLogStore } from '#/persistence/interface/appendLogStore';
 import type { WorkflowPhaseMeta, WorkflowRunId, WorkflowRunStatus } from '#/agent/workflow/types';
+import type {
+  WorkflowNodeId,
+  WorkflowNodeProvenance,
+  WorkflowNodeResult,
+} from '#/agent/workflow/types';
+import type { WorkflowNodeJournalRecord, WorkflowNodeJournalRecordError } from './dagJournal';
+import {
+  assertWorkflowNodeJournalRecord,
+  foldWorkflowJournal,
+  WorkflowJournalCorruptionError,
+  type WorkflowDagJournalSummary,
+} from './dagJournal';
 
 /** Directory name (under the session dir) that hosts workflow run journals. */
 export const WORKFLOWS_DIR = 'workflows' as const;
@@ -137,7 +149,8 @@ export type WorkflowJournalRecord =
       readonly result?: unknown;
       readonly error?: string;
       readonly completedAt: string;
-    };
+    }
+  | WorkflowNodeJournalRecord;
 
 /** Version prefix of the resume cache key; bump when the hashing contract changes. */
 export const WORKFLOW_CACHE_KEY_VERSION = 'v1';
@@ -292,6 +305,11 @@ export interface WorkflowJournalSummary {
    * an unchanged `(prompt, opts)` returns the cached result instantly.
    */
   readonly completedByCacheKey: ReadonlyMap<string, WorkflowJournalAgent>;
+  readonly nodes: ReadonlyMap<WorkflowNodeId, import('./dagJournal').WorkflowDagNodeState>;
+  readonly checkpoints: readonly import('./dagJournal').WorkflowNodeCheckpoint[];
+  readonly graphVersion?: string;
+  readonly spent: number;
+  readonly reserved: number;
 }
 
 /**
@@ -377,6 +395,38 @@ export class WorkflowJournal {
     this.write({ kind: 'workflow.completed', runId: this.options.runId, ...completed });
   }
 
+  writeNodePlanned(nodeId: WorkflowNodeId, fingerprint: string, provenance: WorkflowNodeProvenance, at: string): void {
+    this.write({ kind: 'node.planned', runId: this.options.runId, nodeId, fingerprint, provenance, at });
+  }
+
+  writeNodeReady(nodeId: WorkflowNodeId, fingerprint: string, at: string): void {
+    this.write({ kind: 'node.ready', runId: this.options.runId, nodeId, fingerprint, at });
+  }
+
+  writeNodeRunning(nodeId: WorkflowNodeId, fingerprint: string, attempt: number, at: string): void {
+    this.write({ kind: 'node.running', runId: this.options.runId, nodeId, fingerprint, attempt, at });
+  }
+
+  writeNodeCompleted(nodeId: WorkflowNodeId, fingerprint: string, attempt: number, result: WorkflowNodeResult, at: string): void {
+    this.write({ kind: 'node.completed', runId: this.options.runId, nodeId, fingerprint, attempt, result, at });
+  }
+
+  writeNodeFailed(nodeId: WorkflowNodeId, fingerprint: string, attempt: number, error: WorkflowNodeJournalRecordError, at: string, result?: WorkflowNodeResult): void {
+    this.write({ kind: 'node.failed', runId: this.options.runId, nodeId, fingerprint, attempt, error, ...(result === undefined ? {} : { result }), at });
+  }
+
+  writeNodeSkipped(nodeId: WorkflowNodeId, fingerprint: string, at: string, reason?: string): void {
+    this.write({ kind: 'node.skipped', runId: this.options.runId, nodeId, fingerprint, ...(reason === undefined ? {} : { reason }), at });
+  }
+
+  writeNodeBlocked(nodeId: WorkflowNodeId, fingerprint: string, at: string, reason?: string): void {
+    this.write({ kind: 'node.blocked', runId: this.options.runId, nodeId, fingerprint, ...(reason === undefined ? {} : { reason }), at });
+  }
+
+  writeCheckpoint(checkpoint: Omit<Extract<WorkflowNodeJournalRecord, { readonly kind: 'checkpoint' }>, 'kind' | 'runId'>): void {
+    this.write({ kind: 'checkpoint', runId: this.options.runId, ...checkpoint });
+  }
+
   /**
    * Fold the journal back into a summary. Returns `undefined` when the run was
    * never started (no `workflow.started` record), which is how resume
@@ -387,11 +437,13 @@ export class WorkflowJournal {
     let completed: Extract<WorkflowJournalRecord, { readonly kind: 'workflow.completed' }> | undefined;
     const phaseTransitions: string[] = [];
     const agents = new Map<string, WorkflowJournalAgent>();
+    const dagRecords: WorkflowNodeJournalRecord[] = [];
 
-    for await (const record of this.options.log.read<WorkflowJournalRecord>(
+    for await (const rawRecord of this.options.log.read<unknown>(
       this.options.scope,
       WORKFLOW_JOURNAL_KEY,
     )) {
+      const record = assertWorkflowJournalRecord(rawRecord);
       switch (record.kind) {
         case 'workflow.started':
           started ??= record;
@@ -442,12 +494,25 @@ export class WorkflowJournal {
         case 'workflow.completed':
           completed ??= record;
           break;
+        case 'node.planned':
+        case 'node.ready':
+        case 'node.running':
+        case 'node.completed':
+        case 'node.failed':
+        case 'node.skipped':
+        case 'node.blocked':
+        case 'node.lost':
+        case 'checkpoint':
+          assertWorkflowNodeJournalRecord(record);
+          dagRecords.push(record);
+          break;
       }
     }
 
     if (started === undefined) return undefined;
 
     const agentList = [...agents.values()];
+    const dag: WorkflowDagJournalSummary = foldWorkflowJournal(dagRecords, { recoverRunning: false });
     return {
       runId: started.runId,
       script: started.script,
@@ -474,6 +539,11 @@ export class WorkflowJournal {
         .filter((agent) => agent.ok !== undefined)
         .map((agent) => agent.agentId),
       completedByCacheKey: foldCacheKeyResults(agentList),
+      nodes: dag.nodes,
+      checkpoints: dag.checkpoints,
+      ...(dag.graphVersion === undefined ? {} : { graphVersion: dag.graphVersion }),
+      spent: dag.spent,
+      reserved: dag.reserved,
     };
   }
 
@@ -483,4 +553,37 @@ export class WorkflowJournal {
       onError: this.options.onError,
     });
   }
+}
+
+export * from './dagJournal';
+
+const WORKFLOW_JOURNAL_KINDS = new Set([
+  'workflow.started',
+  'phase.changed',
+  'agent.spawned',
+  'agent.completed',
+  'workflow.completed',
+  'node.planned',
+  'node.ready',
+  'node.running',
+  'node.completed',
+  'node.failed',
+  'node.skipped',
+  'node.blocked',
+  'node.lost',
+  'checkpoint',
+]);
+
+function assertWorkflowJournalRecord(value: unknown): WorkflowJournalRecord {
+  if (typeof value !== 'object' || value === null ||
+    typeof (value as { kind?: unknown }).kind !== 'string' ||
+    !WORKFLOW_JOURNAL_KINDS.has((value as { kind: string }).kind)) {
+    throw new WorkflowJournalCorruptionError('Unknown workflow journal event.');
+  }
+  const kind = (value as { kind: string }).kind;
+  if (kind.startsWith('node.') || kind === 'checkpoint') {
+    assertWorkflowNodeJournalRecord(value);
+    return value;
+  }
+  return value as WorkflowJournalRecord;
 }

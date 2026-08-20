@@ -47,6 +47,7 @@ import {
   type SkillActivationProjection,
   type PluginCommandProjection,
 } from '../utils/message-replay';
+import { mergeWorkflowTaskSnapshots } from '../utils/runtime-center-model';
 import type { StreamingUIController } from './streaming-ui';
 import type { SessionEventHandler } from './session-event-handler';
 import type { TUIState } from '../tui-state';
@@ -87,6 +88,10 @@ export class SessionReplayRenderer {
   async hydrateFromReplay(session: Session): Promise<boolean> {
     this.host.setAppState({ isReplaying: true });
     try {
+      // Replay can be requested for the current session after a failed or
+      // partial hydration. Drop live workflow state first so runs, logs, and
+      // agent rows from the previous view cannot bleed into this snapshot.
+      this.host.setAppState({ workflowRuns: [] });
       const main = session.getResumeState()?.agents['main'];
       if (main === undefined) {
         this.host.showError('Session history is unavailable for this session.');
@@ -173,8 +178,13 @@ export class SessionReplayRenderer {
       projection.backgroundAgentMetadata,
     );
     sessionEventHandler.backgroundTasks.clear();
+    sessionEventHandler.workflowBackgroundTasks.clear();
     for (const info of agent.background) {
-      sessionEventHandler.backgroundTasks.set(info.taskId, info);
+      if ((info as unknown as { readonly kind?: unknown }).kind === 'workflow') {
+        sessionEventHandler.workflowBackgroundTasks.set(info.taskId, info);
+      } else {
+        sessionEventHandler.backgroundTasks.set(info.taskId, info);
+      }
     }
     sessionEventHandler.backgroundTaskTranscriptedTerminal.clear();
     for (const info of agent.background) {
@@ -183,6 +193,8 @@ export class SessionReplayRenderer {
       }
     }
     state.footer.setBackgroundCounts(countActiveBackgroundTasks(sessionEventHandler.backgroundTasks));
+    const workflowRuns = mergeWorkflowTaskSnapshots(state.appState.workflowRuns, agent.background);
+    if (workflowRuns !== state.appState.workflowRuns) this.host.setAppState({ workflowRuns });
     state.ui.requestRender();
   }
 

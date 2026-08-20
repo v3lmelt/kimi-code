@@ -3,8 +3,8 @@
  *
  * The agent-core-v2 workflow engine broadcasts run lifecycle as
  * `workflow.progress` wire events (`IEventBus`); the SDK event wiring forwards
- * them to the client as `session.onEvent` events whose `event` payload is a
- * `WorkflowProgressEvent` discriminator (started / phase_changed /
+ * them to the client through `session.onWorkflowProgress` whose `event` payload
+ * is a `WorkflowProgressEvent` discriminator (started / phase_changed /
  * agent_spawned / agent_completed / completed). The TUI does not poll — it
  * folds each event into a lightweight `WorkflowRunView` ledger stored on
  * `AppState` (`appState.workflowRuns`), which the `/workflows` command renders
@@ -25,7 +25,7 @@
 import type { WorkflowPhaseMeta, WorkflowProgressEvent } from '@moonshot-ai/agent-core-v2';
 
 /** Lifecycle status of a workflow run as shown in the TUI. */
-export type WorkflowRunViewStatus = 'running' | 'completed' | 'failed';
+export type WorkflowRunViewStatus = 'running' | 'completed' | 'failed' | 'aborted';
 
 /** Status of one subagent spawned by a workflow. `aborted` means the agent was
  *  spawned but the run ended before it reported a completion. */
@@ -49,11 +49,21 @@ export interface WorkflowRunAgentView {
   readonly tokens?: number;
   /** One-line outcome summary (whitespace-collapsed preview of the output). */
   readonly summary?: string;
+  readonly taskId?: string;
+  readonly taskPath?: string;
+  readonly nodeId?: string;
+  readonly cache?: string;
+  readonly replayed?: boolean;
+  readonly isolationLease?: string;
+  readonly worktreePath?: string;
 }
 
 /** The per-run ledger the `/workflows` command renders. */
 export interface WorkflowRunView {
   readonly runId: string;
+  readonly taskId?: string;
+  readonly taskPath?: string;
+  readonly nodeId?: string;
   readonly name: string;
   readonly description: string;
   /** Declared phases from `meta.phases`; agent groups are matched against these. */
@@ -61,6 +71,12 @@ export interface WorkflowRunView {
   readonly status: WorkflowRunViewStatus;
   /** The run's currently active phase (from `workflow.phase_changed`). */
   readonly phase?: string;
+  readonly dependencies?: readonly string[];
+  readonly model?: string;
+  readonly cache?: string;
+  readonly replayed?: boolean;
+  readonly isolationLease?: string;
+  readonly worktreePath?: string;
   /** Total subagents spawned (cap-counted attempts, mirroring the runtime). */
   readonly spawnedAgents: number;
   /** Subagents that reported a completion. */
@@ -77,6 +93,8 @@ export interface WorkflowRunView {
   readonly agents: readonly WorkflowRunAgentView[];
   /** Narrator log lines (`log(...)`), folded from `workflow.log` events. */
   readonly logLines: readonly string[];
+  /** Node identities observed on progress events, capped for a long-lived TUI session. */
+  readonly nodeIds?: readonly string[];
 }
 
 /** Ledger of all workflow runs the TUI has observed this session. */
@@ -84,6 +102,19 @@ export type WorkflowRunsViewState = readonly WorkflowRunView[];
 
 /** Empty ledger — the `AppState.workflowRuns` default. */
 export const EMPTY_WORKFLOW_RUNS: WorkflowRunsViewState = [];
+
+/**
+ * Memory limits for the live workflow projection. These are intentionally
+ * conservative because progress is delivered over a session-lifetime stream,
+ * while the durable workflow journal remains the source for full history.
+ */
+export const WORKFLOW_LEDGER_LIMITS = {
+  runs: 100,
+  agents: 100,
+  logs: 200,
+  nodes: 100,
+  logLineCharacters: 4_096,
+} as const;
 
 /**
  * Type guard for the `workflow.progress` domain event as delivered by the SDK
@@ -100,7 +131,8 @@ export function isWorkflowProgressEvent(
   if (candidate.type !== 'workflow.progress') return false;
   if (typeof candidate.runId !== 'string') return false;
   if (typeof candidate.event !== 'object' || candidate.event === null) return false;
-  return true;
+  const event = candidate.event as { readonly type?: unknown; readonly runId?: unknown };
+  return typeof event.type === 'string' && event.type.startsWith('workflow.') && event.runId === candidate.runId;
 }
 
 /**
@@ -131,35 +163,57 @@ export function applyWorkflowProgressEvent(
       if (runs.some((run) => run.runId === progress.runId)) return runs;
       const view: WorkflowRunView = {
         runId: progress.runId,
+        taskId: progress.taskId,
+        taskPath: progress.taskPath,
+        nodeId: progress.nodeId,
         name: progress.meta.name,
         description: progress.meta.description,
         phases: progress.meta.phases ?? [],
         status: 'running',
+        model: progress.model,
+        isolationLease: progress.isolationLease,
+        worktreePath: progress.worktreePath,
         startedAt: progress.startedAt,
         spawnedAgents: 0,
         completedAgents: 0,
         agents: [],
         logLines: [],
+        nodeIds: progress.nodeId === undefined ? [] : [progress.nodeId],
       };
-      return [view, ...runs];
+      return [view, ...runs].slice(0, WORKFLOW_LEDGER_LIMITS.runs);
     }
     case 'workflow.phase_changed':
       return mapRun(runs, progress.runId, (run) =>
-        run.phase === progress.phase ? run : { ...run, phase: progress.phase },
+        run.phase === progress.phase &&
+        JSON.stringify(run.dependencies ?? []) === JSON.stringify(progress.dependencies ?? []) &&
+        run.nodeId === (progress.nodeId ?? run.nodeId)
+          ? run
+          : {
+              ...run,
+              phase: progress.phase,
+              nodeId: progress.nodeId ?? run.nodeId,
+              dependencies: progress.dependencies ?? run.dependencies,
+              nodeIds: appendNodeId(run.nodeIds, progress.nodeId),
+            },
       );
     case 'workflow.agent_spawned':
       return mapRun(runs, progress.runId, (run) => ({
         ...run,
         spawnedAgents: run.spawnedAgents + 1,
-        agents: [
-          ...run.agents,
-          {
-            agentId: progress.agentId,
-            ...(progress.label === undefined ? {} : { label: progress.label }),
-            ...(progress.phase === undefined ? {} : { phase: progress.phase }),
-            status: 'running',
-          },
-        ],
+        agents: appendAgent(run.agents, {
+          agentId: progress.agentId,
+          ...(progress.label === undefined ? {} : { label: progress.label }),
+          ...(progress.phase === undefined ? {} : { phase: progress.phase }),
+          status: 'running',
+          taskId: progress.taskId,
+          taskPath: progress.taskPath,
+          nodeId: progress.nodeId,
+          cache: progress.cache,
+          replayed: progress.replayed,
+          isolationLease: progress.isolationLease,
+          worktreePath: progress.worktreePath,
+        }, WORKFLOW_LEDGER_LIMITS.agents),
+        nodeIds: appendNodeId(run.nodeIds, progress.nodeId),
       }));
     case 'workflow.agent_completed':
       return mapRun(runs, progress.runId, (run) => {
@@ -174,14 +228,31 @@ export function applyWorkflowProgressEvent(
             ...(progress.model === undefined ? {} : { model: progress.model }),
             ...(progress.tokens === undefined ? {} : { tokens: progress.tokens }),
             ...(progress.summary === undefined ? {} : { summary: progress.summary }),
+            taskId: progress.taskId ?? agent.taskId,
+            taskPath: progress.taskPath ?? agent.taskPath,
+            nodeId: progress.nodeId ?? agent.nodeId,
+            cache: progress.cache ?? agent.cache,
+            replayed: progress.replayed ?? agent.replayed,
+            isolationLease: progress.isolationLease ?? agent.isolationLease,
+            worktreePath: progress.worktreePath ?? agent.worktreePath,
           };
         });
         if (!matched) return run;
-        return { ...run, completedAgents: run.completedAgents + 1, agents };
+        return {
+          ...run,
+          completedAgents: run.completedAgents + 1,
+          agents,
+          nodeIds: appendNodeId(run.nodeIds, progress.nodeId),
+        };
       });
     case 'workflow.log':
       return mapRun(runs, progress.runId, (run) =>
-        run.status !== 'running' ? run : { ...run, logLines: [...run.logLines, progress.message] },
+        run.status !== 'running'
+          ? run
+          : {
+              ...run,
+              logLines: appendLogLine(run.logLines, progress.message),
+            },
       );
     case 'workflow.completed':
       return mapRun(runs, progress.runId, (run) => {
@@ -189,6 +260,14 @@ export function applyWorkflowProgressEvent(
         return {
           ...run,
           status: progress.ok ? 'completed' : 'failed',
+          taskId: progress.taskId ?? run.taskId,
+          taskPath: progress.taskPath ?? run.taskPath,
+          nodeId: progress.nodeId ?? run.nodeId,
+          nodeIds: appendNodeId(run.nodeIds, progress.nodeId),
+          cache: progress.cache ?? run.cache,
+          replayed: progress.replayed ?? run.replayed,
+          isolationLease: progress.isolationLease ?? run.isolationLease,
+          worktreePath: progress.worktreePath ?? run.worktreePath,
           ...(progress.result === undefined ? {} : { result: progress.result }),
           ...(progress.error === undefined ? {} : { error: progress.error }),
           ...(progress.durationMs === undefined ? {} : { durationMs: progress.durationMs }),
@@ -205,6 +284,30 @@ export function applyWorkflowProgressEvent(
     default:
       return runs;
   }
+}
+
+function appendAgent(
+  agents: readonly WorkflowRunAgentView[],
+  agent: WorkflowRunAgentView,
+  limit: number,
+): readonly WorkflowRunAgentView[] {
+  return [...agents, agent].slice(-limit);
+}
+
+function appendLogLine(logLines: readonly string[], message: string): readonly string[] {
+  const boundedMessage = message.length > WORKFLOW_LEDGER_LIMITS.logLineCharacters
+    ? message.slice(0, WORKFLOW_LEDGER_LIMITS.logLineCharacters)
+    : message;
+  return [...logLines, boundedMessage].slice(-WORKFLOW_LEDGER_LIMITS.logs);
+}
+
+function appendNodeId(
+  nodeIds: readonly string[] | undefined,
+  nodeId: string | undefined,
+): readonly string[] {
+  if (nodeId === undefined || nodeId.length === 0) return nodeIds ?? [];
+  if (nodeIds?.includes(nodeId) === true) return nodeIds;
+  return [...(nodeIds ?? []), nodeId].slice(-WORKFLOW_LEDGER_LIMITS.nodes);
 }
 
 /**

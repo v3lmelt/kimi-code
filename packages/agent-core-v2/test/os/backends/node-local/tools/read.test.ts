@@ -22,7 +22,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { PathSecurityError } from '#/tool/path-access';
 import { MEDIA_SNIFF_BYTES } from '#/agent/media/file-type';
 import type { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
-import { stubWorkspaceContext } from '../../../../session/workspaceContext/stub-workspace-context';
+import {
+  stubAgentWorkspaceContext,
+  stubWorkspaceContext,
+} from '../../../../session/workspaceContext/stub-workspace-context';
 import type { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import {
   MAX_BYTES,
@@ -208,6 +211,12 @@ describe('ReadTool', () => {
 
     expect(execution.matchesRule?.('/etc/**')).toBe(true);
     expect(execution.matchesRule?.('/var/**')).toBe(false);
+  });
+
+  it('rejects a dedicated read outside the leased worktree', () => {
+    const tool = toolWithContent('', stubAgentWorkspaceContext('dedicated-worktree'));
+
+    expect(() => tool.resolveExecution({ path: '/workspace/outside.txt' })).toThrow(/worktree|workspace/i);
   });
 
   it('reads text content with stable one-based line numbers', async () => {
