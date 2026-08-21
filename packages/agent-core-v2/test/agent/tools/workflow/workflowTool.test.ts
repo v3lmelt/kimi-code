@@ -39,7 +39,13 @@ import {
   type ExecutableToolResult,
 } from '#/tool/toolContract';
 import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
-import { workflowJournalScope } from '#/agent/workflow/persist/journal';
+import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
+import {
+  WorkflowJournal,
+  workflowJournalDir,
+  workflowJournalScope,
+  workflowScriptSha256,
+} from '#/agent/workflow/persist/journal';
 import { IWorkflowBudgetService } from '#/agent/workflow/budget/workflowBudget';
 import {
   WorkflowTool,
@@ -124,6 +130,7 @@ const noopAppendLog: IAppendLogStore = {
   flush: async () => {},
   close: async () => {},
   acquire: () => toDisposable(() => {}),
+  acquireExclusive: async () => toDisposable(() => {}),
 };
 
 function toolContext(toolCallId = 'tc-1'): ExecutableToolContext {
@@ -309,7 +316,7 @@ describe('WorkflowTool', () => {
     expect(String(result.output)).toContain('status: running');
   });
 
-  it('rejects a terminal DAG resume when the source summary still has a lease', async () => {
+  it('recovers a terminal DAG resume when the source summary still has a lease', async () => {
     dagEnabled = true;
     journalRecords = [
       ...resumeDagRecords(true),
@@ -327,9 +334,8 @@ describe('WorkflowTool', () => {
       resumeFromRunId: RESUME_DAG_RUN_ID,
     });
 
-    expect(result.isError).toBe(true);
-    expect(String(result.output)).toContain('currently leased');
-    expect(registeredTasks).toHaveLength(0);
+    expect(result.isError).toBeFalsy();
+    expect(registeredTasks).toHaveLength(1);
   });
 
   it('rejects a scriptPath that escapes the session directory', () => {
@@ -372,5 +378,64 @@ describe('WorkflowTool', () => {
     const output = typeof result.output === 'string' ? result.output : '';
     expect(output).toContain('was found to resume');
     expect(registeredTasks).toHaveLength(0);
+  });
+
+  it('releases a durable resume reservation when registerTask fails so another run can claim it', async () => {
+    const appendLog = new AppendLogStore(new InMemoryStorageService());
+    let lockHeld = false;
+    appendLog.acquireExclusive = async () => {
+      if (lockHeld) throw new Error('test lock is held');
+      lockHeld = true;
+      return toDisposable(() => {
+        lockHeld = false;
+      });
+    };
+    const source = new WorkflowJournal({
+      runId: RESUME_DAG_RUN_ID,
+      dir: workflowJournalDir(SESSION.sessionDir, RESUME_DAG_RUN_ID),
+      scope: workflowJournalScope(SESSION.scope(), RESUME_DAG_RUN_ID),
+      log: appendLog,
+      allowMissingExclusiveLock: true,
+    });
+    source.writeWorkflowStarted({
+      script: VALID_SCRIPT,
+      scriptSha256: workflowScriptSha256(VALID_SCRIPT),
+      name: 'source',
+      description: 'source run',
+      startedAt: '2026-08-20T00:00:00.000Z',
+    });
+    source.writeWorkflowCompleted({ ok: true, completedAt: '2026-08-20T00:00:01.000Z' });
+    await appendLog.flush();
+
+    ix.set(IAppendLogStore, appendLog);
+    ix.stub(IAgentTaskService, {
+      registerTask: () => {
+        throw new Error('task registration failed');
+      },
+      getTask: () => undefined,
+      list: () => [],
+    } as unknown as IAgentTaskService);
+    const tool = ix.createInstance(WorkflowTool);
+    const result = await runTool(tool, {
+      script: VALID_SCRIPT,
+      resumeFromRunId: RESUME_DAG_RUN_ID,
+    });
+    expect(result.isError).toBe(true);
+    expect(String(result.output)).toContain('task registration failed');
+
+    const restarted = new WorkflowJournal({
+      runId: RESUME_DAG_RUN_ID,
+      dir: workflowJournalDir(SESSION.sessionDir, RESUME_DAG_RUN_ID),
+      scope: workflowJournalScope(SESSION.scope(), RESUME_DAG_RUN_ID),
+      log: appendLog,
+      allowMissingExclusiveLock: true,
+    });
+    await expect(restarted.readJournal()).resolves.toMatchObject({
+      resumeClaim: { state: 'released' },
+    });
+    const retry = await restarted.claimResume('wf_2222222222222222');
+    expect(retry.state).toBe('reserved');
+    await retry.release();
+    await appendLog.close();
   });
 });

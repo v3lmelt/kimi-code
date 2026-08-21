@@ -4,8 +4,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
+import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
 import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
 import {
   WorkflowDagJournal,
@@ -106,5 +110,44 @@ describe('Workflow DAG journal fold', () => {
     } as never;
     const journal = new WorkflowDagJournal({ runId, scope: 'scope', log });
     await expect(journal.readDagSummary()).rejects.toBeInstanceOf(WorkflowJournalCorruptionError);
+  });
+
+  it('retries a failed release flush before releasing the physical DAG lock', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'workflow-dag-lease-retry-'));
+    try {
+      const firstLog = new AppendLogStore(new FileStorageService(baseDir));
+      const secondLog = new AppendLogStore(new FileStorageService(baseDir));
+      const scope = `session/workflows/${runId}`;
+      const journal = new WorkflowDagJournal({
+        runId,
+        scope,
+        log: firstLog,
+      });
+      const lease = await journal.acquireRunLease();
+      const flush = firstLog.flush.bind(firstLog);
+      let fail = true;
+      firstLog.flush = async () => {
+        if (fail) {
+          fail = false;
+          throw new Error('release flush fault');
+        }
+        await flush();
+      };
+
+      await expect(lease.release()).rejects.toThrow('release flush fault');
+      expect(lease.state).toBe('held');
+      await expect(secondLog.acquireExclusive(scope, 'journal.jsonl')).rejects.toMatchObject({
+        code: 'storage.locked',
+      });
+
+      await lease.finalize();
+      expect(lease.state).toBe('released');
+      const lock = await secondLog.acquireExclusive(scope, 'journal.jsonl');
+      lock.dispose();
+      await firstLog.close();
+      await secondLog.close();
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
   });
 });

@@ -8,6 +8,11 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { spawn } from 'node:child_process';
+import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 import { SyncDescriptor } from '#/_base/di/descriptors';
 import { DisposableStore } from '#/_base/di/lifecycle';
@@ -16,8 +21,10 @@ import { AppendLogCorruptedError, IAppendLogStore } from '#/persistence/interfac
 import { IFileSystemStorageService } from '#/persistence/interface/storage';
 import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
 import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
+import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
 
 const enc = new TextEncoder();
+const PACKAGE_ROOT = fileURLToPath(new URL('../../../../', import.meta.url));
 
 interface Rec {
   readonly n: number;
@@ -67,6 +74,13 @@ describe('AppendLogStore', () => {
       out.push(r);
     }
     return out;
+  }
+
+  function fileAppendLogStore(baseDir: string): IAppendLogStore {
+    const localIx = disposables.add(new TestInstantiationService());
+    localIx.stub(IFileSystemStorageService, new FileStorageService(baseDir));
+    localIx.set(IAppendLogStore, new SyncDescriptor(AppendLogStore));
+    return localIx.get(IAppendLogStore);
   }
 
   it('reads nothing from an empty log', async () => {
@@ -835,4 +849,173 @@ describe('AppendLogStore', () => {
     const result2 = await record.readFrom<Rec>(SCOPE, KEY, mid);
     expect(result2.records).toEqual([{ n: 3 }]);
   });
+
+  it('does not pretend an in-memory backend provides a process-shared lock', async () => {
+    await expect(record.acquireExclusive!(SCOPE, KEY)).rejects.toThrow(
+      'cross-process append-log locks require a filesystem storage backend',
+    );
+  });
+
+  it('allows only one independent store to acquire a shared physical-log lock', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'append-log-lock-'));
+    try {
+      const first = fileAppendLogStore(baseDir);
+      const second = fileAppendLogStore(baseDir);
+      const results = await Promise.allSettled([
+        first.acquireExclusive!(SCOPE, KEY),
+        second.acquireExclusive!(SCOPE, KEY),
+      ]);
+      expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+      expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+
+      for (const result of results) {
+        if (result.status === 'fulfilled') result.value.dispose();
+      }
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  it('serializes acquisition across two node processes', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'append-log-lock-'));
+    try {
+      const first = spawnLockChild(baseDir, 0, true);
+      await first.acquired;
+      const second = spawnLockChild(baseDir, 1);
+      void second.acquired.catch(() => undefined);
+      const secondResult = await second.done;
+      expect(secondResult.code).toBe(2);
+      first.release();
+      const firstResult = await first.done;
+      expect(firstResult.code).toBe(0);
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  }, 15_000);
+
+  it('releases a lock for another independent store and preserves token ownership', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'append-log-lock-'));
+    try {
+      const first = fileAppendLogStore(baseDir);
+      const second = fileAppendLogStore(baseDir);
+      const firstLock = await first.acquireExclusive!(SCOPE, KEY);
+      const lockDir = join(baseDir, '.locks');
+      const [lockName] = await readdir(lockDir);
+      expect(lockName).toMatch(/^[a-f0-9]{64}\.lock$/);
+
+      // A same-process foreign token must survive disposal of the first
+      // owner. This is the ownership check that prevents one instance from
+      // deleting another instance's lock file.
+      const lockPath = join(lockDir, lockName!);
+      await writeFile(lockPath, JSON.stringify({ pid: process.pid, token: 'foreign-token' }));
+      firstLock.dispose();
+      await expect(second.acquireExclusive!(SCOPE, KEY)).rejects.toMatchObject({
+        code: 'storage.locked',
+      });
+
+      // A dead owner is reclaimable after the token-preserving release.
+      await writeFile(lockPath, JSON.stringify({ pid: 0, token: 'dead-token' }));
+      const secondLock = await second.acquireExclusive!(SCOPE, KEY);
+      secondLock.dispose();
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  it('maps normalized aliases to one lock and rejects paths outside the storage root', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'append-log-lock-'));
+    try {
+      const first = fileAppendLogStore(baseDir);
+      const second = fileAppendLogStore(baseDir);
+      const firstLock = await first.acquireExclusive!('agents/main/..', KEY);
+      await expect(second.acquireExclusive!('agents', KEY)).rejects.toMatchObject({
+        code: 'storage.locked',
+      });
+      firstLock.dispose();
+      await expect(second.acquireExclusive!('../outside', KEY)).rejects.toThrow(
+        'append-log path escapes its storage root',
+      );
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  });
 });
+
+function spawnLockChild(
+  baseDir: string,
+  holdMs: number,
+  waitForRelease = false,
+): {
+  readonly acquired: Promise<void>;
+  readonly done: Promise<{ readonly code: number | null; readonly stderr: string }>;
+  readonly release: () => void;
+} {
+  const source = `
+    import { AppendLogStore } from '@moonshot-ai/agent-core-v2/persistence/backends/node-fs/appendLogStore';
+    import { FileStorageService } from '@moonshot-ai/agent-core-v2/persistence/backends/node-fs/fileStorageService';
+    const store = new AppendLogStore(new FileStorageService(process.env.APPEND_LOCK_DIR));
+    try {
+      const lock = await store.acquireExclusive('agents/main', 'wire.jsonl');
+      process.stdout.write('acquired\\n');
+      if (process.env.APPEND_LOCK_WAIT_FOR_RELEASE === '1') {
+        await new Promise((resolve) => process.stdin.once('data', () => resolve()));
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, Number(process.env.APPEND_LOCK_HOLD_MS)));
+      }
+      lock.dispose();
+    } catch (error) {
+      process.stderr.write(String(error));
+      process.exitCode = 2;
+    }
+  `;
+  const child = spawn(
+    process.execPath,
+    ['--import', 'tsx', '--input-type=module', '-e', source],
+    {
+      cwd: PACKAGE_ROOT,
+      env: {
+        ...process.env,
+        APPEND_LOCK_DIR: baseDir,
+        APPEND_LOCK_HOLD_MS: String(holdMs),
+        APPEND_LOCK_WAIT_FOR_RELEASE: waitForRelease ? '1' : '0',
+      },
+      stdio: ['pipe', 'pipe', 'pipe'],
+    },
+  );
+
+  let output = '';
+  let acquiredResolve!: () => void;
+  let acquiredReject!: (error: Error) => void;
+  let settled = false;
+  const acquired = new Promise<void>((resolve, reject) => {
+    acquiredResolve = resolve;
+    acquiredReject = reject;
+  });
+  child.stdout.on('data', (chunk: Buffer) => {
+    output += chunk.toString();
+    if (output.includes('acquired')) {
+      settled = true;
+      acquiredResolve();
+    }
+  });
+  child.on('error', (error) => {
+    if (!settled) {
+      settled = true;
+      acquiredReject(error);
+    }
+  });
+  const done = new Promise<{ readonly code: number | null; readonly stderr: string }>((resolve) => {
+    let stderr = '';
+    child.stderr.on('data', (chunk: Buffer) => {
+      stderr += chunk.toString();
+    });
+    child.on('close', (code) => {
+      if (!settled) {
+        settled = true;
+        acquiredReject(new Error(`lock child exited before acquiring: ${stderr}`));
+      }
+      resolve({ code, stderr });
+    });
+  });
+  return { acquired, done, release: () => child.stdin.end('release\n') };
+}

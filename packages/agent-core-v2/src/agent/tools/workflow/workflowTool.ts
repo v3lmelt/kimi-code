@@ -31,7 +31,6 @@
  */
 
 import { ILogService } from '#/_base/log/log';
-import type { IDisposable } from '#/_base/di/lifecycle';
 import { Error2, ErrorCodes } from '#/errors';
 import { IConfigService } from '#/app/config/config';
 import { IFlagService } from '#/app/flag/flag';
@@ -77,7 +76,10 @@ import {
   workflowJournalScope,
   workflowScriptSha256,
 } from '#/agent/workflow/persist/journal';
-import type { WorkflowDagJournalSummary } from '#/agent/workflow/persist/dagJournal';
+import type {
+  WorkflowDagJournalSummary,
+  WorkflowResumeClaimHandle,
+} from '#/agent/workflow/persist/dagJournal';
 import { telemetryWorkflowHook } from '#/agent/workflow/progress/workflowProgress';
 import { IWorkflowBudgetService } from '#/agent/workflow/budget/workflowBudget';
 import {
@@ -223,7 +225,7 @@ export class WorkflowTool implements IWorkflowTool {
     ctx: ExecutableToolContext,
     scriptPath: string | undefined,
   ): Promise<ExecutableToolResult> {
-    let resumeLease: IDisposable | undefined;
+    let resumeClaim: WorkflowResumeClaimHandle | undefined;
     try {
       ctx.signal.throwIfAborted();
 
@@ -240,8 +242,8 @@ export class WorkflowTool implements IWorkflowTool {
       const journal = this.createJournal(runId);
       await this.persistScript(runId, source);
 
-      const resume = await this.loadResume(args.resumeFromRunId, source, scriptSha256);
-      resumeLease = resume?.lease;
+      const resume = await this.loadResume(args.resumeFromRunId, runId, source, scriptSha256);
+      resumeClaim = resume?.claim;
 
       const task = new WorkflowTask({
         runId,
@@ -263,17 +265,20 @@ export class WorkflowTool implements IWorkflowTool {
         spawnDeps: this.spawnDeps,
         parentToolCallId: ctx.toolCallId,
         resume,
+        resumeClaim,
       });
 
       const registerOptions: RegisterAgentTaskOptions = {
         detached: true,
       };
       const taskId = this.tasks.registerTask(task, registerOptions);
-      resumeLease = undefined;
+      resumeClaim = undefined;
 
       return { output: formatWorkflowLaunch(taskId, runId, compiled.meta) };
     } catch (error) {
-      resumeLease?.dispose();
+      await resumeClaim?.release().catch((releaseError) => {
+        this.log.warn('workflow resume claim release failed', { error: releaseError });
+      });
       return { output: `workflow error: ${errorMessage(error)}`, isError: true };
     }
   }
@@ -297,34 +302,46 @@ export class WorkflowTool implements IWorkflowTool {
     const scriptSha256 = workflowScriptSha256(serialized);
     const journal = this.createJournal(runId);
     await this.persistGraph(runId, serialized);
-    const dagResume = await this.loadDagResume(args.resumeFromRunId, runId);
-    const meta: WorkflowScriptMeta = {
-      name: graph.graph.name ?? 'Workflow DAG',
-      description: graph.graph.description ?? 'Verified WorkflowGraph execution',
-    };
-    const task = new WorkflowTask({
-      runId,
-      script: serialized,
-      scriptSha256,
-      name: meta.name,
-      description: meta.description,
-      args: args.args,
-      meta,
-      tokenBudgetTotal: this.budget.total(),
-      budget: this.budget.budget(),
-      onSubagentUsage: (usage) => this.budget.recordSubagentUsage(usage),
-      journal,
-      wire: this.wire,
-      telemetry: telemetryWorkflowHook(this.telemetry),
-      log: this.log,
-      spawnDeps: this.spawnDeps,
-      parentToolCallId: ctx.toolCallId,
-      graph,
-      dagResume,
-      fingerprintContext,
-    });
-    const taskId = this.tasks.registerTask(task, { detached: true });
-    return { output: formatWorkflowLaunch(taskId, runId, meta) };
+    let resumeClaim: WorkflowResumeClaimHandle | undefined;
+    try {
+      const dagResume = await this.loadDagResume(args.resumeFromRunId, runId, (claim) => {
+        resumeClaim = claim;
+      });
+      const meta: WorkflowScriptMeta = {
+        name: graph.graph.name ?? 'Workflow DAG',
+        description: graph.graph.description ?? 'Verified WorkflowGraph execution',
+      };
+      const task = new WorkflowTask({
+        runId,
+        script: serialized,
+        scriptSha256,
+        name: meta.name,
+        description: meta.description,
+        args: args.args,
+        meta,
+        tokenBudgetTotal: this.budget.total(),
+        budget: this.budget.budget(),
+        onSubagentUsage: (usage) => this.budget.recordSubagentUsage(usage),
+        journal,
+        wire: this.wire,
+        telemetry: telemetryWorkflowHook(this.telemetry),
+        log: this.log,
+        spawnDeps: this.spawnDeps,
+        parentToolCallId: ctx.toolCallId,
+        graph,
+        dagResume,
+        resumeClaim,
+        fingerprintContext,
+      });
+      const taskId = this.tasks.registerTask(task, { detached: true });
+      resumeClaim = undefined;
+      return { output: formatWorkflowLaunch(taskId, runId, meta) };
+    } catch (error) {
+      await resumeClaim?.release().catch((releaseError) => {
+        this.log.warn('workflow resume claim release failed', { error: releaseError });
+      });
+      throw error;
+    }
   }
 
   private async resolveSource(args: WorkflowToolInput, resolvedScriptPath?: string): Promise<string> {
@@ -351,6 +368,7 @@ export class WorkflowTool implements IWorkflowTool {
   private async loadDagResume(
     resumeFromRunId: string | undefined,
     claimedBy: WorkflowRunId,
+    onClaim?: (claim: WorkflowResumeClaimHandle) => void,
   ): Promise<WorkflowDagJournalSummary | undefined> {
     if (resumeFromRunId === undefined || resumeFromRunId.trim().length === 0) return undefined;
     const priorRunId = resumeFromRunId.trim();
@@ -363,23 +381,16 @@ export class WorkflowTool implements IWorkflowTool {
       scope: workflowJournalScope(this.session.scope(), priorRunId),
       log: this.logStore,
     });
-    const summary = await journal.readJournal({ recoverRunning: true, lostAt: new Date().toISOString() });
-    if (summary === undefined) {
-      throw new Error2(ErrorCodes.VALIDATION_FAILED, `No workflow run "${priorRunId}" was found to resume.`);
+    let claimed: Awaited<ReturnType<WorkflowJournal['claimResume']>>;
+    try {
+      claimed = await journal.claimResume(claimedBy);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('No workflow run')) {
+        throw new Error2(ErrorCodes.VALIDATION_FAILED, error.message);
+      }
+      throw error;
     }
-    if (summary.lease.held) {
-      throw new Error2(
-        ErrorCodes.VALIDATION_FAILED,
-        `Workflow run "${priorRunId}" is currently leased and cannot be resumed.`,
-      );
-    }
-    if (summary.terminal === undefined) {
-      throw new Error2(
-        ErrorCodes.VALIDATION_FAILED,
-        `Workflow run "${priorRunId}" is still running and cannot be resumed.`,
-      );
-    }
-    const claimed = await journal.claimResume(claimedBy);
+    onClaim?.(claimed);
     return {
       runId: claimed.runId,
       started: true,
@@ -467,6 +478,7 @@ export class WorkflowTool implements IWorkflowTool {
 
   private async loadResume(
     resumeFromRunId: string | undefined,
+    claimedBy: WorkflowRunId,
     source: string,
     scriptSha256: string,
   ): Promise<WorkflowResumeLedger | undefined> {
@@ -481,20 +493,16 @@ export class WorkflowTool implements IWorkflowTool {
       dir: workflowJournalDir(this.session.sessionDir, priorRunId),
       log: this.logStore,
     });
-    const summary = await journal.readJournal();
-    if (summary === undefined) {
-      throw new Error2(
-        ErrorCodes.VALIDATION_FAILED,
-        `No workflow run "${priorRunId}" was found to resume.`,
-      );
+    let claimed: Awaited<ReturnType<WorkflowJournal['claimResume']>>;
+    try {
+      claimed = await journal.claimResume(claimedBy);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('No workflow run')) {
+        throw new Error2(ErrorCodes.VALIDATION_FAILED, error.message);
+      }
+      throw error;
     }
-    if (summary.status === 'running') {
-      throw new Error2(
-        ErrorCodes.VALIDATION_FAILED,
-        `Workflow run "${priorRunId}" is still running and cannot be resumed.`,
-      );
-    }
-    if (summary.scriptSha256 !== scriptSha256) {
+    if (claimed.scriptSha256 !== scriptSha256) {
       // A changed script is fine — the journal records each agent's cache key
       // (`sha256(prompt, effectiveOpts)`), so unchanged `agent()` calls replay
       // from cache and only edited or new calls re-run.
@@ -502,7 +510,11 @@ export class WorkflowTool implements IWorkflowTool {
         runId: priorRunId,
       });
     }
-    return { sourceRunId: priorRunId, completedByCacheKey: summary.completedByCacheKey };
+    return {
+      sourceRunId: priorRunId,
+      completedByCacheKey: claimed.completedByCacheKey,
+      claim: claimed,
+    };
   }
 }
 

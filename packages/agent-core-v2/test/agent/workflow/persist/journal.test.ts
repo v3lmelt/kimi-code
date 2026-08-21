@@ -9,8 +9,13 @@
  */
 
 import { describe, expect, it } from 'vitest';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
+import { toDisposable } from '#/_base/di/lifecycle';
 import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
+import { FileStorageService } from '#/persistence/backends/node-fs/fileStorageService';
 import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
 import {
   WorkflowJournal,
@@ -42,16 +47,22 @@ function makeJournal(runId = generateWorkflowRunId()): {
     scope: workflowJournalScope('sessions/s-1', runId),
     dir: workflowJournalDir('sessions/s-1', runId),
     log,
+    allowMissingExclusiveLock: true,
   });
   return { journal, runId };
 }
 
-function makeJournalWithLog(log: AppendLogStore, runId = generateWorkflowRunId()): WorkflowJournal {
+function makeJournalWithLog(
+  log: AppendLogStore,
+  runId = generateWorkflowRunId(),
+  allowMissingExclusiveLock = true,
+): WorkflowJournal {
   return new WorkflowJournal({
     runId,
     scope: workflowJournalScope('sessions/s-1', runId),
     dir: workflowJournalDir('sessions/s-1', runId),
     log,
+    allowMissingExclusiveLock,
   });
 }
 
@@ -395,7 +406,7 @@ describe('WorkflowJournal', () => {
     expect(summary?.agents[1]).toMatchObject({ ok: undefined });
   });
 
-  it('rejects a terminal resume while the source journal lease is held', async () => {
+  it('recovers a terminal source whose legacy lease is still held', async () => {
     const log = new AppendLogStore(new InMemoryStorageService());
     const runId = 'wf_0123456789abcdef' as const;
     const journal = makeJournalWithLog(log, runId);
@@ -410,13 +421,48 @@ describe('WorkflowJournal', () => {
     await log.flush();
 
     const lease = await journal.acquireRunLease();
-    await expect(journal.claimResume('wf_fedcba9876543210')).rejects.toThrow(/already leased/);
     await expect(journal.readJournal()).resolves.toMatchObject({
       terminal: 'completed',
-      lease: { held: true },
+      lease: {
+        held: true,
+        recoverable: true,
+        diagnostic: 'terminal-held-lease',
+      },
     });
-    lease.dispose();
-    await expect(journal.readJournal()).resolves.toMatchObject({ lease: { held: false } });
+    const claim = await journal.claimResume('wf_fedcba9876543210');
+    expect(claim.state).toBe('reserved');
+    await claim.release();
+    await expect(journal.readJournal()).resolves.toMatchObject({
+      terminal: 'completed',
+      lease: { held: false },
+      resumeClaim: { state: 'released' },
+    });
+    await lease.finalize();
+    await log.close();
+  });
+
+  it('reports when a production journal has no physical exclusive lock', async () => {
+    const log = new AppendLogStore(new InMemoryStorageService());
+    const sourceRunId = 'wf_0123456789abcdef' as const;
+    const journal = new WorkflowJournal({
+      runId: sourceRunId,
+      scope: workflowJournalScope('sessions/s-1', sourceRunId),
+      dir: workflowJournalDir('sessions/s-1', sourceRunId),
+      log,
+    });
+    journal.writeWorkflowStarted({
+      script: SCRIPT,
+      scriptSha256: workflowScriptSha256(SCRIPT),
+      name: 'lock capability',
+      description: 'lock capability',
+      startedAt: '2026-08-14T00:00:00.000Z',
+    });
+    journal.writeWorkflowCompleted({ ok: true, completedAt: '2026-08-14T00:00:01.000Z' });
+    await log.flush();
+
+    await expect(journal.claimResume('wf_fedcba9876543210')).rejects.toThrow(
+      'cross-process append-log locks require a filesystem storage backend',
+    );
     await log.close();
   });
 
@@ -477,7 +523,20 @@ describe('WorkflowJournal', () => {
     const sourceRunId = 'wf_0123456789abcdef' as const;
     const firstRunId = 'wf_fedcba9876543210' as const;
     const secondRunId = 'wf_aaaaaaaaaaaaaaaa' as const;
-    const journal = makeJournalWithLog(log, sourceRunId);
+    let exclusiveHeld = false;
+    log.acquireExclusive = async () => {
+      if (exclusiveHeld) throw new Error('test exclusive lock is held');
+      exclusiveHeld = true;
+      return toDisposable(() => {
+        exclusiveHeld = false;
+      });
+    };
+    const journal = new WorkflowJournal({
+      runId: sourceRunId,
+      scope: workflowJournalScope('sessions/s-1', sourceRunId),
+      dir: workflowJournalDir('sessions/s-1', sourceRunId),
+      log,
+    });
     journal.writeWorkflowStarted({
       script: SCRIPT,
       scriptSha256: workflowScriptSha256(SCRIPT),
@@ -498,5 +557,351 @@ describe('WorkflowJournal', () => {
       first.status === 'fulfilled' ? firstRunId : secondRunId,
     );
     await log.close();
+  });
+
+  it('folds reserved and released claims, then keeps a committed claim permanent across restart', async () => {
+    const log = new AppendLogStore(new InMemoryStorageService());
+    const sourceRunId = 'wf_0123456789abcdef' as const;
+    const firstDestination = 'wf_fedcba9876543210' as const;
+    const secondDestination = 'wf_aaaaaaaaaaaaaaaa' as const;
+    const journal = makeJournalWithLog(log, sourceRunId);
+    journal.writeWorkflowStarted({
+      script: SCRIPT,
+      scriptSha256: workflowScriptSha256(SCRIPT),
+      name: 'claim-state',
+      description: 'claim state machine',
+      startedAt: '2026-08-14T00:00:00.000Z',
+    });
+    journal.writeWorkflowCompleted({ ok: true, completedAt: '2026-08-14T00:00:01.000Z' });
+    await log.flush();
+
+    const reserved = await journal.claimResume(firstDestination);
+    expect(reserved.state).toBe('reserved');
+    await reserved.release();
+    const afterRelease = makeJournalWithLog(log, sourceRunId);
+    await expect(afterRelease.readJournal()).resolves.toMatchObject({
+      resumeClaim: { state: 'released', claimedBy: firstDestination },
+    });
+
+    const committed = await afterRelease.claimResume(secondDestination);
+    await committed.commit();
+    await committed.commit();
+    await committed.release();
+    await committed.release();
+
+    const restarted = makeJournalWithLog(log, sourceRunId);
+    await expect(restarted.readJournal()).resolves.toMatchObject({
+      resumeClaim: { state: 'committed', claimedBy: secondDestination },
+      claimedBy: secondDestination,
+    });
+    await expect(restarted.claimResume(firstDestination)).rejects.toBeInstanceOf(WorkflowRunAlreadyClaimedError);
+    await log.close();
+  });
+
+  it('recovers a reserved claim after the destination started when source commit had a flush fault', async () => {
+    const storage = new InMemoryStorageService();
+    const log = new AppendLogStore(storage);
+    const sourceRunId = 'wf_0123456789abcdef' as const;
+    const destinationRunId = 'wf_fedcba9876543210' as const;
+    const source = makeJournalWithLog(log, sourceRunId);
+    source.writeWorkflowStarted({
+      script: SCRIPT,
+      scriptSha256: workflowScriptSha256(SCRIPT),
+      name: 'source',
+      description: 'source run',
+      startedAt: '2026-08-14T00:00:00.000Z',
+    });
+    source.writeWorkflowCompleted({ ok: true, completedAt: '2026-08-14T00:00:01.000Z' });
+    await log.flush();
+
+    const claim = await source.claimResume(destinationRunId);
+    const destination = makeJournalWithLog(log, destinationRunId);
+    destination.writeWorkflowStarted({
+      script: SCRIPT,
+      scriptSha256: workflowScriptSha256(SCRIPT),
+      name: 'destination',
+      description: 'destination run',
+      startedAt: '2026-08-14T00:01:00.000Z',
+    });
+    await log.flush();
+
+    const flush = log.flush.bind(log);
+    let failCommitFlush = true;
+    log.flush = async () => {
+      if (failCommitFlush) {
+        failCommitFlush = false;
+        throw new Error('source commit flush fault');
+      }
+      await flush();
+    };
+    await expect(claim.commit()).rejects.toThrow('source commit flush fault');
+
+    const restartedLog = new AppendLogStore(storage);
+    const restarted = makeJournalWithLog(restartedLog, sourceRunId);
+    const recovered = await restarted.claimResume(destinationRunId);
+    expect(recovered.state).toBe('committed');
+    await recovered.release();
+    await expect(restarted.readJournal()).resolves.toMatchObject({
+      resumeClaim: { state: 'committed', claimedBy: destinationRunId },
+    });
+
+    await log.close();
+    await restartedLog.close();
+  });
+
+  it('keeps the pre-state-machine resume claim compatible and idempotent for its original owner', async () => {
+    const log = new AppendLogStore(new InMemoryStorageService());
+    const sourceRunId = 'wf_0123456789abcdef' as const;
+    const destinationRunId = 'wf_fedcba9876543210' as const;
+    const journal = makeJournalWithLog(log, sourceRunId);
+    journal.writeWorkflowStarted({
+      script: SCRIPT,
+      scriptSha256: workflowScriptSha256(SCRIPT),
+      name: 'legacy-claim',
+      description: 'legacy claim',
+      startedAt: '2026-08-14T00:00:00.000Z',
+    });
+    journal.writeWorkflowCompleted({ ok: true, completedAt: '2026-08-14T00:00:01.000Z' });
+    journal.writeWorkflowResumeClaim(destinationRunId, '2026-08-14T00:00:02.000Z');
+    await log.flush();
+
+    const restarted = makeJournalWithLog(log, sourceRunId);
+    await expect(restarted.readJournal()).resolves.toMatchObject({
+      resumeClaim: { state: 'committed', claimedBy: destinationRunId, legacy: true },
+    });
+    const sameOwner = await restarted.claimResume(destinationRunId);
+    expect(sameOwner.state).toBe('committed');
+    await sameOwner.release();
+    await expect(restarted.claimResume('wf_aaaaaaaaaaaaaaaa')).rejects.toBeInstanceOf(WorkflowRunAlreadyClaimedError);
+    await log.close();
+  });
+
+  it('serializes resume claims across independent filesystem stores', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'workflow-claim-'));
+    try {
+      const firstLog = new AppendLogStore(new FileStorageService(baseDir));
+      const secondLog = new AppendLogStore(new FileStorageService(baseDir));
+      const sourceRunId = 'wf_0123456789abcdef' as const;
+      const firstDestination = 'wf_fedcba9876543210' as const;
+      const secondDestination = 'wf_aaaaaaaaaaaaaaaa' as const;
+      const first = makeJournalWithLog(firstLog, sourceRunId, false);
+      first.writeWorkflowStarted({
+        script: SCRIPT,
+        scriptSha256: workflowScriptSha256(SCRIPT),
+        name: 'cross-store',
+        description: 'cross-store claim',
+        startedAt: '2026-08-14T00:00:00.000Z',
+      });
+      first.writeWorkflowCompleted({ ok: true, completedAt: '2026-08-14T00:00:01.000Z' });
+      await firstLog.flush();
+
+      const second = makeJournalWithLog(secondLog, sourceRunId, false);
+      const results = await Promise.allSettled([
+        first.claimResume(firstDestination),
+        second.claimResume(secondDestination),
+      ]);
+      const fulfilled = results.filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<WorkflowJournal['claimResume']>>> => result.status === 'fulfilled');
+      const rejected = results.filter((result) => result.status === 'rejected');
+      expect(fulfilled).toHaveLength(1);
+      expect(rejected).toHaveLength(1);
+      await fulfilled[0]!.value.release();
+
+      const restarted = makeJournalWithLog(new AppendLogStore(new FileStorageService(baseDir)), sourceRunId, false);
+      await expect(restarted.readJournal()).resolves.toMatchObject({ resumeClaim: { state: 'released' } });
+      await firstLog.close();
+      await secondLog.close();
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the physical lease lock until the release and terminal records are flushed', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'workflow-lease-'));
+    try {
+      const firstLog = new AppendLogStore(new FileStorageService(baseDir));
+      const secondLog = new AppendLogStore(new FileStorageService(baseDir));
+      const runId = 'wf_0123456789abcdef' as const;
+      const first = new WorkflowJournal({
+        runId,
+        dir: workflowJournalDir('sessions/s-1', runId),
+        scope: workflowJournalScope('sessions/s-1', runId),
+        log: firstLog,
+      });
+      const second = new WorkflowJournal({
+        runId,
+        dir: workflowJournalDir('sessions/s-1', runId),
+        scope: workflowJournalScope('sessions/s-1', runId),
+        log: secondLog,
+      });
+      first.writeWorkflowStarted({
+        script: SCRIPT,
+        scriptSha256: workflowScriptSha256(SCRIPT),
+        name: 'lease-order',
+        description: 'lease order',
+        startedAt: '2026-08-14T00:00:00.000Z',
+      });
+      await firstLog.flush();
+      const lease = await first.acquireRunLease();
+      await lease.release();
+      first.writeWorkflowCompleted({ ok: true, completedAt: '2026-08-14T00:00:01.000Z' });
+      await first.flush();
+
+      await expect(secondLog.acquireExclusive(first.scope, 'journal.jsonl')).rejects.toMatchObject({
+        code: 'storage.locked',
+      });
+      await lease.finalize();
+      const lock = await secondLog.acquireExclusive(first.scope, 'journal.jsonl');
+      lock.dispose();
+
+      const records: Array<{ readonly kind?: string }> = [];
+      for await (const record of firstLog.read<{ readonly kind?: string }>(first.scope, 'journal.jsonl')) records.push(record);
+      const releaseIndex = records.findIndex((record) => record.kind === 'workflow.lease.released');
+      const terminalIndex = records.findIndex((record) => record.kind === 'workflow.completed');
+      expect(releaseIndex).toBeGreaterThanOrEqual(0);
+      expect(terminalIndex).toBeGreaterThan(releaseIndex);
+      await firstLog.close();
+      await secondLog.close();
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  it('retries a failed release flush before releasing the physical lock', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'workflow-lease-retry-'));
+    try {
+      const firstLog = new AppendLogStore(new FileStorageService(baseDir));
+      const secondLog = new AppendLogStore(new FileStorageService(baseDir));
+      const runId = 'wf_0123456789abcdef' as const;
+      const journal = new WorkflowJournal({
+        runId,
+        dir: workflowJournalDir('sessions/s-1', runId),
+        scope: workflowJournalScope('sessions/s-1', runId),
+        log: firstLog,
+      });
+      const lease = await journal.acquireRunLease();
+      const flush = firstLog.flush.bind(firstLog);
+      let fail = true;
+      firstLog.flush = async () => {
+        if (fail) {
+          fail = false;
+          throw new Error('release flush fault');
+        }
+        await flush();
+      };
+
+      await expect(lease.release()).rejects.toThrow('release flush fault');
+      expect(lease.state).toBe('held');
+      await expect(secondLog.acquireExclusive(journal.scope, 'journal.jsonl')).rejects.toMatchObject({
+        code: 'storage.locked',
+      });
+
+      await lease.finalize();
+      expect(lease.state).toBe('released');
+      const lock = await secondLog.acquireExclusive(journal.scope, 'journal.jsonl');
+      lock.dispose();
+
+      const records: Array<{ readonly kind?: string }> = [];
+      for await (const record of firstLog.read<{ readonly kind?: string }>(journal.scope, 'journal.jsonl')) records.push(record);
+      expect(records.filter((record) => record.kind === 'workflow.lease.released')).toHaveLength(1);
+      await firstLog.close();
+      await secondLog.close();
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  it('shares an in-flight release retry across release and finalize calls', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'workflow-lease-concurrent-'));
+    try {
+      const firstLog = new AppendLogStore(new FileStorageService(baseDir));
+      const secondLog = new AppendLogStore(new FileStorageService(baseDir));
+      const runId = 'wf_0123456789abcdef' as const;
+      const journal = new WorkflowJournal({
+        runId,
+        dir: workflowJournalDir('sessions/s-1', runId),
+        scope: workflowJournalScope('sessions/s-1', runId),
+        log: firstLog,
+      });
+      const lease = await journal.acquireRunLease();
+      const flush = firstLog.flush.bind(firstLog);
+      let flushCalls = 1;
+      let releaseFlushStartedResolve!: () => void;
+      const releaseFlushStarted = new Promise<void>((resolve) => { releaseFlushStartedResolve = resolve; });
+      let allowReleaseFlushResolve!: () => void;
+      const allowReleaseFlush = new Promise<void>((resolve) => { allowReleaseFlushResolve = resolve; });
+      firstLog.flush = async () => {
+        flushCalls++;
+        if (flushCalls === 2) throw new Error('initial release flush fault');
+        if (flushCalls === 3) {
+          releaseFlushStartedResolve();
+          await allowReleaseFlush;
+        }
+        await flush();
+      };
+
+      await expect(lease.release()).rejects.toThrow('initial release flush fault');
+      const retry = lease.release();
+      await releaseFlushStarted;
+      const concurrentRetry = lease.release();
+      const finalize = lease.finalize();
+      expect(concurrentRetry).toBe(retry);
+      expect(flushCalls).toBe(3);
+      allowReleaseFlushResolve();
+      await Promise.all([retry, concurrentRetry, finalize]);
+      expect(lease.state).toBe('released');
+      expect(flushCalls).toBe(4);
+
+      const lock = await secondLog.acquireExclusive(journal.scope, 'journal.jsonl');
+      lock.dispose();
+      const records: Array<{ readonly kind?: string }> = [];
+      for await (const record of firstLog.read<{ readonly kind?: string }>(journal.scope, 'journal.jsonl')) records.push(record);
+      expect(records.filter((record) => record.kind === 'workflow.lease.released')).toHaveLength(1);
+      await firstLog.close();
+      await secondLog.close();
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps the physical lock held across repeated release flush failures', async () => {
+    const baseDir = await mkdtemp(join(tmpdir(), 'workflow-lease-repeat-'));
+    try {
+      const firstLog = new AppendLogStore(new FileStorageService(baseDir));
+      const secondLog = new AppendLogStore(new FileStorageService(baseDir));
+      const runId = 'wf_0123456789abcdef' as const;
+      const journal = new WorkflowJournal({
+        runId,
+        dir: workflowJournalDir('sessions/s-1', runId),
+        scope: workflowJournalScope('sessions/s-1', runId),
+        log: firstLog,
+      });
+      const lease = await journal.acquireRunLease();
+      const flush = firstLog.flush.bind(firstLog);
+      let failures = 3;
+      firstLog.flush = async () => {
+        if (failures > 0) {
+          failures--;
+          throw new Error('persistent release flush fault');
+        }
+        await flush();
+      };
+
+      await expect(lease.release()).rejects.toThrow('persistent release flush fault');
+      await expect(lease.finalize()).rejects.toThrow('persistent release flush fault');
+      await expect(lease.finalize()).rejects.toThrow('persistent release flush fault');
+      expect(lease.state).toBe('held');
+      await expect(secondLog.acquireExclusive(journal.scope, 'journal.jsonl')).rejects.toMatchObject({
+        code: 'storage.locked',
+      });
+
+      firstLog.flush = flush;
+      await lease.finalize();
+      const lock = await secondLog.acquireExclusive(journal.scope, 'journal.jsonl');
+      lock.dispose();
+      await firstLog.close();
+      await secondLog.close();
+    } finally {
+      await rm(baseDir, { recursive: true, force: true });
+    }
   });
 });

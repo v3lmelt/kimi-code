@@ -95,8 +95,13 @@ export interface IAppendLogStore {
    * durable journal decision. It does not replace the journal records: the
    * resulting state must still be represented by the append log so a fresh
    * process can fold it after restart.
+   *
+   * Filesystem backends may need asynchronous coordination with other
+   * processes; synchronous implementations remain valid for compatibility
+   * with in-process stores. Backends without a process-shared primitive may
+   * omit this optional capability.
    */
-  acquireExclusive?(scope: string, key: string): IDisposable;
+  acquireExclusive?(scope: string, key: string): IDisposable | Promise<IDisposable>;
 }
 
 export const IAppendLogStore: ServiceIdentifier<IAppendLogStore> =

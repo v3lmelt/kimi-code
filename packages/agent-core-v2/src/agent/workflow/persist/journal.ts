@@ -13,7 +13,9 @@
  *   resumed run can rebuild the phase cursor and the spawned-agent ledger;
  * - `agent.completed` — each completed subagent's agentId, ok flag and result
  *   (the `output`, or the validated structured output), duration, and error;
- * - `workflow.completed` — the terminal settlement (ok, result/error).
+ * - `workflow.completed` — the terminal settlement (ok, result/error);
+ * - `workflow.resume.reserved` / `.committed` / `.released` — the restartable
+ *   source-to-destination resume claim state machine.
  *
  * `readJournal` folds the stream back into a `WorkflowJournalSummary` whose
  * `completedAgentIds` is exactly what resume consumes: the executor replays
@@ -31,26 +33,33 @@ import { join } from 'pathe';
 import { BugIndicatingError } from '#/errors';
 import type { IDisposable } from '#/_base/di/lifecycle';
 import type { IAppendLogStore } from '#/persistence/interface/appendLogStore';
-import type { WorkflowPhaseMeta, WorkflowRunId, WorkflowRunStatus } from '#/agent/workflow/types';
 import type {
   WorkflowNodeId,
   WorkflowNodeProvenance,
   WorkflowNodeResult,
+  WorkflowPhaseMeta,
+  WorkflowRunId,
+  WorkflowRunStatus,
 } from '#/agent/workflow/types';
-import type {
-  FoldWorkflowJournalOptions,
-  WorkflowNodeJournalRecord,
-  WorkflowNodeJournalRecordError,
-} from './dagJournal';
 import {
+  type FoldWorkflowJournalOptions,
+  type WorkflowNodeJournalRecord,
+  type WorkflowNodeJournalRecordError,
   type WorkflowRunLease,
   type WorkflowRunLeaseState,
   type WorkflowRunTerminal,
   type WorkflowRunLeaseRecord,
   type WorkflowResumeClaimRecord,
+  type WorkflowResumeClaimHandle,
+  type WorkflowResumeClaimState,
   assertWorkflowNodeJournalRecord,
   foldWorkflowJournal,
   foldWorkflowRunLease,
+  foldWorkflowResumeClaim,
+  createWorkflowRunLease,
+  isWorkflowResumeClaimExpired,
+  workflowDestinationJournalScope,
+  workflowResumeClaimExpiresAt,
   WorkflowRunAlreadyClaimedError,
   WorkflowRunAlreadyLeasedError,
   WorkflowJournalCorruptionError,
@@ -321,6 +330,7 @@ export interface WorkflowJournalSummary {
   readonly terminal: WorkflowRunTerminal | undefined;
   readonly lease: WorkflowRunLeaseState;
   readonly claimedBy?: WorkflowRunId;
+  readonly resumeClaim?: WorkflowResumeClaimState;
   readonly startedAt: string;
   readonly completedAt?: string;
   readonly ok?: boolean;
@@ -369,6 +379,13 @@ export interface WorkflowJournalOptions {
   readonly dir: string;
   readonly log: IAppendLogStore;
   readonly onError?: (error: unknown) => void;
+  /**
+   * Test-only escape hatch for stores that intentionally have no physical
+   * cross-process lock. Production journals must leave this disabled so a
+   * missing coordination primitive is surfaced instead of becoming a
+   * process-local best effort.
+   */
+  readonly allowMissingExclusiveLock?: boolean;
 }
 
 /**
@@ -398,21 +415,36 @@ export class WorkflowJournal {
     return this.options.log.acquire(this.options.scope, WORKFLOW_JOURNAL_KEY);
   }
 
+  /** Flush journal records before a lifecycle boundary is made durable. */
+  async flush(): Promise<void> {
+    await this.options.log.flush();
+  }
+
   /** Reserve this run while it is being executed or used as a resume source. */
-  acquireRunLease(): WorkflowRunLease {
-    const lock = this.takeLeaseLock();
-    const leaseId = `workflow-lease-${randomUUID()}`;
-    this.writeWorkflowLeaseAcquired(leaseId, new Date().toISOString());
-    return this.createRunLease(leaseId, lock);
+  async acquireRunLease(): Promise<WorkflowRunLease> {
+    const lock = await this.takeLeaseLock();
+    try {
+      const leaseId = `workflow-lease-${randomUUID()}`;
+      this.writeWorkflowLeaseAcquired(leaseId, new Date().toISOString());
+      await this.options.log.flush();
+      return this.createRunLease(leaseId, lock);
+    } catch (error) {
+      lock?.dispose();
+      throw error;
+    }
   }
 
   /** Acquire a run lease after checking the folded durable lease state. */
   private async acquireRunLeaseForResume(): Promise<WorkflowRunLease> {
-    const lock = this.takeLeaseLock();
+    const lock = await this.takeLeaseLock();
     try {
       const existing = await this.readJournal({ recoverRunning: true, lostAt: new Date().toISOString() });
-      if (existing?.lease.held) {
+      if (existing?.lease.held && existing.lease.recoverable !== true) {
         throw new WorkflowRunAlreadyLeasedError(this.options.scope, this.options.runId, existing.lease.owner);
+      }
+      if (existing?.lease.held && existing.lease.owner !== undefined) {
+        this.writeWorkflowLeaseReleased(existing.lease.owner, new Date().toISOString());
+        await this.options.log.flush();
       }
       const leaseId = `workflow-lease-${randomUUID()}`;
       this.writeWorkflowLeaseAcquired(leaseId, new Date().toISOString());
@@ -424,46 +456,103 @@ export class WorkflowJournal {
     }
   }
 
-  private takeLeaseLock(): IDisposable | undefined {
-    let lock: IDisposable | undefined;
+  private async takeLeaseLock(): Promise<IDisposable | undefined> {
+    if (this.options.allowMissingExclusiveLock === true) return undefined;
+    if (this.options.log.acquireExclusive === undefined) {
+      throw new Error(
+        `Workflow journal ${this.options.scope}/${WORKFLOW_JOURNAL_KEY} requires an exclusive append-log lock.`,
+      );
+    }
     try {
-      lock = this.options.log.acquireExclusive?.(this.options.scope, WORKFLOW_JOURNAL_KEY);
-    } catch {
+      return await this.options.log.acquireExclusive(this.options.scope, WORKFLOW_JOURNAL_KEY);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.includes('cross-process append-log locks require a filesystem storage backend')) {
+        throw error;
+      }
       throw new WorkflowRunAlreadyLeasedError(this.options.scope, this.options.runId);
     }
-    return lock;
   }
 
   /**
-   * Atomically validate a terminal source run and consume its one-shot resume
-   * claim. The returned summary is a snapshot with the lease already released;
-   * the claim remains in the source journal permanently.
+   * Atomically validate a terminal source run and reserve its resume claim.
+   * The returned summary doubles as a handle: the destination commits after
+   * its own `workflow.started` record is durable, or releases on registration
+   * failure. The reservation itself is durable and restart-foldable.
    */
-  async claimResume(claimedBy: WorkflowRunId, at = new Date().toISOString()): Promise<WorkflowJournalSummary> {
+  async claimResume(
+    claimedBy: WorkflowRunId,
+    at = new Date().toISOString(),
+  ): Promise<WorkflowJournalSummary & WorkflowResumeClaimHandle> {
     const journalHandle = this.acquire();
     let lease: WorkflowRunLease | undefined;
     try {
       lease = await this.acquireRunLeaseForResume();
-      const summary = await this.readJournal({ recoverRunning: true, lostAt: at });
+      let summary = await this.readJournal({ recoverRunning: true, lostAt: at });
       if (summary === undefined) {
         throw new Error(`No workflow run "${this.runId}" was found to resume.`);
       }
       if (summary.terminal === undefined) {
         throw new Error(`Workflow run "${this.runId}" is still running and cannot be resumed.`);
       }
-      if (summary.claimedBy !== undefined) {
-        throw new WorkflowRunAlreadyClaimedError(this.runId, summary.claimedBy);
+      let claim = summary.resumeClaim;
+      if (claim?.state === 'committed') {
+        if (claim.claimedBy !== claimedBy) {
+          throw new WorkflowRunAlreadyClaimedError(this.runId, claim.claimedBy);
+        }
+        return this.createClaimHandle(this.claimResultSummary(summary), claim);
       }
-      this.writeWorkflowResumeClaim(claimedBy, at);
-      await this.options.log.flush();
-      return {
-        ...summary,
+      if (claim?.state === 'reserved') {
+        const destinationStarted = await this.destinationStarted(claim.claimedBy);
+        if (destinationStarted) {
+          if (claim.claimedBy !== claimedBy) {
+            this.writeResumeCommitted(claim, at);
+            await this.options.log.flush();
+            throw new WorkflowRunAlreadyClaimedError(this.runId, claim.claimedBy);
+          }
+          this.writeResumeCommitted(claim, at);
+          await this.options.log.flush();
+          claim = { ...claim, state: 'committed', committedAt: at };
+          summary = { ...summary, claimedBy, resumeClaim: claim };
+          return this.createClaimHandle(this.claimResultSummary(summary), claim);
+        }
+        if (claim.claimedBy === claimedBy) {
+          if (isWorkflowResumeClaimExpired(claim, at)) {
+            this.writeResumeReleased(claim, at);
+            await this.options.log.flush();
+            claim = undefined;
+          } else {
+            return this.createClaimHandle(this.claimResultSummary(summary), claim);
+          }
+        }
+        if (claim?.state === 'reserved' && !isWorkflowResumeClaimExpired(claim, at)) {
+          throw new WorkflowRunAlreadyClaimedError(this.runId, claim.claimedBy);
+        }
+        if (claim?.state === 'reserved') {
+          this.writeResumeReleased(claim, at);
+          await this.options.log.flush();
+          claim = undefined;
+        }
+      }
+      if (claim?.state === 'released') claim = undefined;
+      const nextClaim: WorkflowResumeClaimState = {
+        state: 'reserved',
+        runId: this.runId,
         claimedBy,
-        lease: { state: 'available', held: false },
+        claimId: `workflow-resume-${randomUUID()}`,
+        reservedAt: at,
+        expiresAt: workflowResumeClaimExpiresAt(at),
       };
+      this.writeResumeReserved(nextClaim);
+      await this.options.log.flush();
+      summary = { ...summary, claimedBy, resumeClaim: nextClaim };
+      return this.createClaimHandle(this.claimResultSummary(summary), nextClaim);
     } finally {
-      lease?.dispose();
-      journalHandle.dispose();
+      try {
+        if (lease !== undefined) await lease.finalize();
+      } finally {
+        journalHandle.dispose();
+      }
     }
   }
 
@@ -502,6 +591,113 @@ export class WorkflowJournal {
 
   writeResumeClaim(claimedBy: WorkflowRunId, claimedAt: string): void {
     this.writeWorkflowResumeClaim(claimedBy, claimedAt);
+  }
+
+  private writeResumeReserved(claim: WorkflowResumeClaimState): void {
+    this.write({
+      kind: 'workflow.resume.reserved',
+      runId: this.options.runId,
+      claimedBy: claim.claimedBy,
+      claimId: claim.claimId,
+      reservedAt: claim.reservedAt ?? new Date().toISOString(),
+      ...(claim.expiresAt === undefined ? {} : { expiresAt: claim.expiresAt }),
+    });
+  }
+
+  private writeResumeCommitted(claim: WorkflowResumeClaimState, at: string): void {
+    this.write({
+      kind: 'workflow.resume.committed',
+      runId: this.options.runId,
+      claimedBy: claim.claimedBy,
+      claimId: claim.claimId,
+      committedAt: at,
+    });
+  }
+
+  private writeResumeReleased(claim: WorkflowResumeClaimState, at: string): void {
+    this.write({
+      kind: 'workflow.resume.released',
+      runId: this.options.runId,
+      claimedBy: claim.claimedBy,
+      claimId: claim.claimId,
+      releasedAt: at,
+    });
+  }
+
+  private async mutateClaim(
+    claim: WorkflowResumeClaimState,
+    mutation: 'commit' | 'release',
+  ): Promise<WorkflowResumeClaimState> {
+    const lock = await this.takeLeaseLock();
+    try {
+      const summary = await this.readJournal();
+      const current = summary?.resumeClaim;
+      if (current?.state === 'committed') {
+        if (current.claimedBy !== claim.claimedBy) {
+          throw new WorkflowRunAlreadyClaimedError(this.runId, current.claimedBy);
+        }
+        return current;
+      }
+      if (current?.state !== 'reserved' || current.claimId !== claim.claimId || current.claimedBy !== claim.claimedBy) {
+        if (current?.state === 'released') return current;
+        throw new WorkflowRunAlreadyClaimedError(this.runId, current?.claimedBy ?? claim.claimedBy);
+      }
+      const at = new Date().toISOString();
+      if (mutation === 'commit') this.writeResumeCommitted(current, at);
+      else this.writeResumeReleased(current, at);
+      await this.options.log.flush();
+      return {
+        ...current,
+        state: mutation === 'commit' ? 'committed' : 'released',
+        ...(mutation === 'commit' ? { committedAt: at } : { releasedAt: at }),
+      };
+    } finally {
+      lock?.dispose();
+    }
+  }
+
+  private createClaimHandle(
+    summary: WorkflowJournalSummary,
+    initial: WorkflowResumeClaimState,
+  ): WorkflowJournalSummary & WorkflowResumeClaimHandle {
+    let current = initial;
+    let operation: Promise<void> | undefined;
+    const run = async (mutation: 'commit' | 'release'): Promise<void> => {
+      const previous = operation ?? Promise.resolve();
+      operation = previous.catch(() => undefined).then(async () => {
+        if (current.state === 'committed' || current.state === 'released') return;
+        current = await this.mutateClaim(current, mutation);
+      });
+      await operation;
+    };
+    const handle = {
+      ...summary,
+      sourceRunId: this.runId,
+      destinationRunId: initial.claimedBy,
+      claimId: initial.claimId,
+      get state() { return current.state; },
+      get claim() { return current; },
+      get claimedBy() { return current.state === 'released' ? undefined : current.claimedBy; },
+      get resumeClaim() { return current; },
+      commit: () => run('commit'),
+      release: () => run('release'),
+      dispose: () => { void run('release').catch((error) => this.options.onError?.(error)); },
+    } as WorkflowJournalSummary & WorkflowResumeClaimHandle;
+    return handle;
+  }
+
+  private claimResultSummary(summary: WorkflowJournalSummary): WorkflowJournalSummary {
+    return { ...summary, lease: { state: 'available', held: false } };
+  }
+
+  private async destinationStarted(destinationRunId: WorkflowRunId): Promise<boolean> {
+    const scope = workflowDestinationJournalScope(this.options.scope, this.runId, destinationRunId);
+    for await (const raw of this.options.log.read<unknown>(scope, WORKFLOW_JOURNAL_KEY)) {
+      if (typeof raw === 'object' && raw !== null &&
+        (raw as { kind?: unknown }).kind === 'workflow.started' &&
+        (raw as { runId?: unknown }).runId === destinationRunId) return true;
+    }
+    return false;
   }
 
   writeNodePlanned(nodeId: WorkflowNodeId, fingerprint: string, provenance: WorkflowNodeProvenance, at: string): void {
@@ -545,17 +741,12 @@ export class WorkflowJournal {
   }
 
   private createRunLease(leaseId: string, lock: IDisposable | undefined): WorkflowRunLease {
-    let state: WorkflowRunLease['state'] = 'held';
-    return {
-      leaseId,
-      get state() { return state; },
-      dispose: () => {
-        if (state === 'released') return;
-        state = 'released';
-        this.writeWorkflowLeaseReleased(leaseId, new Date().toISOString());
-        lock?.dispose();
-      },
-    };
+    return createWorkflowRunLease(leaseId, {
+      writeRelease: () => { this.writeWorkflowLeaseReleased(leaseId, new Date().toISOString()); },
+      flush: () => this.options.log.flush(),
+      lock,
+      onError: this.options.onError,
+    });
   }
 
   /**
@@ -571,7 +762,7 @@ export class WorkflowJournal {
     const agents = new Map<string, WorkflowJournalAgent>();
     const dagRecords: WorkflowNodeJournalRecord[] = [];
     const leaseRecords: WorkflowRunLeaseRecord[] = [];
-    let claimedBy: WorkflowRunId | undefined;
+    const claimRecords: WorkflowResumeClaimRecord[] = [];
 
     for await (const rawRecord of this.options.log.read<unknown>(
       this.options.scope,
@@ -636,12 +827,10 @@ export class WorkflowJournal {
           terminal ??= 'cancelled';
           break;
         case 'workflow.resume_claimed':
-          if (claimedBy === undefined) claimedBy = record.claimedBy;
-          else if (claimedBy !== record.claimedBy) {
-            throw new WorkflowJournalCorruptionError(
-              `Conflicting workflow resume claims for run "${this.options.runId}".`,
-            );
-          }
+        case 'workflow.resume.reserved':
+        case 'workflow.resume.committed':
+        case 'workflow.resume.released':
+          claimRecords.push(record);
           break;
         case 'workflow.lease.acquired':
         case 'workflow.lease.released':
@@ -679,8 +868,8 @@ export class WorkflowJournal {
       ...(started.args === undefined ? {} : { args: started.args }),
       status: terminal === undefined ? 'running' : terminal === 'completed' ? 'completed' : 'failed',
       terminal,
-      lease: foldWorkflowRunLease(leaseRecords, this.options.runId),
-      ...(claimedBy === undefined ? {} : { claimedBy }),
+      lease: foldWorkflowRunLease(leaseRecords, this.options.runId, terminal),
+      ...resumeClaimFields(claimRecords, this.options.runId),
       startedAt: started.startedAt,
       ...(completed === undefined ? {} : { completedAt: completed.completedAt }),
       ...(completed === undefined
@@ -727,6 +916,9 @@ const WORKFLOW_JOURNAL_KINDS = new Set([
   'workflow.lease.acquired',
   'workflow.lease.released',
   'workflow.resume_claimed',
+  'workflow.resume.reserved',
+  'workflow.resume.committed',
+  'workflow.resume.released',
   'node.planned',
   'node.ready',
   'node.running',
@@ -737,6 +929,17 @@ const WORKFLOW_JOURNAL_KINDS = new Set([
   'node.lost',
   'checkpoint',
 ]);
+
+function resumeClaimFields(
+  records: readonly WorkflowResumeClaimRecord[],
+  runId: WorkflowRunId,
+): { readonly claimedBy?: WorkflowRunId; readonly resumeClaim?: WorkflowResumeClaimState } {
+  const resumeClaim = foldWorkflowResumeClaim(records, runId);
+  if (resumeClaim === undefined) return {};
+  return resumeClaim.state === 'released'
+    ? { resumeClaim }
+    : { claimedBy: resumeClaim.claimedBy, resumeClaim };
+}
 
 function assertWorkflowJournalRecord(value: unknown): WorkflowJournalRecord {
   if (typeof value !== 'object' || value === null ||
@@ -764,6 +967,35 @@ function assertWorkflowJournalRecord(value: unknown): WorkflowJournalRecord {
       typeof (value as { at?: unknown }).at !== 'string'
     ) {
       throw new WorkflowJournalCorruptionError('Invalid workflow lease event.');
+    }
+  } else if (kind === 'workflow.resume.reserved') {
+    if (
+      typeof (value as { runId?: unknown }).runId !== 'string' ||
+      typeof (value as { claimedBy?: unknown }).claimedBy !== 'string' ||
+      typeof (value as { claimId?: unknown }).claimId !== 'string' ||
+      typeof (value as { reservedAt?: unknown }).reservedAt !== 'string' ||
+      ((value as { expiresAt?: unknown }).expiresAt !== undefined &&
+        typeof (value as { expiresAt?: unknown }).expiresAt !== 'string')
+    ) {
+      throw new WorkflowJournalCorruptionError('Invalid workflow resume reservation event.');
+    }
+  } else if (kind === 'workflow.resume.committed') {
+    if (
+      typeof (value as { runId?: unknown }).runId !== 'string' ||
+      typeof (value as { claimedBy?: unknown }).claimedBy !== 'string' ||
+      typeof (value as { claimId?: unknown }).claimId !== 'string' ||
+      typeof (value as { committedAt?: unknown }).committedAt !== 'string'
+    ) {
+      throw new WorkflowJournalCorruptionError('Invalid workflow resume commit event.');
+    }
+  } else if (kind === 'workflow.resume.released') {
+    if (
+      typeof (value as { runId?: unknown }).runId !== 'string' ||
+      typeof (value as { claimedBy?: unknown }).claimedBy !== 'string' ||
+      typeof (value as { claimId?: unknown }).claimId !== 'string' ||
+      typeof (value as { releasedAt?: unknown }).releasedAt !== 'string'
+    ) {
+      throw new WorkflowJournalCorruptionError('Invalid workflow resume release event.');
     }
   }
   return value as WorkflowJournalRecord;
