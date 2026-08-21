@@ -26,7 +26,10 @@ import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { unwrapErrorCause } from '#/_base/errors/errors';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
-import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import {
+  assertWorkspacePathBeforeIO,
+  ISessionWorkspaceContext,
+} from '#/session/workspaceContext/workspaceContext';
 import { IAgentReadStateService } from '#/agent/readState/readState';
 import '#/agent/readState/readStateService';
 import {
@@ -250,6 +253,10 @@ export class ReadTool implements IReadTool {
       {
         workspaceDir: this.workspaceCtx.workDir,
         additionalDirs: this.workspaceCtx.additionalDirs,
+        assertIsolationAllowed: (path, operation) =>
+          this.workspaceCtx.isolation === undefined
+            ? path
+            : this.workspaceCtx.assertAllowed(path, operation === 'search' ? 'read' : operation),
       },
       this.skillCatalog?.catalog.getSkillRoots() ?? [],
       this.env.pathClass,
@@ -279,6 +286,7 @@ export class ReadTool implements IReadTool {
 
   private async execution(args: ReadInput, safePath: string): Promise<ExecutableToolResult> {
     try {
+      safePath = await assertWorkspacePathBeforeIO(this.workspaceCtx, safePath, 'read');
       let stat: Awaited<ReturnType<IHostFileSystem['stat']>>;
       try {
         stat = await this.fs.stat(safePath);

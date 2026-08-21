@@ -293,6 +293,21 @@ describe('WorkspaceIsolationService', () => {
     expect(service!.get(sharedLease.id)?.state).toBe('released');
   });
 
+  it('keeps the legacy no-isolation behavior when the flag is off', async () => {
+    host?.dispose();
+    host = createScopedTestHost([
+      stubPair(IWorkspaceContext, context(root)),
+      stubPair(IHostFileSystem, fs),
+      stubPair(IHostEnvironment, environment(homeDir)),
+      stubPair(IFlagService, flags(false)),
+      stubPair(IWorkspaceIsolationBackend, backend!),
+    ]);
+    service = host.child(LifecycleScope.Workspace, 'workspace-test').accessor.get(IWorkspaceIsolationService);
+
+    await expect(service!.createDedicatedWorktree()).rejects.toMatchObject({ code: 'not_implemented' });
+    expect(service!.list()).toEqual([]);
+  });
+
   it('makes repeated release idempotent and performs cleanup once', async () => {
     const lease = await service!.createDedicatedWorktree();
 

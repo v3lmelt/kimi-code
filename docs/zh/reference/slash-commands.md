@@ -29,7 +29,7 @@
 | --- | --- | --- | --- |
 | `/new` | `/clear` | 开启全新会话，丢弃当前上下文 | 否 |
 | `/sessions` | `/resume` | 浏览历史会话并切换/恢复 | 否 |
-| `/tasks` | `/task` | 浏览后台任务列表 | 是 |
+| `/tasks` | `/task` | 打开旧版后台任务浏览器 | 是 |
 | `/fork` | — | 基于当前会话 fork 一份新会话，保留完整对话历史；fork 后仍停留在当前会话 | 否 |
 | `/title [<text>]` | `/rename` | 不带参数时显示当前会话标题；带参数时设置为新标题（最长 200 字符） | 是 |
 | `/compact [<instruction>]` | — | 压缩当前对话上下文，释放 token 占用；可附带自定义指令，提示模型压缩时保留哪些信息 | 否 |
@@ -101,13 +101,33 @@ Prompt 模式在目标完成时以退出码 `0` 退出，在目标阻塞时以 `
 | --- | --- | --- | --- |
 | `/help` | `/h`、`/?` | 显示快捷键和所有可用命令 | 是 |
 | `/btw [问题]` | — | 在 fork 出的子 Agent 中打开旁路对话，不改变当前主 Agent 轮次；不带问题时会先打开面板等待输入 | 是 |
-| `/workflows [<runId>]` | `/wf` | 显示 workflow 运行树、实时进度、Agent 状态、token 用量与失败信息；传入运行 ID 可只查看一次运行 | 是 |
+| `/runtime` | `/center` | 在 Tasks 视图中打开统一的 Runtime Center | 是 |
+| `/agents` | `/agent-tree` | 在 Agents 视图中打开 Runtime Center | 是 |
+| `/workflows [<runId>]` | `/wf` | 在 Workflows 视图中打开 Runtime Center，显示 workflow 运行树、实时进度、Agent 状态、token 用量与失败信息；传入运行 ID 后聚焦对应运行 | 是 |
 | `/usage` | — | 显示 token 用量、上下文占用以及配额信息 | 是 |
 | `/status` | — | 显示当前会话运行时状态：版本、模型、工作目录、权限模式等 | 是 |
 | `/mcp` | — | 列出当前会话中的 MCP server 及连接状态 | 是 |
 | `/plugins` | — | 打开交互式 plugin 管理器 | 是 |
 | `/version` | — | 显示 Hasu CLI 版本号 | 是 |
 | `/feedback` | `/bug` | 提交反馈，可附加诊断日志和代码库上下文 | 是 |
+
+## Runtime Center
+
+Runtime Center 是一个实时 TUI 面板，用于查看当前会话中的任务、Agent 和 workflow。`/runtime` 打开 Tasks 视图，`/agents` 打开 Agents 视图，`/workflows [<runId>]` 打开 Workflows 视图并可聚焦指定运行；这三个命令在会话流式输出期间也可用。
+
+- **Tasks**：查看后台任务的状态、描述和运行时标识。
+- **Agents**：查看 Agent 树、当前活动以及可用时的所属任务。
+- **Workflows**：查看运行树、可用时的阶段、DAG 节点与依赖关系、token 用量、失败信息和运行时标识。
+
+选中条目后可查看右侧详情面板。面板显示状态和当前活动，并在有数据时补充模型、token 用量、耗时、缓存与隔离信息。按 `Tab` 切换视图，按 `R` 刷新，按 `Esc` 关闭。对 task 条目，以及拥有后台任务的 Agent 或 workflow，按 `O` 可打开 output；对 task 和 Agent 条目按 `Enter` 也可打开 output。
+
+要停止可停止的后台任务，请选中对应的 task 条目并按 `S`；随后按 `Y` 确认，其他按键会取消。前台任务和处于终止状态的任务不能通过 Runtime Center 停止。
+
+当前底层 SDK 未提供 `resume`、`retry`、`message`、`followup`、`interrupt` 或 `transcript` 操作。Runtime Center 会将这些操作标记为 `unavailable`，不会宣称已经执行。
+
+::: tip 提示
+`/runtime`、`/agents` 和 `/workflows` 查看功能不需要实验 flag。Workflow 工具的显式 DAG 图编排由 `workflow_dag` 实验功能单独控制。启动 Hasu 前设置 `KIMI_CODE_EXPERIMENTAL_WORKFLOW_DAG=1`，或者设置 `KIMI_CODE_EXPERIMENTAL_FLAG=1` 启用全部已注册的实验功能。
+:::
 
 ## 退出
 

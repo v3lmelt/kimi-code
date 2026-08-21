@@ -69,6 +69,12 @@ import { IAgentToolRegistryService } from '#/agent/toolRegistry/toolRegistry';
 import '#/agent/toolActivation/toolActivationService';
 import { IAgentMediaToolsRegistrar } from '#/agent/media/mediaTools';
 import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import { ISessionInteractionService } from '#/session/interaction/interaction';
+import { IFlagService } from '#/app/flag/flag';
+import {
+  IWorkspaceIsolationService,
+  type WorkspaceIsolationLease,
+} from '#/workspace/workspaceIsolation/workspaceIsolation';
 import type { OAuthTokens } from '@modelcontextprotocol/sdk/shared/auth.js';
 import { recordingTelemetry, type TelemetryRecord } from '../../app/telemetry/stubs';
 
@@ -83,6 +89,26 @@ const noopLog = {
   debug: () => {},
   child: () => noopLog,
 } as unknown as ILogService;
+
+function isolationLease(id: string, state: WorkspaceIsolationLease['state'] = 'active'): WorkspaceIsolationLease {
+  return {
+    id,
+    workspaceId: 'ws_test',
+    mode: 'dedicated-worktree',
+    state,
+    status: state,
+    path: `/tmp/kimi-isolation/${id}`,
+    worktreePath: `/tmp/kimi-isolation/${id}`,
+    workspaceRoot: '/tmp/kimi-agentLifecycle-work',
+    isolationRoot: '/tmp/kimi-isolation',
+    branch: `codex/isolation/${id}`,
+    baseRef: 'HEAD',
+    owner: 'agent-test',
+    writable: true,
+    createdAt: 1,
+    updatedAt: 1,
+  };
+}
 
 const pluginServiceStub = {
   _serviceBrand: undefined,
@@ -229,6 +255,17 @@ describe('AgentLifecycleService', () => {
       workDir: '/tmp/kimi-agentLifecycle-work',
       additionalDirs: [],
     } as unknown as ISessionWorkspaceContext);
+    ix.stub(ISessionInteractionService, {
+      _serviceBrand: undefined,
+      request: vi.fn(),
+      enqueue: vi.fn(),
+      respond: vi.fn(),
+      listPending: () => [],
+      isRecentlyResolved: () => false,
+      cancelPendingForTurn: vi.fn(),
+      onDidChangePending: Event.None,
+      onDidResolve: Event.None,
+    } as unknown as ISessionInteractionService);
     ix.stub(IPluginService, pluginServiceStub);
     ix.stub(IConfigService, {
       ready: Promise.resolve(),
@@ -863,5 +900,62 @@ describe('AgentLifecycleService', () => {
 
     expect(second).toBe(first);
     expect(registerAgent).toHaveBeenCalledTimes(1);
+  });
+
+  it('waits for a turn-end release before reacquiring a follow-up lease', async () => {
+    let releaseStarted!: () => void;
+    const releaseEntered = new Promise<void>((resolve) => {
+      releaseStarted = resolve;
+    });
+    let finishRelease!: () => void;
+    const releaseGate = new Promise<void>((resolve) => {
+      finishRelease = resolve;
+    });
+    const firstLease = isolationLease('lease-1');
+    const secondLease = isolationLease('lease-2');
+    const acquire = vi
+      .fn<IWorkspaceIsolationService['acquire']>()
+      .mockResolvedValueOnce(firstLease)
+      .mockResolvedValueOnce(secondLease);
+    const release = vi.fn<IWorkspaceIsolationService['release']>(async () => {
+      releaseStarted();
+      await releaseGate;
+      return isolationLease('lease-1', 'released');
+    });
+    ix.stub(IFlagService, {
+      _serviceBrand: undefined,
+      enabled: () => true,
+    } as unknown as IFlagService);
+    ix.stub(IWorkspaceIsolationService, {
+      _serviceBrand: undefined,
+      acquire,
+      create: acquire,
+      createDedicatedWorktree: acquire,
+      get: () => undefined,
+      getLease: () => undefined,
+      list: () => [],
+      diagnostics: () => [],
+      release,
+      releaseLease: release,
+      whenIdle: () => Promise.resolve(),
+    } as unknown as IWorkspaceIsolationService);
+
+    const svc = ix.get(IAgentLifecycleService);
+    const handle = await svc.create({ agentId: 'agent-race', isolation: 'dedicated-worktree' });
+    const releasePromise = svc.releaseIsolation!('agent-race');
+    await releaseEntered;
+
+    const followupLease = svc.ensureIsolation!('agent-race');
+    expect(acquire).toHaveBeenCalledTimes(1);
+    finishRelease();
+
+    await expect(followupLease).resolves.toMatchObject({ id: 'lease-2', state: 'active' });
+    await expect(releasePromise).resolves.toMatchObject({ id: 'lease-1', state: 'released' });
+    expect(release).toHaveBeenCalledTimes(1);
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(handle.accessor.get(ISessionWorkspaceContext).isolation).toMatchObject({
+      leaseId: 'lease-2',
+      state: 'active',
+    });
   });
 });

@@ -13,14 +13,26 @@
  * rewrite failures sticky, keeps the shared flush pending until the
  * post-rewrite drain is durable, waits every key before a global flush reports
  * an error, and preserves per-key storage ordering while acquired buffers
- * retire and hand off to replacement owners. Bound at App scope.
+ * retire and hand off to replacement owners. Acquires process-shared
+ * coordination locks by hashing canonical physical log paths inside the
+ * storage root. Bound at App scope.
  */
+
+import { createHash } from 'node:crypto';
+import { mkdir, realpath } from 'node:fs/promises';
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve } from 'node:path';
+
+import { LockFile } from '@moonshot-ai/minidb';
 
 import { toDisposable, type IDisposable } from '#/_base/di/lifecycle';
 import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 
-import { IFileSystemStorageService } from '#/persistence/interface/storage';
+import {
+  IFileSystemStorageService,
+  StorageError,
+  StorageErrors,
+} from '#/persistence/interface/storage';
 import {
   AppendLogCorruptedError,
   IAppendLogStore,
@@ -251,6 +263,51 @@ export class AppendLogStore implements IAppendLogStore {
     });
   }
 
+  async acquireExclusive(scope: string, key: string): Promise<IDisposable> {
+    const lockPath = await this.exclusiveLockPath(scope, key);
+    const lock = new LockFile(lockPath);
+    if (!(await lock.acquire())) {
+      throw new StorageError(
+        StorageErrors.codes.STORAGE_LOCKED,
+        `append-log ${scope}/${key} is already exclusively acquired`,
+        { details: { scope, key, lockPath } },
+      );
+    }
+    return toDisposable(() => {
+      lock.releaseSync();
+    });
+  }
+
+  private async exclusiveLockPath(scope: string, key: string): Promise<string> {
+    const storage = this.storage as IFileSystemStorageService & {
+      readonly physicalRoot?: string;
+      physicalPath?: (scope: string, key: string) => string;
+    };
+    if (storage.physicalRoot === undefined || storage.physicalPath === undefined) {
+      throw new Error(
+        'cross-process append-log locks require a filesystem storage backend with physical paths',
+      );
+    }
+
+    await mkdir(resolve(storage.physicalRoot), { recursive: true });
+    const root = await canonicalPhysicalPath(storage.physicalRoot);
+    const logPath = await canonicalPhysicalPath(storage.physicalPath(scope, key));
+    const relation = relative(root, logPath);
+    if (
+      relation === '..' ||
+      relation.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) ||
+      isAbsolute(relation)
+    ) {
+      throw new Error(`append-log path escapes its storage root: ${scope}/${key}`);
+    }
+
+    const identity = process.platform === 'win32' ? logPath.toLowerCase() : logPath;
+    const digest = createHash('sha256').update(identity).digest('hex');
+    const lockDir = join(root, '.locks');
+    await mkdir(lockDir, { recursive: true });
+    return join(lockDir, `${digest}.lock`);
+  }
+
   private state(scope: string, key: string): LogState {
     const id = logId(scope, key);
     let state = this.logs.get(id);
@@ -408,6 +465,24 @@ function encodeBatch(records: readonly unknown[]): Uint8Array {
   if (records.length === 0) return new Uint8Array(0);
   const content = records.map((record) => JSON.stringify(record) + '\n').join('');
   return textEncoder.encode(content);
+}
+
+async function canonicalPhysicalPath(input: string): Promise<string> {
+  const absolute = resolve(input);
+  const missing: string[] = [];
+  let cursor = absolute;
+  for (;;) {
+    try {
+      const existing = await realpath(cursor);
+      return normalize(join(existing, ...missing));
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== 'ENOENT') throw error;
+      const parent = dirname(cursor);
+      if (parent === cursor) return normalize(absolute);
+      missing.unshift(basename(cursor));
+      cursor = parent;
+    }
+  }
 }
 
 registerScopedService(

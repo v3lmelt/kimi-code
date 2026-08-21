@@ -10,6 +10,7 @@
  *   - `runner`     — `ISessionProcessRunner`, spawns the shell process
  *   - `env`        — `IHostEnvironment`, host OS / shell probe (osKind / shellName / shellPath)
  *   - `ctx`        — `ISessionContext`, session cwd used to render the shell prompt
+ *   - `workspace`  — Agent workspace view used for lease cwd and command-boundary checks
  *   - `tasks`      — `IAgentTaskService`, owns foreground/detached task
  *                    lifecycle (timeouts, detach, user interrupt)
  *   - `toolPolicy` — `IAgentToolPolicyService`, gates background execution on
@@ -45,9 +46,14 @@ import { resolveAgentTaskConfig } from '#/agent/task/configSection';
 import { IConfigService } from '#/app/config/config';
 import { IBashParserService } from '#/app/bashParser/bashParser';
 import type { BashSyntaxNode } from '#/app/bashParser/bashParser';
+import { Error2, ErrorCodes } from '#/errors';
 import { IHostEnvironment } from '#/os/interface/hostEnvironment';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionProcessRunner, type IProcess } from '#/session/process/processRunner';
+import {
+  assertWorkspacePathBeforeIO,
+  ISessionWorkspaceContext,
+} from '#/session/workspaceContext/workspaceContext';
 import { IAgentToolPolicyService } from '#/agent/toolPolicy/toolPolicy';
 import {
   ToolAccesses,
@@ -148,6 +154,7 @@ export class BashTool implements IBashTool {
     @IAgentToolPolicyService private readonly toolPolicy: IAgentToolPolicyService,
     @IConfigService private readonly config: IConfigService,
     @IBashParserService private readonly bashParser?: IBashParserService,
+    @ISessionWorkspaceContext private readonly workspace?: ISessionWorkspaceContext,
   ) {
     this.isWindowsBash = this.env.osKind === 'Windows';
     this.renderedDescription = renderBashDescription(this.env.shellName);
@@ -183,10 +190,13 @@ export class BashTool implements IBashTool {
     const preview = args.command.length > 50 ? `${args.command.slice(0, 50)}…` : args.command;
     // Parse once into per-subcommand argv so every `matchesRule` probe (one per
     // permission rule) reuses the same tree instead of re-parsing. Fails safe:
-    // an unavailable parser, a budget-aborted parse, or a tree with no command
-    // nodes degrades to whole-string matching and conservative `all()` accesses.
+    // an unavailable parser, a budget-aborted parse, a syntax-error tree, or a
+    // tree with no command nodes degrades to whole-string matching and
+    // conservative `all()` accesses. Isolation turns that uncertainty into a
+    // hard boundary error before a shell is spawned.
     const subcommands =
       this.bashParser === undefined ? undefined : splitCommandArgvs(args.command, this.bashParser);
+    this.assertIsolationCommandAccess(args, subcommands);
     const accesses =
       subcommands === undefined || subcommands.length === 0
         ? ToolAccesses.all()
@@ -198,7 +208,7 @@ export class BashTool implements IBashTool {
       display: {
         kind: 'command',
         command: args.command,
-        cwd: args.cwd ?? this.ctx.cwd,
+        cwd: args.cwd ?? this.workspaceCwd(),
         description: args.description,
         language: 'bash',
       },
@@ -210,7 +220,7 @@ export class BashTool implements IBashTool {
             subcommands.some((sub) => matchesGlobRuleSubject(ruleArgs, sub.argv.join(' '))),
       accesses,
       execute: ({ signal, onUpdate, onForegroundTaskStart }) =>
-        this.execution(args, signal, onUpdate, onForegroundTaskStart),
+        this.execution(args, signal, onUpdate, onForegroundTaskStart, subcommands),
     };
   }
 
@@ -229,7 +239,11 @@ export class BashTool implements IBashTool {
       SHELL: this.env.shellPath,
     };
 
-    return this.runner.exec(shellArgs, { env: noninteractiveEnv });
+    const options =
+      this.workspace?.isolation === undefined
+        ? { env: noninteractiveEnv }
+        : { cwd: effectiveCwd, env: noninteractiveEnv };
+    return this.runner.exec(shellArgs, options);
   }
 
   private async execution(
@@ -237,6 +251,7 @@ export class BashTool implements IBashTool {
     signal: AbortSignal,
     onUpdate?: (update: ToolUpdate) => void,
     onForegroundTaskStart?: (taskId: string) => void,
+    subcommands?: readonly BashSubcommand[],
   ): Promise<ExecutableToolResult> {
     const validationError = this.validateRunRequest(args, signal);
     if (validationError !== undefined) return validationError;
@@ -244,7 +259,12 @@ export class BashTool implements IBashTool {
     const startsInBackground = args.run_in_background === true;
     const foregroundTimeoutMs = normalizeTimeoutMs(args.timeout, false);
     const command = this.isWindowsBash ? rewriteWindowsNullRedirect(args.command) : args.command;
-    const effectiveCwd = args.cwd ?? this.ctx.cwd;
+    const effectiveCwd =
+      args.cwd === undefined
+        ? this.workspaceCwd()
+        : this.workspace?.isolation === undefined
+          ? args.cwd
+          : this.workspace.assertAllowed(args.cwd, 'execute');
     const description = startsInBackground ? args.description!.trim() : foregroundDescription(args);
     const timeoutMs = startsInBackground
       ? args.disable_timeout
@@ -255,6 +275,10 @@ export class BashTool implements IBashTool {
     const builder = new ToolResultBuilder();
     let proc: IProcess;
     try {
+      if (this.workspace?.isolation !== undefined) {
+        await assertWorkspacePathBeforeIO(this.workspace, effectiveCwd, 'execute');
+        if (subcommands !== undefined) await this.assertIsolationCommandRealPaths(subcommands);
+      }
       proc = await this.spawn(effectiveCwd, command);
     } catch (error) {
       return {
@@ -361,6 +385,95 @@ export class BashTool implements IBashTool {
       };
     }
     return undefined;
+  }
+
+  private workspaceCwd(): string {
+    return this.workspace?.workDir ?? this.ctx.cwd;
+  }
+
+  private assertIsolationCommandAccess(
+    args: BashInput,
+    subcommands: readonly BashSubcommand[] | undefined,
+  ): void {
+    const workspace = this.workspace;
+    if (workspace?.isolation === undefined) return;
+    if (workspace.isolation.state === 'active' && /(?:^|[\s;&|()])git(?:\s|$)/i.test(args.command)) {
+      throw unsupportedIsolatedGitError();
+    }
+    if (args.cwd !== undefined) workspace.assertAllowed(args.cwd, 'execute');
+    if (subcommands === undefined || subcommands.length === 0) {
+      throw isolationBoundaryError(
+        'The shell command could not be parsed, so its workspace access cannot be verified.',
+      );
+    }
+    for (const subcommand of subcommands) {
+      const name = commandName(subcommand.argv[0]);
+      if (name === undefined) {
+        throw isolationBoundaryError(
+          "A shell command without a command name cannot be safely analyzed inside an isolated workspace.",
+        );
+      }
+      if (name === 'git' && workspace.isolation.state === 'active') {
+        throw unsupportedIsolatedGitError();
+      }
+      if (DYNAMIC_COMMANDS.has(name)) {
+        throw isolationBoundaryError(
+          `The shell command '${name}' is a dynamic wrapper and is not allowed inside an isolated workspace.`,
+        );
+      }
+      if (!ISOLATION_SAFE_COMMANDS.has(name)) {
+        throw isolationBoundaryError(
+          `The shell command '${name}' cannot be safely analyzed inside an isolated workspace.`,
+        );
+      }
+      const analysis = analyzeIsolationCommand(subcommand.argv);
+      if (!workspace.isolation.writable && analysis.operation === 'write') {
+        throw isolationBoundaryError(
+          `The shell command '${name}' may write or otherwise mutate the workspace.`,
+        );
+      }
+      for (const path of analysis.paths) {
+        assertIsolationPath(workspace, path, analysis.pathOperation);
+      }
+      for (const redirect of subcommand.redirects) {
+        assertIsolationPath(
+          workspace,
+          redirect.target,
+          READ_REDIRECT_OPERATORS.has(redirect.operator) ? 'read' : 'write',
+        );
+        const operation = READ_REDIRECT_OPERATORS.has(redirect.operator) ? 'read' : 'write';
+        if (!workspace.isolation.writable && operation === 'write') {
+          throw isolationBoundaryError(
+            'The active workspace isolation lease is read-only; shell redirection may write files.',
+          );
+        }
+      }
+    }
+  }
+
+  private async assertIsolationCommandRealPaths(
+    subcommands: readonly BashSubcommand[],
+  ): Promise<void> {
+    const workspace = this.workspace;
+    if (workspace === undefined) return;
+    for (const subcommand of subcommands) {
+      const analysis = analyzeIsolationCommand(subcommand.argv);
+      for (const path of analysis.paths) {
+        await assertWorkspacePathBeforeIO(
+          workspace,
+          workspace.resolve(path),
+          analysis.pathOperation,
+        );
+      }
+      for (const redirect of subcommand.redirects) {
+        const operation = READ_REDIRECT_OPERATORS.has(redirect.operator) ? 'read' : 'write';
+        await assertWorkspacePathBeforeIO(
+          workspace,
+          workspace.resolve(redirect.target),
+          operation,
+        );
+      }
+    }
   }
 
   private async foregroundCompletionResult(
@@ -491,10 +604,12 @@ export interface BashSubcommand {
 const BASH_REDIRECT_OPERATORS = new Set(['<', '>', '>>', '>&', '<&', '&>', '&>>', '>|', '<>']);
 const READ_REDIRECT_OPERATORS = new Set(['<']);
 
-// Commands whose positional (non-flag) arguments are file paths. Kept to the
-// unambiguous set so a non-path positional (e.g. `sed`'s script or `chmod`'s
-// mode) is never mistaken for a sensitive file target.
+// Isolation intentionally accepts only commands for which the option grammar
+// and every path-bearing argument are known. An unrecognised option is a hard
+// error; skipping it would allow options such as `--target-directory` or
+// `--file` to redirect an otherwise safe-looking command.
 const PATH_ARG_COMMANDS = new Set([
+  'ls',
   'rm',
   'rmdir',
   'mv',
@@ -507,9 +622,576 @@ const PATH_ARG_COMMANDS = new Set([
   'less',
   'more',
   'wc',
+  'stat',
+  'file',
+  'grep',
+  'rg',
+  'mkdir',
+  'install',
+  'chmod',
+  'chown',
+  'truncate',
+  'tee',
+  'tar',
 ]);
 
-const READ_PATH_COMMANDS = new Set(['cat', 'head', 'tail', 'less', 'more', 'wc']);
+const READ_PATH_COMMANDS = new Set([
+  'ls',
+  'cat',
+  'head',
+  'tail',
+  'less',
+  'more',
+  'wc',
+  'stat',
+  'file',
+  'grep',
+  'rg',
+]);
+const ISOLATION_SAFE_COMMANDS = new Set([
+  ...READ_PATH_COMMANDS,
+  ...PATH_ARG_COMMANDS,
+  'cd',
+  'pushd',
+  'echo',
+  'printf',
+  'pwd',
+  'true',
+  'false',
+]);
+const DYNAMIC_COMMANDS = new Set([
+  'bash',
+  'sh',
+  'dash',
+  'zsh',
+  'ksh',
+  'fish',
+  'python',
+  'python2',
+  'python3',
+  'pypy',
+  'node',
+  'nodejs',
+  'deno',
+  'bun',
+  'ruby',
+  'perl',
+  'php',
+  'find',
+  'xargs',
+  'parallel',
+  'eval',
+  'exec',
+  'source',
+  '.',
+  'env',
+  'sudo',
+  'doas',
+  'command',
+  'builtin',
+]);
+const UNSAFE_SYNTAX_NODE_TYPES = new Set([
+  'ERROR',
+  'error',
+  'arithmetic_expansion',
+  'command_substitution',
+  'process_substitution',
+  'expansion',
+  'simple_expansion',
+  'variable_assignment',
+  'variable_assignments',
+  'function_definition',
+  'subshell',
+  'if_statement',
+  'for_statement',
+  'while_statement',
+  'until_statement',
+  'case_statement',
+  'compound_statement',
+  'test_command',
+  'heredoc_redirect',
+  'herestring_redirect',
+  'coprocess',
+  'negated_command',
+]);
+
+type IsolationCommandOperation = 'read' | 'write';
+type IsolationPathOperation = 'read' | 'write' | 'execute';
+type PositionalKind =
+  | 'none'
+  | 'paths'
+  | 'pattern-paths'
+  | 'mode-paths'
+  | 'owner-paths'
+  | 'tar';
+
+interface IsolationOptionSpec {
+  readonly flags: ReadonlySet<string>;
+  readonly values: ReadonlySet<string>;
+  readonly pathValues: ReadonlySet<string>;
+  readonly allowDoubleDash: boolean;
+  readonly positional: PositionalKind;
+}
+
+interface ParsedIsolationArguments {
+  readonly positional: readonly string[];
+  readonly beforeDoubleDash: readonly string[];
+  readonly afterDoubleDash: readonly string[];
+  readonly optionPaths: readonly string[];
+  readonly flags: ReadonlySet<string>;
+}
+
+interface IsolationCommandAnalysis {
+  readonly operation: IsolationCommandOperation;
+  readonly pathOperation: IsolationPathOperation;
+  readonly paths: readonly string[];
+}
+
+const setOf = (...values: readonly string[]): ReadonlySet<string> => new Set(values);
+
+const COMMON_READ_FLAGS = setOf('-a', '-A', '-b', '-e', '-E', '-h', '-H', '-i', '-k', '-L', '-l', '-m', '-n', '-N', '-P', '-q', '-R', '-r', '-s', '-S', '-t', '-T', '-v', '-w', '-x', '--all', '--brief', '--bytes', '--chars', '--dereference', '--files', '--human-readable', '--lines', '--long', '--mime-encoding', '--mime-type', '--number', '--quiet', '--recursive', '--show-all', '--show-nonprinting', '--show-tabs', '--silent', '--size', '--squeeze-blank', '--terse', '--verbose', '--words');
+
+const NO_VALUE_SPEC = (flags: ReadonlySet<string>, positional: PositionalKind): IsolationOptionSpec => ({
+  flags,
+  values: setOf(),
+  pathValues: setOf(),
+  allowDoubleDash: true,
+  positional,
+});
+
+const COMMAND_OPTION_SPECS: Readonly<Record<string, IsolationOptionSpec>> = {
+  ls: NO_VALUE_SPEC(setOf('-1', '-A', '-a', '-B', '-C', '-d', '-F', '-G', '-h', '-i', '-l', '-n', '-p', '-q', '-r', '-S', '-t', '-U', '-X', '--all', '--almost-all', '--classify', '--directory', '--group-directories-first', '--human-readable', '--inode', '--long', '--numeric-uid-gid', '--reverse', '--sort', '--time-style'), 'paths'),
+  cat: NO_VALUE_SPEC(setOf('-A', '-b', '-e', '-E', '-n', '-s', '-t', '-T', '-v', '--number', '--show-all', '--show-nonprinting', '--show-tabs', '--squeeze-blank'), 'paths'),
+  head: { ...NO_VALUE_SPEC(setOf('-q', '-v', '--quiet', '--silent', '--verbose'), 'paths'), values: setOf('-c', '-n', '--bytes', '--lines') },
+  tail: { ...NO_VALUE_SPEC(setOf('-f', '-F', '-q', '-v', '--follow', '--quiet', '--retry', '--silent', '--verbose'), 'paths'), values: setOf('-c', '-n', '--bytes', '--lines', '--pid') },
+  less: NO_VALUE_SPEC(setOf('-E', '-F', '-X', '-R', '-S', '-M', '-N', '-q', '-Q', '-s'), 'paths'),
+  more: NO_VALUE_SPEC(setOf('-d', '-f', '-l', '-p', '-c', '-s'), 'paths'),
+  wc: { ...NO_VALUE_SPEC(setOf('-c', '-m', '-l', '-L', '-w', '--bytes', '--chars', '--lines', '--max-line-length', '--words'), 'paths'), pathValues: setOf('--files0-from') },
+  stat: { ...NO_VALUE_SPEC(setOf('-f', '--filesystem', '--terse'), 'paths'), values: setOf('-c', '--format', '--printf') },
+  file: NO_VALUE_SPEC(setOf('-b', '-c', '-C', '-h', '-i', '-k', '-n', '-N', '-p', '-r', '-s', '-z', '--brief', '--checking-printout', '--exclude', '--keep-going', '--mime', '--mime-type', '--mime-encoding', '--no-pad', '--print0', '--preserve-date', '--raw', '--special-files', '--uncompress'), 'paths'),
+  du: { ...NO_VALUE_SPEC(setOf('-a', '-b', '-c', '-h', '-k', '-m', '-P', '-s', '-x', '--all', '--bytes', '--human-readable', '--summarize', '--one-file-system'), 'paths'), values: setOf('-d', '--max-depth') },
+  rmdir: NO_VALUE_SPEC(setOf('-p', '-v', '--ignore-fail-on-non-empty', '--parents', '--verbose'), 'paths'),
+  rm: NO_VALUE_SPEC(setOf('-d', '-f', '-i', '-I', '-v', '--dir', '--force', '--interactive', '--one-file-system', '--preserve-root', '--no-preserve-root', '--verbose'), 'paths'),
+  cp: NO_VALUE_SPEC(setOf('-f', '-i', '-n', '-p', '-P', '-T', '-u', '-v', '--attributes-only', '--backup', '--force', '--interactive', '--link', '--no-clobber', '--no-dereference', '--no-target-directory', '--parents', '--reflink', '--remove-destination', '--sparse', '--update', '--verbose'), 'paths'),
+  mv: NO_VALUE_SPEC(setOf('-b', '-f', '-i', '-n', '-S', '-T', '-u', '-v', '--backup', '--force', '--interactive', '--no-clobber', '--no-target-directory', '--strip-trailing-slashes', '--update', '--verbose'), 'paths'),
+  ln: NO_VALUE_SPEC(setOf('-b', '-d', '-f', '-i', '-n', '-P', '-T', '-v', '--backup', '--directory', '--force', '--interactive', '--no-dereference', '--no-target-directory', '--verbose'), 'paths'),
+  touch: { ...NO_VALUE_SPEC(setOf('-a', '-c', '-m', '--no-create'), 'paths'), values: setOf('-d', '-t', '--date', '--time'), pathValues: setOf('-r', '--reference') },
+  mkdir: { ...NO_VALUE_SPEC(setOf('-p', '-v', '--parents', '--verbose'), 'paths'), values: setOf('-m', '--mode'), pathValues: setOf('--parent', '--target-directory') },
+  install: { ...NO_VALUE_SPEC(setOf('-D', '-d', '-p', '-s', '-T', '-v', '--compare', '--directory', '--no-target-directory', '--preserve-timestamps', '--strip', '--verbose'), 'paths'), values: setOf('-g', '-m', '-o', '--backup', '--context', '--group', '--mode', '--owner', '--suffix'), pathValues: setOf('-t', '--target-directory', '--parent') },
+  chmod: { ...NO_VALUE_SPEC(setOf('-c', '-f', '-v', '--changes', '--no-preserve-root', '--preserve-root', '--quiet', '--silent', '--verbose'), 'mode-paths'), pathValues: setOf('--reference') },
+  chown: { ...NO_VALUE_SPEC(setOf('-c', '-f', '-h', '-v', '--changes', '--from', '--no-dereference', '--no-preserve-root', '--preserve-root', '--quiet', '--silent', '--verbose'), 'owner-paths'), pathValues: setOf('--reference') },
+  truncate: { ...NO_VALUE_SPEC(setOf('-c', '--no-create'), 'paths'), values: setOf('-s', '--size'), pathValues: setOf('-r', '--reference') },
+  tee: NO_VALUE_SPEC(setOf('-a', '-i', '--append', '--ignore-interrupts'), 'paths'),
+  grep: { ...NO_VALUE_SPEC(setOf('-E', '-F', '-G', '-P', '-a', '-b', '-c', '-h', '-H', '-i', '-l', '-n', '-o', '-q', '-s', '-v', '-w', '-x', '--binary-files', '--color', '--directories', '--exclude', '--exclude-dir', '--extended-regexp', '--fixed-strings', '--help', '--ignore-case', '--include', '--line-number', '--only-matching', '--quiet', '--silent', '--text', '--word-regexp'), 'pattern-paths'), values: setOf('-A', '-B', '-C', '-e', '-m', '--after-context', '--before-context', '--context', '--max-count', '--regexp'), pathValues: setOf('-f', '--file') },
+  rg: { ...NO_VALUE_SPEC(setOf('-E', '-F', '-G', '-I', '-M', '-N', '-P', '-a', '-b', '-c', '-g', '-h', '-H', '-i', '-l', '-n', '-o', '-q', '-r', '-s', '-v', '-w', '-x', '--binary-files', '--color', '--count', '--files', '--files-with-matches', '--hidden', '--ignore-case', '--ignore-file', '--json', '--line-number', '--no-ignore', '--no-ignore-vcs', '--null', '--only-matching', '--quiet', '--regexp', '--text', '--type', '--type-add', '--type-not', '--word-regexp'), 'pattern-paths'), values: setOf('-A', '-B', '-C', '-e', '-M', '--after-context', '--before-context', '--context', '--max-count', '--regexp', '--type'), pathValues: setOf('-f', '--file', '--ignore-file') },
+  tar: { ...NO_VALUE_SPEC(setOf('-c', '-j', '-J', '-k', '-O', '-p', '-t', '-v', '-x', '-z', '--anchored', '--atime-preserve', '--create', '--extract', '--keep-old-files', '--list', '--no-anchored', '--no-recursion', '--no-same-owner', '--no-overwrite-dir', '--no-unquote', '--one-file-system', '--preserve-permissions', '--same-owner', '--skip-old-files', '--to-stdout', '--verbose'), 'tar'), values: setOf('--exclude', '--null', '--occurrence', '--warning'), pathValues: setOf('-C', '-f', '--directory', '--exclude-from', '--file') },
+};
+
+const GIT_READ_ONLY_COMMANDS = new Set(['status', 'diff', 'log', 'show', 'branch', 'rev-parse', 'ls-files', 'grep', 'cat-file', 'remote', 'describe', 'shortlog']);
+const GIT_KNOWN_COMMANDS = new Set([
+  ...GIT_READ_ONLY_COMMANDS,
+  'add',
+  'apply',
+  'checkout',
+  'clone',
+  'commit',
+  'config',
+  'cp',
+  'fetch',
+  'init',
+  'merge',
+  'mv',
+  'pull',
+  'push',
+  'rebase',
+  'restore',
+  'reset',
+  'rm',
+  'switch',
+  'tag',
+  'worktree',
+]);
+const GIT_SAFE_GLOBAL_FLAGS = new Set([
+  '--bare',
+  '--git-dir',
+  '--literal-pathspecs',
+  '--glob-pathspecs',
+  '--noglob-pathspecs',
+  '--icase-pathspecs',
+  '--no-pager',
+  '--paginate',
+  '--no-replace-objects',
+  '--no-optional-locks',
+  '--version',
+  '--help',
+]);
+const GIT_SAFE_GLOBAL_VALUES = new Set(['--namespace']);
+const GIT_SAFE_GLOBAL_PATH_VALUES = new Set(['-C', '--git-dir', '--work-tree']);
+const GIT_REJECTED_GLOBAL_OPTIONS = new Set([
+  '-c',
+  '--config',
+  '--config-env',
+  '--exec-path',
+  '--file',
+  '--global',
+  '--includes',
+  '--local',
+  '--no-includes',
+  '--system',
+  '--worktree',
+]);
+
+const GIT_COMMON_FLAGS = setOf('-q', '-v', '--quiet', '--verbose', '--progress', '--no-progress', '--force', '--dry-run', '--keep-going', '--stat', '--summary', '--porcelain', '--short', '--branch', '--cached', '--staged', '--patch', '-p', '--all', '--amend', '--no-edit', '--continue', '--abort', '--skip', '--detach', '--orphan', '--track', '--no-track', '--ignore-other-worktrees', '--no-verify', '--signoff', '--no-signoff', '--follow', '--decorate', '--oneline', '--name-only', '--name-status', '--check', '--binary', '--text', '--no-textconv', '--submodule', '--recurse-submodules', '--no-recurse-submodules', '--untracked-files', '--ignore-submodules', '--unified', '--no-renames', '--find-renames', '--find-copies', '--no-commit', '--no-ff', '--ff-only', '--edit', '--no-edit', '--force-with-lease', '--delete', '--annotate', '--list', '--contains', '--merged', '--no-merged');
+
+interface GitParsedCommand {
+  readonly operation: IsolationCommandOperation;
+  readonly paths: readonly string[];
+}
+
+function commandOptionSpec(name: string): IsolationOptionSpec {
+  const spec = COMMAND_OPTION_SPECS[name];
+  if (spec === undefined) {
+    throw isolationBoundaryError(`The shell command '${name}' has no safe option grammar.`);
+  }
+  return spec;
+}
+
+function parseIsolationArguments(
+  args: readonly string[],
+  spec: IsolationOptionSpec,
+): ParsedIsolationArguments {
+  const positional: string[] = [];
+  const beforeDoubleDash: string[] = [];
+  const afterDoubleDash: string[] = [];
+  const optionPaths: string[] = [];
+  const flags = new Set<string>();
+  let after = false;
+
+  const addPositional = (value: string): void => {
+    positional.push(value);
+    (after ? afterDoubleDash : beforeDoubleDash).push(value);
+  };
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]!;
+    if (!after && arg === '--') {
+      if (!spec.allowDoubleDash) {
+        throw isolationBoundaryError(`The shell command does not permit '--' before a path.`);
+      }
+      after = true;
+      continue;
+    }
+    if (after || !arg.startsWith('-') || arg === '-') {
+      addPositional(arg);
+      continue;
+    }
+
+    if (arg.startsWith('--')) {
+      const equals = arg.indexOf('=');
+      const name = equals === -1 ? arg : arg.slice(0, equals);
+      const inline = equals === -1 ? undefined : arg.slice(equals + 1);
+      if (spec.flags.has(name)) {
+        if (inline !== undefined) {
+          throw isolationBoundaryError(`The option '${arg}' does not accept a value.`);
+        }
+        flags.add(name);
+        continue;
+      }
+      if (spec.values.has(name) || spec.pathValues.has(name)) {
+        const value = inline ?? args[++index];
+        if (value === undefined || value.length === 0) {
+          throw isolationBoundaryError(`The option '${name}' requires a value.`);
+        }
+        if (spec.pathValues.has(name)) optionPaths.push(value);
+        flags.add(name);
+        continue;
+      }
+      throw isolationBoundaryError(`The option '${arg}' is not allowed in an isolated workspace.`);
+    }
+
+    const chars = arg.slice(1);
+    if (chars.length === 0) {
+      addPositional(arg);
+      continue;
+    }
+    let consumedValue = false;
+    for (let charIndex = 0; charIndex < chars.length; charIndex += 1) {
+      const short = `-${chars[charIndex]!}`;
+      if (spec.flags.has(short)) {
+        flags.add(short);
+        continue;
+      }
+      if (spec.values.has(short) || spec.pathValues.has(short)) {
+        const inline = chars.slice(charIndex + 1);
+        const value = inline.length > 0 ? inline : args[++index];
+        if (value === undefined || value.length === 0) {
+          throw isolationBoundaryError(`The option '${short}' requires a value.`);
+        }
+        if (spec.pathValues.has(short)) optionPaths.push(value);
+        flags.add(short);
+        consumedValue = true;
+        break;
+      }
+      throw isolationBoundaryError(`The option '${arg}' is not allowed in an isolated workspace.`);
+    }
+    if (consumedValue) continue;
+  }
+
+  return { positional, beforeDoubleDash, afterDoubleDash, optionPaths, flags };
+}
+
+function analyzeIsolationCommand(argv: readonly string[]): IsolationCommandAnalysis {
+  const name = commandName(argv[0]);
+  if (name === undefined) {
+    throw isolationBoundaryError(
+      'A shell command without a command name cannot be safely analyzed inside an isolated workspace.',
+    );
+  }
+  if (name === 'cd' || name === 'pushd') return analyzeDirectoryCommand(name, argv.slice(1));
+  if (name === 'git') return analyzeGitCommand(argv);
+  if (name === 'echo' || name === 'printf') {
+    const flags = name === 'echo' ? setOf('-e', '-E', '-n') : setOf();
+    const parsed = parseIsolationArguments(argv.slice(1), NO_VALUE_SPEC(flags, 'none'));
+    return { operation: 'read', pathOperation: 'read', paths: [] };
+  }
+  if (name === 'pwd') {
+    parseIsolationArguments(argv.slice(1), NO_VALUE_SPEC(setOf('-L', '-P'), 'none'));
+    return { operation: 'read', pathOperation: 'read', paths: [] };
+  }
+  if (name === 'true' || name === 'false') {
+    parseIsolationArguments(argv.slice(1), NO_VALUE_SPEC(setOf(), 'none'));
+    return { operation: 'read', pathOperation: 'read', paths: [] };
+  }
+  const spec = commandOptionSpec(name);
+  const parsed = parseIsolationArguments(argv.slice(1), spec);
+  let paths: string[] = [...parsed.optionPaths];
+  switch (spec.positional) {
+    case 'none':
+      break;
+    case 'paths':
+      paths.push(...parsed.positional);
+      break;
+    case 'pattern-paths':
+      if (parsed.flags.has('--files') || parsed.flags.has('--files-with-matches')) {
+        paths.push(...parsed.positional);
+      } else {
+        if (parsed.positional.length === 0) {
+          throw isolationBoundaryError(`The shell command '${name}' has no analyzable pattern.`);
+        }
+        paths.push(...parsed.positional.slice(1));
+      }
+      break;
+    case 'mode-paths':
+      if (parsed.positional.length < 2) {
+        throw isolationBoundaryError(`The shell command '${name}' requires a mode and a path.`);
+      }
+      paths.push(...parsed.positional.slice(1));
+      break;
+    case 'owner-paths':
+      if (parsed.positional.length < 2) {
+        throw isolationBoundaryError(`The shell command '${name}' requires an owner and a path.`);
+      }
+      paths.push(...parsed.positional.slice(1));
+      break;
+    case 'tar':
+      return analyzeTarCommand(parsed);
+  }
+  return {
+    operation: READ_PATH_COMMANDS.has(name) ? 'read' : 'write',
+    pathOperation: READ_PATH_COMMANDS.has(name) ? 'read' : 'write',
+    paths,
+  };
+}
+
+function analyzeDirectoryCommand(
+  name: 'cd' | 'pushd',
+  args: readonly string[],
+): IsolationCommandAnalysis {
+  const allowed = name === 'cd' ? setOf('-L', '-P', '-e') : setOf('-n');
+  const parsed = parseIsolationArguments(args, {
+    flags: allowed,
+    values: setOf(),
+    pathValues: setOf(),
+    allowDoubleDash: false,
+    positional: 'paths',
+  });
+  if (parsed.positional.length !== 1) {
+    throw isolationBoundaryError(`The shell command '${name}' requires exactly one directory path.`);
+  }
+  return { operation: 'read', pathOperation: 'execute', paths: parsed.positional };
+}
+
+function analyzeTarCommand(parsed: ParsedIsolationArguments): IsolationCommandAnalysis {
+  const hasCreate = parsed.flags.has('-c') || parsed.flags.has('--create');
+  const hasExtract = parsed.flags.has('-x') || parsed.flags.has('--extract');
+  const hasList = parsed.flags.has('-t') || parsed.flags.has('--list');
+  if (hasExtract) {
+    throw isolationBoundaryError(
+      'Tar extraction is not allowed in an isolated workspace because archive entries cannot be verified before execution.',
+    );
+  }
+  if (hasCreate && !parsed.flags.has('--no-recursion')) {
+    throw isolationBoundaryError(
+      'Tar directory recursion is not allowed in an isolated workspace; use --no-recursion with explicit file paths.',
+    );
+  }
+  if ((hasCreate ? 1 : 0) + (hasList ? 1 : 0) !== 1) {
+    throw isolationBoundaryError('Tar must specify exactly one safe operation: create or list.');
+  }
+  const operation: IsolationCommandOperation = hasCreate ? 'write' : 'read';
+  return {
+    operation,
+    pathOperation: operation,
+    paths: [...parsed.optionPaths, ...parsed.positional],
+  };
+}
+
+function analyzeGitCommand(argv: readonly string[]): IsolationCommandAnalysis {
+  const globalPaths: string[] = [];
+  let index = 1;
+  while (index < argv.length) {
+    const option = argv[index]!;
+    if (!option.startsWith('-') || option === '-') break;
+    if (GIT_REJECTED_GLOBAL_OPTIONS.has(option) || option.startsWith('--config-env=')) {
+      throw isolationBoundaryError(`Git global option '${option}' is not allowed in an isolated workspace.`);
+    }
+    const equals = option.indexOf('=');
+    const name = equals === -1 ? option : option.slice(0, equals);
+    const inline = equals === -1 ? undefined : option.slice(equals + 1);
+    if (GIT_SAFE_GLOBAL_PATH_VALUES.has(name)) {
+      const value = inline ?? argv[++index];
+      if (value === undefined || value.length === 0) {
+        throw isolationBoundaryError(`Git option '${name}' requires a path.`);
+      }
+      globalPaths.push(value);
+      index += 1;
+      continue;
+    }
+    if (GIT_SAFE_GLOBAL_VALUES.has(name)) {
+      const value = inline ?? argv[++index];
+      if (value === undefined || value.length === 0) {
+        throw isolationBoundaryError(`Git option '${name}' requires a value.`);
+      }
+      index += 1;
+      continue;
+    }
+    if (GIT_SAFE_GLOBAL_FLAGS.has(name) && inline === undefined) {
+      index += 1;
+      continue;
+    }
+    throw isolationBoundaryError(`Git global option '${option}' is not allowed in an isolated workspace.`);
+  }
+  const subcommand = argv[index];
+  if (subcommand === undefined || subcommand === '--') {
+    throw isolationBoundaryError('Git command has no analyzable subcommand.');
+  }
+  const lower = subcommand.toLowerCase();
+  if (subcommand.startsWith('!') || lower.startsWith('alias.') || lower === 'include' || !GIT_KNOWN_COMMANDS.has(lower)) {
+    throw isolationBoundaryError(`Git subcommand '${subcommand}' is not allowed; aliases and external commands are rejected.`);
+  }
+  const rest = argv.slice(index + 1);
+  const operation: IsolationCommandOperation = GIT_READ_ONLY_COMMANDS.has(lower) ? 'read' : 'write';
+  const paths = [...globalPaths];
+  const spec = gitSubcommandSpec(lower);
+  const parsed = parseIsolationArguments(rest, spec);
+  if (lower === 'log' || lower === 'show' || lower === 'diff' || lower === 'rev-parse' || lower === 'ls-files' || lower === 'grep') {
+    paths.push(...parsed.optionPaths, ...parsed.afterDoubleDash);
+  } else if (lower === 'clone') {
+    const positional = [...parsed.positional];
+    if (positional.length === 0) {
+      throw isolationBoundaryError('Git clone has no source.');
+    }
+    if (!isRemoteGitSource(positional[0]!)) paths.push(positional[0]!);
+    if (positional[1] !== undefined) paths.push(positional[1]!);
+    paths.push(...parsed.optionPaths);
+  } else if (lower === 'worktree') {
+    const action = parsed.positional[0];
+    if (action === undefined) throw isolationBoundaryError('Git worktree has no subcommand.');
+    const actionPaths = parsed.positional.slice(1);
+    switch (action) {
+      case 'add':
+      case 'move':
+      case 'remove':
+      case 'lock':
+      case 'unlock':
+        if (actionPaths.length === 0) throw isolationBoundaryError(`Git worktree ${action} has no path.`);
+        paths.push(...actionPaths.slice(0, action === 'move' ? 2 : 1));
+        break;
+      case 'prune':
+        break;
+      default:
+        throw isolationBoundaryError(`Git worktree subcommand '${action}' is not allowed.`);
+    }
+    paths.push(...parsed.optionPaths);
+  } else {
+    paths.push(...parsed.optionPaths, ...parsed.positional);
+  }
+  return {
+    operation,
+    pathOperation: operation,
+    paths,
+  };
+}
+
+function gitSubcommandSpec(name: string): IsolationOptionSpec {
+  const common = GIT_COMMON_FLAGS;
+  const noPaths = (values: readonly string[] = [], pathValues: readonly string[] = []): IsolationOptionSpec => ({
+    flags: common,
+    values: setOf(...values),
+    pathValues: setOf(...pathValues),
+    allowDoubleDash: true,
+    positional: 'paths',
+  });
+  switch (name) {
+    case 'clone':
+      return { ...noPaths(['-b', '--branch', '--depth', '--origin', '--upload-pack', '--config']), pathValues: setOf('-c', '--separate-git-dir', '--reference', '--reference-if-able', '--template'), positional: 'paths' };
+    case 'init':
+      return { ...noPaths(['--template', '--separate-git-dir']), pathValues: setOf('--template', '--separate-git-dir'), positional: 'paths' };
+    case 'worktree':
+      return { ...noPaths(['-b', '-B', '--reason']), values: setOf('-b', '-B', '--reason'), pathValues: setOf('--lock'), positional: 'paths' };
+    case 'commit':
+      return { ...noPaths(['-m', '--message', '-F', '--file']), values: setOf('-m', '--message'), pathValues: setOf('-F', '--file'), positional: 'paths' };
+    case 'status':
+      return { ...noPaths(['--untracked-files', '--ignored', '--column', '--ahead-behind']), values: setOf('--untracked-files', '--ignored', '--column'), positional: 'paths' };
+    case 'diff':
+    case 'log':
+    case 'show':
+      return { ...noPaths(['-U', '--unified', '--format', '--pretty', '--output', '--relative']), values: setOf('-U', '--unified', '--format', '--pretty', '--relative'), pathValues: setOf('--output'), positional: 'paths' };
+    case 'rev-parse':
+      return { ...noPaths(['--abbrev-ref', '--symbolic-full-name', '--verify', '--sq-quote']), positional: 'paths' };
+    case 'ls-files':
+    case 'grep':
+      return { ...noPaths(['-e', '--cached', '--exclude-standard', '--break', '--heading', '--full-name']), values: setOf('-e', '--regexp'), pathValues: setOf('--exclude-from'), positional: 'paths' };
+    case 'cat-file':
+    case 'branch':
+    case 'remote':
+    case 'describe':
+    case 'shortlog':
+      return noPaths(['--format', '--sort', '--contains', '--merged', '--points-at']);
+    case 'add':
+    case 'apply':
+    case 'checkout':
+    case 'config':
+    case 'fetch':
+    case 'merge':
+    case 'mv':
+    case 'pull':
+    case 'push':
+    case 'rebase':
+    case 'restore':
+    case 'reset':
+    case 'rm':
+    case 'switch':
+    case 'tag':
+      return noPaths(['-m', '--message', '-b', '-B', '--branch', '--strategy', '--strategy-option', '--recurse-submodules', '--rebase', '--autostash', '--onto', '--exec', '--format'], ['--pathspec-from-file', '--output', '--file']);
+    default:
+      throw isolationBoundaryError(`Git subcommand '${name}' is not safely described.`);
+  }
+}
+
+function isRemoteGitSource(value: string): boolean {
+  return /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(value) || /^[^/\\\s@]+@[^/\\\s:]+:/.test(value);
+}
 
 /**
  * Split a bash command into its top-level subcommand argv lists using the
@@ -524,7 +1206,7 @@ export function splitCommandArgvs(
 ): readonly BashSubcommand[] | undefined {
   if (source.trim().length === 0) return [];
   const parsed = parser.parse(source);
-  if (!parsed.ok) return undefined;
+  if (!parsed.ok || parsed.hasError || containsUnsafeSyntax(parsed.root)) return undefined;
   const subcommands = collectSubcommands(parsed.root);
   return subcommands.length === 0 ? undefined : subcommands;
 }
@@ -550,7 +1232,7 @@ export function bashFileAccesses(
         path: redirect.target,
       });
     }
-    const name = subcommand.argv[0];
+    const name = commandName(subcommand.argv[0]);
     if (name === undefined || !PATH_ARG_COMMANDS.has(name)) continue;
     const operation: ToolFileAccessOperation = READ_PATH_COMMANDS.has(name) ? 'read' : 'write';
     for (const path of positionalPaths(subcommand.argv)) {
@@ -609,6 +1291,16 @@ function collectSubcommands(root: BashSyntaxNode): BashSubcommand[] {
         for (const child of node.children) walk(child, pendingRedirects);
     }
   }
+}
+
+function containsUnsafeSyntax(root: BashSyntaxNode): boolean {
+  const stack: BashSyntaxNode[] = [root];
+  while (stack.length > 0) {
+    const node = stack.pop()!;
+    if (UNSAFE_SYNTAX_NODE_TYPES.has(node.type)) return true;
+    stack.push(...node.children);
+  }
+  return false;
 }
 
 function commandArgv(node: BashSyntaxNode): string[] {
@@ -673,6 +1365,43 @@ function isPathLike(value: string): boolean {
   if (value === '~') return false;
   if (/[*?[\]{}]/.test(value)) return false;
   return true;
+}
+
+function commandName(value: string | undefined): string | undefined {
+  if (value === undefined) return undefined;
+  const slash = Math.max(value.lastIndexOf('/'), value.lastIndexOf('\\'));
+  return value.slice(slash + 1).toLowerCase();
+}
+
+function assertIsolationPath(
+  workspace: ISessionWorkspaceContext,
+  rawPath: string,
+  operation: 'read' | 'write' | 'execute',
+): void {
+  // Shell globbing and home expansion happen after parsing. Neither can be
+  // mapped to one boundary path without executing the shell, so reject them
+  // instead of attempting an incomplete string-based approximation.
+  if (
+    !isPathLike(rawPath) ||
+    rawPath === '~' ||
+    rawPath.startsWith('~/') ||
+    rawPath.startsWith('~\\')
+  ) {
+    throw isolationBoundaryError(
+      `The shell path '${rawPath}' cannot be safely resolved inside an isolated workspace.`,
+    );
+  }
+  workspace.assertAllowed(workspace.resolve(rawPath), operation);
+}
+
+function isolationBoundaryError(message: string): Error2 {
+  return new Error2(ErrorCodes.FS_PATH_ESCAPES, message);
+}
+
+function unsupportedIsolatedGitError(): Error2 {
+  return isolationBoundaryError(
+    'The Git CLI is not supported while a workspace isolation lease is active; isolated agents must not run Git commands.',
+  );
 }
 
 function formatTimeoutLabel(timeoutMs: number): string {

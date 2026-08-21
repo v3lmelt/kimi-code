@@ -56,6 +56,14 @@ export class FileStorageService implements IFileSystemStorageService {
     private readonly fileMode?: number,
   ) {}
 
+  get physicalRoot(): string {
+    return this.baseDir;
+  }
+
+  physicalPath(scope: string, key: string): string {
+    return normalize(join(this.baseDir, scope, key));
+  }
+
   async read(scope: string, key: string): Promise<Uint8Array | undefined> {
     const filePath = this.path(scope, key);
     try {
@@ -247,7 +255,7 @@ export class FileStorageService implements IFileSystemStorageService {
   async close(): Promise<void> {}
 
   private path(scope: string, key: string): string {
-    return join(this.baseDir, scope, key);
+    return this.physicalPath(scope, key);
   }
 
   private scopePath(scope: string): string {

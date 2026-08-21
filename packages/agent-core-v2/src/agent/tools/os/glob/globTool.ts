@@ -73,7 +73,10 @@ import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostProcessService } from '#/os/interface/hostProcess';
 import { unwrapErrorCause } from '#/_base/errors/errors';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
-import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import {
+  assertWorkspacePathBeforeIO,
+  ISessionWorkspaceContext,
+} from '#/session/workspaceContext/workspaceContext';
 import { ITelemetryService } from '#/app/telemetry/telemetry';
 import {
   ToolAccesses,
@@ -139,6 +142,10 @@ export class GlobTool implements IGlobTool {
       {
         workspaceDir: this.workspaceCtx.workDir,
         additionalDirs: this.workspaceCtx.additionalDirs,
+        assertIsolationAllowed: (path, operation) =>
+          this.workspaceCtx.isolation === undefined
+            ? path
+            : this.workspaceCtx.assertAllowed(path, operation === 'search' ? 'read' : operation),
       },
       this.skillCatalog?.catalog.getSkillRoots() ?? [],
       this.env.pathClass,
@@ -185,7 +192,13 @@ export class GlobTool implements IGlobTool {
     signal: AbortSignal,
     searchRoots: readonly string[],
   ): Promise<ExecutableToolResult> {
-    const searchRoot = searchRoots[0] ?? this.workspaceConfig.workspaceDir;
+    let searchRoot = searchRoots[0] ?? this.workspaceConfig.workspaceDir;
+
+    try {
+      searchRoot = await assertWorkspacePathBeforeIO(this.workspaceCtx, searchRoot, 'read');
+    } catch (error) {
+      return { isError: true, output: error instanceof Error ? error.message : String(error) };
+    }
 
     try {
       const st = await this.fs.stat(searchRoot);

@@ -2,7 +2,19 @@ import type { BackgroundTaskInfo, Session } from '@moonshot-ai/kimi-code-sdk';
 import type { Component, ProcessTerminal, TUI } from '@moonshot-ai/pi-tui';
 
 import { TaskOutputViewer } from '../components/dialogs/task-output-viewer';
+import {
+  RuntimeCenterApp,
+  type RuntimeCenterProps,
+} from '../components/dialogs/runtime-center';
 import { TasksBrowserApp, type TasksFilter } from '../components/dialogs/tasks-browser';
+import {
+  projectRuntimeCenter,
+  type RuntimeCenterAction,
+  type RuntimeCenterProjection,
+  type RuntimeCenterTaskInfo,
+  type RuntimeCenterView,
+} from '../utils/runtime-center-model';
+import type { WorkflowRunView } from '../utils/workflow-model';
 import type { Theme } from '#/tui/theme';
 import type { CustomEditor } from '../components/editor/custom-editor';
 
@@ -13,11 +25,23 @@ export interface TasksBrowserHost {
     readonly terminal: ProcessTerminal;
     readonly ui: TUI;
     readonly editor: CustomEditor;
+    readonly runtimeCenter: RuntimeCenterState | undefined;
   };
   readonly backgroundTasks: ReadonlyMap<string, BackgroundTaskInfo>;
+  readonly workflowBackgroundTasks?: ReadonlyMap<string, RuntimeCenterTaskInfo>;
   readonly session: Session | undefined;
+  readonly workflowRuns?: readonly WorkflowRunView[];
   showError(msg: string): void;
   setTasksBrowser(value: TasksBrowserState | undefined): void;
+  setRuntimeCenter(value: RuntimeCenterState | undefined): void;
+}
+
+export function getTaskInfoForOutput(
+  taskId: string,
+  backgroundTasks: ReadonlyMap<string, BackgroundTaskInfo>,
+  workflowBackgroundTasks: ReadonlyMap<string, RuntimeCenterTaskInfo> | undefined,
+): BackgroundTaskInfo | RuntimeCenterTaskInfo | undefined {
+  return backgroundTasks.get(taskId) ?? workflowBackgroundTasks?.get(taskId);
 }
 
 export type TasksBrowserState = {
@@ -28,6 +52,27 @@ export type TasksBrowserState = {
   tailOutput: string | undefined;
   tailLoading: boolean;
   tailRequestId: number;
+  flashMessage: string | undefined;
+  flashTimer: NodeJS.Timeout | undefined;
+  pollTimer: NodeJS.Timeout | undefined;
+  viewer:
+    | {
+        component: TaskOutputViewer;
+        savedChildren: readonly Component[];
+        taskId: string;
+        output: string;
+        refreshId: number;
+        pollTimer: NodeJS.Timeout;
+      }
+    | undefined;
+};
+
+export type RuntimeCenterState = {
+  component: RuntimeCenterApp;
+  savedChildren: readonly Component[];
+  view: RuntimeCenterView;
+  selectedKey: string | undefined;
+  projection: RuntimeCenterProjection;
   flashMessage: string | undefined;
   flashTimer: NodeJS.Timeout | undefined;
   pollTimer: NodeJS.Timeout | undefined;
@@ -111,8 +156,80 @@ export class TasksBrowserController {
     }
   }
 
+  /** Open the unified Runtime Center while retaining the legacy task browser. */
+  async showRuntimeCenter(view: RuntimeCenterView = 'tasks', focusKey?: string): Promise<void> {
+    const { state } = this.host;
+    if (state.runtimeCenter !== undefined) {
+      state.runtimeCenter.view = view;
+      if (focusKey !== undefined) state.runtimeCenter.selectedKey = focusKey;
+      this.pushRuntimeProps();
+      return;
+    }
+    if (state.tasksBrowser !== undefined) this.close();
+
+    const session = this.host.session;
+    if (session === undefined) {
+      this.host.showError('No active session.');
+      return;
+    }
+    let tasks: readonly BackgroundTaskInfo[] = [];
+    try {
+      tasks = await session.listBackgroundTasks({ activeOnly: false });
+    } catch (error) {
+      this.host.showError(
+        `Failed to load tasks: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    if (state.runtimeCenter !== undefined) return;
+    const projection = this.runtimeProjection(tasks);
+    const selectedKey = focusKey !== undefined && projection[view].some((row) => row.key === focusKey)
+      ? focusKey
+      : this.pickRuntimeSelection(projection, view);
+    const component = new RuntimeCenterApp(
+      {
+        view,
+        projection,
+        selectedKey,
+        flashMessage: undefined,
+        ...this.runtimeCallbacks(),
+      },
+      state.terminal,
+    );
+    const savedChildren = [...state.ui.children];
+    state.ui.clear();
+    state.ui.addChild(component);
+    state.ui.setFocus(component);
+    state.ui.requestRender(true);
+    const pollTimer = setInterval(() => {
+      void this.refreshRuntimeCenter({ silent: true });
+    }, 1000);
+    this.host.setRuntimeCenter({
+      component,
+      savedChildren,
+      view,
+      selectedKey,
+      projection,
+      flashMessage: undefined,
+      flashTimer: undefined,
+      pollTimer,
+      viewer: undefined,
+    });
+  }
+
   close(): void {
     const { state } = this.host;
+    const runtime = state.runtimeCenter;
+    if (runtime !== undefined) {
+      if (runtime.viewer !== undefined) this.closeRuntimeOutputViewer();
+      if (runtime.pollTimer !== undefined) clearInterval(runtime.pollTimer);
+      if (runtime.flashTimer !== undefined) clearTimeout(runtime.flashTimer);
+      state.ui.clear();
+      for (const child of runtime.savedChildren) state.ui.addChild(child);
+      this.host.setRuntimeCenter(undefined);
+      state.ui.setFocus(state.editor);
+      state.ui.requestRender(true);
+    }
     const browser = state.tasksBrowser;
     if (browser === undefined) return;
     if (browser.viewer !== undefined) this.closeOutputViewer();
@@ -130,9 +247,9 @@ export class TasksBrowserController {
 
   repaint(): void {
     const browser = this.host.state.tasksBrowser;
-    if (browser === undefined) return;
     const tasks = [...this.host.backgroundTasks.values()];
-    this.pushProps(tasks);
+    if (browser !== undefined) this.pushProps(tasks);
+    if (this.host.state.runtimeCenter !== undefined) this.pushRuntimeProps();
   }
 
   async refreshOutputViewer(opts: { silent?: boolean } = {}): Promise<void> {
@@ -161,7 +278,11 @@ export class TasksBrowserController {
     }
     if (output === viewer.output) return;
     viewer.output = output;
-    const info = this.host.backgroundTasks.get(viewer.taskId);
+    const info = getTaskInfoForOutput(
+      viewer.taskId,
+      this.host.backgroundTasks,
+      this.host.workflowBackgroundTasks,
+    );
     viewer.component.setProps({
       taskId: viewer.taskId,
       info,
@@ -170,7 +291,7 @@ export class TasksBrowserController {
         this.closeOutputViewer();
       },
     });
-    state.ui.requestRender();
+    this.host.state.ui.requestRender();
   }
 
   // ---------------------------------------------------------------------------
@@ -268,6 +389,123 @@ export class TasksBrowserController {
     };
   }
 
+  private runtimeProjection(tasks: readonly RuntimeCenterTaskInfo[]): RuntimeCenterProjection {
+    const metadata = this.host.session?.getResumeState()?.sessionMetadata.agents;
+    const workflowTasks = this.host.workflowBackgroundTasks === undefined
+      ? []
+      : [...this.host.workflowBackgroundTasks.values()];
+    const byTaskId = new Map<string, RuntimeCenterTaskInfo>();
+    for (const task of [...tasks, ...workflowTasks]) byTaskId.set(task.taskId, task);
+    return projectRuntimeCenter({
+      tasks: [...byTaskId.values()],
+      workflows: this.host.workflowRuns ?? [],
+      agentMetadata: metadata as Readonly<Record<string, unknown>> | undefined,
+    });
+  }
+
+  private pickRuntimeSelection(
+    projection: RuntimeCenterProjection,
+    view: RuntimeCenterView,
+  ): string | undefined {
+    const rows = projection[view];
+    return rows[0]?.key;
+  }
+
+  private runtimeCallbacks(): Pick<RuntimeCenterProps, 'onSelect' | 'onViewChange' | 'onRefresh' | 'onCancel' | 'onAction' | 'onActionUnavailable'> {
+    return {
+      onSelect: (key) => {
+        const runtime = this.host.state.runtimeCenter;
+        if (runtime !== undefined) runtime.selectedKey = key;
+      },
+      onViewChange: (view) => {
+        const runtime = this.host.state.runtimeCenter;
+        if (runtime === undefined) return;
+        runtime.view = view;
+        runtime.selectedKey = this.pickRuntimeSelection(runtime.projection, view);
+        this.pushRuntimeProps();
+      },
+      onRefresh: () => {
+        this.flashRuntime('Refreshing…', 600);
+        void this.refreshRuntimeCenter();
+      },
+      onCancel: () => this.close(),
+      onAction: (action, key) => {
+        if (action === 'stop') {
+          const taskId = this.runtimeTaskId(key);
+          if (taskId !== undefined) void this.handleStop(taskId);
+          return;
+        }
+        if (action === 'output') {
+          const taskId = this.runtimeTaskId(key);
+          if (taskId !== undefined) void this.handleOpenOutput(taskId);
+        }
+      },
+      onActionUnavailable: (_action, _key, reason) => {
+        this.flashRuntime(reason);
+      },
+    };
+  }
+
+  private runtimeTaskId(key: string): string | undefined {
+    const runtime = this.host.state.runtimeCenter;
+    const item = runtime === undefined
+      ? undefined
+      : [
+          ...runtime.projection.tasks,
+          ...runtime.projection.agents,
+          ...runtime.projection.workflows,
+        ].find((row) => row.key === key);
+    return item?.taskId;
+  }
+
+  private pushRuntimeProps(): void {
+    const runtime = this.host.state.runtimeCenter;
+    if (runtime === undefined) return;
+    runtime.component.setProps({
+      view: runtime.view,
+      projection: runtime.projection,
+      selectedKey: runtime.selectedKey,
+      flashMessage: runtime.flashMessage,
+      ...this.runtimeCallbacks(),
+    });
+    this.host.state.ui.requestRender();
+  }
+
+  private async refreshRuntimeCenter(opts: { silent?: boolean } = {}): Promise<void> {
+    const runtime = this.host.state.runtimeCenter;
+    const session = this.host.session;
+    if (runtime === undefined || session === undefined) return;
+    let tasks: readonly BackgroundTaskInfo[];
+    try {
+      tasks = await session.listBackgroundTasks({ activeOnly: false });
+    } catch (error) {
+      if (!opts.silent) this.flashRuntime(`Refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (this.host.state.runtimeCenter !== runtime) return;
+    runtime.projection = this.runtimeProjection(tasks);
+    const rows = runtime.projection[runtime.view];
+    if (runtime.selectedKey === undefined || !rows.some((row) => row.key === runtime.selectedKey)) {
+      runtime.selectedKey = rows[0]?.key;
+    }
+    this.pushRuntimeProps();
+  }
+
+  private flashRuntime(message: string, durationMs = 2500): void {
+    const runtime = this.host.state.runtimeCenter;
+    if (runtime === undefined) return;
+    if (runtime.flashTimer !== undefined) clearTimeout(runtime.flashTimer);
+    runtime.flashMessage = message;
+    runtime.flashTimer = setTimeout(() => {
+      const current = this.host.state.runtimeCenter;
+      if (current !== runtime) return;
+      current.flashMessage = undefined;
+      current.flashTimer = undefined;
+      this.pushRuntimeProps();
+    }, durationMs);
+    this.pushRuntimeProps();
+  }
+
   private handleSelect(taskId: string): void {
     const browser = this.host.state.tasksBrowser;
     if (browser === undefined) return;
@@ -293,7 +531,16 @@ export class TasksBrowserController {
 
   private async handleStop(taskId: string): Promise<void> {
     const browser = this.host.state.tasksBrowser;
-    if (browser === undefined) return;
+    const runtime = this.host.state.runtimeCenter;
+    if (browser === undefined && runtime === undefined) return;
+
+    if (runtime !== undefined) {
+      const task = runtime.projection.tasks.find((row) => row.taskId === taskId);
+      if (task?.source.detached === false) {
+        this.flashRuntime('Foreground tasks cannot be stopped from Runtime Center.');
+        return;
+      }
+    }
 
     const session = this.host.session;
     if (session === undefined) {
@@ -304,7 +551,8 @@ export class TasksBrowserController {
     this.flash(`Stopping ${taskId}…`, 1500);
     try {
       await session.stopBackgroundTask(taskId, { reason: 'User initiated stop' });
-      await this.refresh({ silent: true });
+      if (runtime !== undefined) await this.refreshRuntimeCenter({ silent: true });
+      else await this.refresh({ silent: true });
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       this.flash(`Stop failed: ${message}`);
@@ -314,8 +562,9 @@ export class TasksBrowserController {
   private async handleOpenOutput(taskId: string): Promise<void> {
     const { state } = this.host;
     const browser = state.tasksBrowser;
-    if (browser === undefined) return;
-    if (browser.viewer !== undefined) return;
+    const runtime = state.runtimeCenter;
+    if (browser === undefined && runtime === undefined) return;
+    if (browser?.viewer !== undefined || runtime?.viewer !== undefined) return;
 
     const session = this.host.session;
     if (session === undefined) {
@@ -332,9 +581,18 @@ export class TasksBrowserController {
       return;
     }
     const current = state.tasksBrowser;
-    if (current === undefined || current !== browser) return;
+    if (current === undefined || current !== browser) {
+      if (runtime !== undefined && state.runtimeCenter === runtime) {
+        this.openRuntimeOutput(taskId, output);
+      }
+      return;
+    }
 
-    const info = this.host.backgroundTasks.get(taskId);
+    const info = getTaskInfoForOutput(
+      taskId,
+      this.host.backgroundTasks,
+      this.host.workflowBackgroundTasks,
+    );
     const viewer = new TaskOutputViewer(
       {
         taskId,
@@ -404,7 +662,10 @@ export class TasksBrowserController {
 
   private flash(message: string, durationMs = 2500): void {
     const browser = this.host.state.tasksBrowser;
-    if (browser === undefined) return;
+    if (browser === undefined) {
+      this.flashRuntime(message, durationMs);
+      return;
+    }
     if (browser.flashTimer !== undefined) clearTimeout(browser.flashTimer);
     browser.flashMessage = message;
     browser.flashTimer = setTimeout(() => {
@@ -428,6 +689,76 @@ export class TasksBrowserController {
       this.host.state.ui.addChild(child);
     }
     this.host.state.ui.setFocus(browser.component);
+    this.host.state.ui.requestRender(true);
+  }
+
+  private openRuntimeOutput(taskId: string, output: string): void {
+    const { state } = this.host;
+    const runtime = state.runtimeCenter;
+    if (runtime === undefined || runtime.viewer !== undefined) return;
+    const info = getTaskInfoForOutput(
+      taskId,
+      this.host.backgroundTasks,
+      this.host.workflowBackgroundTasks,
+    );
+    const viewer = new TaskOutputViewer(
+      {
+        taskId,
+        info,
+        output,
+        onClose: () => this.closeRuntimeOutputViewer(),
+      },
+      state.terminal,
+    );
+    const savedChildren = [...state.ui.children];
+    state.ui.clear();
+    state.ui.addChild(viewer);
+    state.ui.setFocus(viewer);
+    state.ui.requestRender(true);
+    const pollTimer = setInterval(() => {
+      void this.refreshRuntimeOutputViewer({ silent: true });
+    }, 1000);
+    runtime.viewer = { component: viewer, savedChildren, taskId, output, refreshId: 0, pollTimer };
+  }
+
+  private async refreshRuntimeOutputViewer(opts: { silent?: boolean } = {}): Promise<void> {
+    const runtime = this.host.state.runtimeCenter;
+    const viewer = runtime?.viewer;
+    const session = this.host.session;
+    if (runtime === undefined || viewer === undefined || session === undefined) return;
+    const refreshId = ++viewer.refreshId;
+    let output: string;
+    try {
+      output = await session.getBackgroundTaskOutput(viewer.taskId);
+    } catch (error) {
+      if (!opts.silent) this.flashRuntime(`Output refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (this.host.state.runtimeCenter !== runtime || runtime.viewer !== viewer || viewer.refreshId !== refreshId) return;
+    if (output === viewer.output) return;
+    viewer.output = output;
+    viewer.component.setProps({
+      taskId: viewer.taskId,
+      info: getTaskInfoForOutput(
+        viewer.taskId,
+        this.host.backgroundTasks,
+        this.host.workflowBackgroundTasks,
+      ),
+      output,
+      onClose: () => this.closeRuntimeOutputViewer(),
+    });
+    this.host.state.ui.requestRender();
+  }
+
+  private closeRuntimeOutputViewer(): void {
+    const runtime = this.host.state.runtimeCenter;
+    const viewer = runtime?.viewer;
+    if (runtime === undefined || viewer === undefined) return;
+    clearInterval(viewer.pollTimer);
+    runtime.viewer = undefined;
+    this.host.state.ui.clear();
+    for (const child of viewer.savedChildren) this.host.state.ui.addChild(child);
+    this.host.state.ui.setFocus(runtime.component);
     this.host.state.ui.requestRender(true);
   }
 }

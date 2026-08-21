@@ -297,6 +297,8 @@ function runStatusBadge(run: WorkflowRunView): string {
       return currentTheme.fg('success', 'completed');
     case 'failed':
       return currentTheme.fg('error', 'failed');
+    case 'aborted':
+      return currentTheme.fg('warning', 'aborted');
     default:
       return currentTheme.fg('primary', 'running');
   }

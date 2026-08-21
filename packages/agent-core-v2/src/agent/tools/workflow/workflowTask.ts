@@ -25,6 +25,7 @@
  */
 
 import type { ILogService } from '#/_base/log/log';
+import type { IDisposable } from '#/_base/di/lifecycle';
 import type { IWireService } from '#/wire/wire';
 import type {
   AgentTask,
@@ -36,6 +37,11 @@ import {
   workflowAgentCacheKey,
   type WorkflowJournalAgent,
 } from '#/agent/workflow/persist/journal';
+import type {
+  WorkflowDagJournalSummary,
+  WorkflowResumeClaimHandle,
+  WorkflowRunLease,
+} from '#/agent/workflow/persist/dagJournal';
 import {
   workflowAgentSpawned,
   workflowAgentCompleted,
@@ -46,6 +52,8 @@ import {
   type WorkflowTelemetryHook,
 } from '#/agent/workflow/progress/workflowProgress';
 import { AgentRunPool } from '#/agent/workflow/runtime/agentPool';
+import { WorkflowDagScheduler } from '#/agent/workflow/runtime/dagScheduler';
+import type { WorkflowDagRunResult } from '#/agent/workflow/runtime/dagScheduler';
 import {
   WorkflowRuntime,
   type WorkflowAgentSpawnResult,
@@ -58,7 +66,11 @@ import type {
   WorkflowPhaseMeta,
   WorkflowRunId,
   WorkflowScriptMeta,
+  WorkflowGraph,
+  WorkflowAgentNode,
 } from '#/agent/workflow/types';
+import type { CompiledWorkflowGraph } from '#/agent/workflow/compile/graphCompiler';
+import type { WorkflowFingerprintContext } from '#/agent/workflow/ir/fingerprint';
 import type { TokenUsage } from '#/kosong/contract/usage';
 import { grandTotal } from '#/kosong/contract/usage';
 
@@ -70,6 +82,9 @@ import {
 /** A cached completed subagent from a prior run, keyed by cache key. */
 export interface WorkflowResumeLedger {
   readonly sourceRunId: WorkflowRunId;
+  readonly claim?: WorkflowResumeClaimHandle;
+  /** @deprecated Use `claim`; kept for callers that only need disposal. */
+  readonly lease?: IDisposable;
   /**
    * Successful prior completions keyed by `workflowAgentCacheKey(prompt,
    * opts)`. A replayed `agent()` call whose key hits the map returns the
@@ -111,6 +126,11 @@ export interface WorkflowTaskOptions {
   readonly spawnDeps: WorkflowSpawnHostDeps;
   readonly parentToolCallId: string;
   readonly resume?: WorkflowResumeLedger;
+  readonly resumeClaim?: WorkflowResumeClaimHandle;
+  readonly resumeLease?: IDisposable;
+  readonly graph?: WorkflowGraph | CompiledWorkflowGraph;
+  readonly dagResume?: WorkflowDagJournalSummary;
+  readonly fingerprintContext?: WorkflowFingerprintContext;
   /**
    * Optional live budget source (REAL main-loop accounting). Forwarded to the
    * runtime so the sandbox `budget` global reads the host's token target and
@@ -150,6 +170,11 @@ export class WorkflowTask implements AgentTask {
   private readonly spawnDeps: WorkflowSpawnHostDeps;
   private readonly parentToolCallId: string;
   private readonly resume: WorkflowResumeLedger | undefined;
+  private readonly resumeLease: IDisposable | undefined;
+  private readonly resumeClaim: WorkflowResumeClaimHandle | undefined;
+  private readonly graph: WorkflowGraph | CompiledWorkflowGraph | undefined;
+  private readonly dagResume: WorkflowDagJournalSummary | undefined;
+  private readonly fingerprintContext: WorkflowFingerprintContext | undefined;
   private readonly budget: WorkflowBudget | undefined;
   private readonly onSubagentUsage: ((usage: TokenUsage) => void) | undefined;
 
@@ -171,6 +196,11 @@ export class WorkflowTask implements AgentTask {
     this.spawnDeps = options.spawnDeps;
     this.parentToolCallId = options.parentToolCallId;
     this.resume = options.resume;
+    this.resumeLease = options.resumeLease ?? options.resume?.lease;
+    this.resumeClaim = options.resumeClaim ?? options.resume?.claim;
+    this.graph = options.graph;
+    this.dagResume = options.dagResume;
+    this.fingerprintContext = options.fingerprintContext;
     this.budget = options.budget;
     this.onSubagentUsage = options.onSubagentUsage;
     this.workflowName = options.name;
@@ -187,8 +217,18 @@ export class WorkflowTask implements AgentTask {
       sink.signal.addEventListener('abort', requestAbort, { once: true });
     }
     const runStartedMs = Date.now();
+    let runLease: IDisposable | undefined;
+    let journalLease: IDisposable | undefined;
 
     try {
+      runLease = typeof this.journal.acquireRunLease === 'function'
+        ? await this.journal.acquireRunLease()
+        : undefined;
+      if (this.graph !== undefined) {
+        await this.startGraph(sink, controller, runStartedMs, runLease);
+        return;
+      }
+      journalLease = typeof this.journal.acquire === 'function' ? this.journal.acquire() : undefined;
       const startedAt = isoNow();
       this.journal.writeWorkflowStarted({
         script: this.script,
@@ -199,6 +239,13 @@ export class WorkflowTask implements AgentTask {
         ...(this.args === undefined ? {} : { args: this.args }),
         startedAt,
       });
+      await this.flushJournal();
+      try {
+        await this.commitResumeClaim();
+      } catch (error) {
+        await this.settleStartupFailure(sink, runStartedMs, runLease, error);
+        return;
+      }
       this.wire.dispatch(workflowStarted({ runId: this.runId, meta: this.meta, startedAt }));
       this.telemetry.launched(this.runId, this.meta);
 
@@ -232,6 +279,7 @@ export class WorkflowTask implements AgentTask {
         const output = await runtime.run();
         const summary = formatWorkflowRunSummary(this.runId, this.name, output, this.journal.dir);
         sink.appendOutput(summary);
+        await this.releaseRunLease(runLease);
         this.journal.writeWorkflowCompleted({
           ok: true,
           ...(output.result === undefined ? {} : { result: output.result }),
@@ -245,6 +293,7 @@ export class WorkflowTask implements AgentTask {
           tokensSpent: output.tokensSpent,
           durationMs: Date.now() - runStartedMs,
         }));
+        await this.flushJournal();
         this.telemetry.completed(this.runId, true);
         await sink.settle({ status: 'completed' });
       } catch (error) {
@@ -263,6 +312,7 @@ export class WorkflowTask implements AgentTask {
             '</recovery>',
           ].join('\n'),
         );
+        await this.releaseRunLease(runLease);
         this.journal.writeWorkflowCompleted({
           ok: false,
           ...(message === undefined ? {} : { error: message }),
@@ -274,12 +324,164 @@ export class WorkflowTask implements AgentTask {
           ...(message === undefined ? {} : { error: message }),
           durationMs: Date.now() - runStartedMs,
         }));
+        await this.flushJournal();
         this.telemetry.completed(this.runId, false, message);
         await sink.settle({ status: 'failed', stopReason: message });
       }
     } finally {
       sink.signal.removeEventListener('abort', requestAbort);
+      await this.finalizeRunLease(runLease);
+      journalLease?.dispose();
+      await this.releaseResumeClaim();
+      this.resumeLease?.dispose();
     }
+  }
+
+  private async startGraph(
+    sink: AgentTaskSink,
+    controller: AbortController,
+    runStartedMs: number,
+    runLease: IDisposable | undefined,
+  ): Promise<void> {
+    let journalLease: { dispose(): void } | undefined;
+    try {
+      journalLease = typeof this.journal.acquire === 'function' ? this.journal.acquire() : undefined;
+      const startedAt = isoNow();
+      this.journal.writeWorkflowStarted({
+        script: this.script,
+        scriptSha256: this.scriptSha256,
+        name: this.name,
+        description: this.description,
+        ...(this.phases === undefined ? {} : { phases: this.phases }),
+        ...(this.args === undefined ? {} : { args: this.args }),
+        startedAt,
+      });
+      await this.flushJournal();
+      try {
+        await this.commitResumeClaim();
+      } catch (error) {
+        await this.settleStartupFailure(sink, runStartedMs, runLease, error);
+        return;
+      }
+      this.wire.dispatch(workflowStarted({ runId: this.runId, meta: this.meta, startedAt }));
+      this.telemetry.launched(this.runId, this.meta);
+      const scheduler = new WorkflowDagScheduler({
+        graph: this.graph!,
+        fingerprintContext: this.fingerprintContext,
+        signal: controller.signal,
+        journal: this.journal,
+        resume: this.dagResume,
+        budget: {
+          total: this.budget?.total ?? this.tokenBudgetTotal,
+          spent: this.dagResume?.spent ?? this.budget?.spent() ?? 0,
+        },
+        executeAgent: (node, context) => this.agentSpawn(
+          node.prompt,
+          workflowAgentOpts(node),
+          context.signal,
+          this.resume,
+        ),
+        onSubagentUsage: this.onSubagentUsage,
+      });
+      const output = await scheduler.run();
+      const summary = formatWorkflowGraphSummary(this.runId, this.name, output, this.journal.dir);
+      sink.appendOutput(summary);
+      const ok = output.status === 'completed';
+      await this.releaseRunLease(runLease);
+      this.journal.writeWorkflowCompleted({
+        ok,
+        ...(output.result === undefined ? {} : { result: output.result }),
+        ...(ok ? {} : { error: `Workflow DAG ${output.status}.` }),
+        completedAt: isoNow(),
+      });
+      this.wire.dispatch(workflowCompleted({
+        runId: this.runId,
+        ok,
+        ...(output.result === undefined ? {} : { result: output.result }),
+        tokensSpent: output.spent,
+        durationMs: Date.now() - runStartedMs,
+      }));
+      await this.flushJournal();
+      this.telemetry.completed(this.runId, ok, ok ? undefined : `Workflow DAG ${output.status}.`);
+      await sink.settle(ok ? { status: 'completed' } : { status: 'failed', stopReason: `Workflow DAG ${output.status}.` });
+    } catch (error) {
+      const message = errorMessage(error);
+      sink.appendOutput(`Workflow failed: ${this.name} (${this.runId})\nstatus: failed\n\nerror: ${message}`);
+      await this.releaseRunLease(runLease);
+      this.journal.writeWorkflowCompleted({ ok: false, error: message, completedAt: isoNow() });
+      this.wire.dispatch(workflowCompleted({ runId: this.runId, ok: false, error: message, durationMs: Date.now() - runStartedMs }));
+      await this.flushJournal();
+      this.telemetry.completed(this.runId, false, message);
+      await sink.settle({ status: 'failed', stopReason: message });
+    } finally {
+      journalLease?.dispose();
+    }
+  }
+
+  private async commitResumeClaim(): Promise<void> {
+    if (this.resumeClaim === undefined) return;
+    await this.resumeClaim.commit();
+  }
+
+  private async settleStartupFailure(
+    sink: AgentTaskSink,
+    runStartedMs: number,
+    runLease: IDisposable | undefined,
+    error: unknown,
+  ): Promise<void> {
+    const message = errorMessage(error);
+    sink.appendOutput(`Workflow failed: ${this.name} (${this.runId})\nstatus: failed\n\nerror: ${message}`);
+    await this.releaseRunLease(runLease);
+    this.journal.writeWorkflowCompleted({ ok: false, error: message, completedAt: isoNow() });
+    this.wire.dispatch(workflowCompleted({
+      runId: this.runId,
+      ok: false,
+      error: message,
+      durationMs: Date.now() - runStartedMs,
+    }));
+    await this.flushJournal();
+    this.telemetry.completed(this.runId, false, message);
+    await sink.settle({ status: 'failed', stopReason: message });
+  }
+
+  private async releaseResumeClaim(): Promise<void> {
+    if (this.resumeClaim !== undefined) {
+      try {
+        await this.resumeClaim.release();
+      } catch (error) {
+        this.log.warn('workflow resume claim release failed', { runId: this.runId, error });
+      }
+    }
+  }
+
+  private async releaseRunLease(runLease: IDisposable | undefined): Promise<void> {
+    if (runLease === undefined) return;
+    const lease = runLease as Partial<WorkflowRunLease>;
+    if (typeof lease.release === 'function') {
+      await lease.release();
+      return;
+    }
+    runLease.dispose();
+  }
+
+  private async finalizeRunLease(runLease: IDisposable | undefined): Promise<void> {
+    if (runLease === undefined) return;
+    const lease = runLease as Partial<WorkflowRunLease>;
+    try {
+      if (typeof lease.finalize === 'function') {
+        await lease.finalize();
+      } else {
+        await this.flushJournal();
+        runLease.dispose();
+      }
+    } catch (error) {
+      this.log.warn('workflow run lease finalization failed', { runId: this.runId, error });
+    }
+  }
+
+  private async flushJournal(): Promise<void> {
+    const journal = this.journal as unknown as { flush?: () => Promise<void> };
+    if (typeof journal.flush === 'function') await journal.flush();
   }
 
   toInfo(base: AgentTaskInfoBase): WorkflowTaskInfo {
@@ -384,7 +586,7 @@ export class WorkflowTask implements AgentTask {
 
   private effectiveAgentOpts(opts: WorkflowAgentOpts | undefined): WorkflowAgentOpts | undefined {
     if (this.meta.model === undefined || opts?.model !== undefined) return opts;
-    return { ...(opts ?? {}), model: this.meta.model };
+    return { ...opts, model: this.meta.model };
   }
 
   private assertAgentOpts(opts: WorkflowAgentOpts | undefined): void {
@@ -491,6 +693,35 @@ export class WorkflowTask implements AgentTask {
 }
 
 export const WORKFLOW_UNKNOWN_AGENT_ID = 'wf-unknown';
+
+function workflowAgentOpts(node: WorkflowAgentNode): WorkflowAgentOpts {
+  return {
+    ...(node.schema === undefined ? {} : { schema: node.schema }),
+    ...(node.model === undefined ? {} : { model: node.model }),
+    ...(node.effort === undefined ? {} : { effort: node.effort }),
+    ...(node.profile === undefined ? {} : { agentType: node.profile }),
+  };
+}
+
+function formatWorkflowGraphSummary(
+  runId: WorkflowRunId,
+  name: string,
+  output: WorkflowDagRunResult,
+  journalDir: string,
+): string {
+  return [
+    `Workflow completed: ${name} (${runId})`,
+    `status: ${output.status}`,
+    `nodes: ${String(output.nodes.size)}`,
+    `tokens_spent: ${String(output.spent)}`,
+    '',
+    '[result]',
+    stringifyResult(output.result),
+    '',
+    '[diagnostics]',
+    `Run journal: ${journalDir}/journal.jsonl — node state and checkpoint records are append-only.`,
+  ].join('\n');
+}
 
 function formatWorkflowRunSummary(
   runId: WorkflowRunId,

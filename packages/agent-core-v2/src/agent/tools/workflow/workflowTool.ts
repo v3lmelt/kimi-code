@@ -58,9 +58,16 @@ import { ISessionSubagentService } from '#/session/subagent/subagent';
 import { ISessionAgentProfileCatalog } from '#/session/sessionAgentProfileCatalog/sessionAgentProfileCatalog';
 import { ISessionProcessRunner } from '#/session/process/processRunner';
 import { IAgentProfileService } from '#/agent/profile/profile';
+import { IAgentPermissionModeService } from '#/agent/permissionMode/permissionMode';
+import { IAgentUserToolService } from '#/agent/userTool/userTool';
+import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 import { IModelCatalog } from '#/kosong/model/catalog';
 import { IAgentScopeContext } from '#/agent/scopeContext/scopeContext';
-import { compileWorkflowScript } from '#/agent/workflow/compile/index';
+import {
+  compileWorkflowGraphResult,
+  compileWorkflowScript,
+  type WorkflowGraphCompileOptions,
+} from '#/agent/workflow/compile/index';
 import {
   WorkflowJournal,
   generateWorkflowRunId,
@@ -69,13 +76,19 @@ import {
   workflowJournalScope,
   workflowScriptSha256,
 } from '#/agent/workflow/persist/journal';
+import type {
+  WorkflowDagJournalSummary,
+  WorkflowResumeClaimHandle,
+} from '#/agent/workflow/persist/dagJournal';
 import { telemetryWorkflowHook } from '#/agent/workflow/progress/workflowProgress';
 import { IWorkflowBudgetService } from '#/agent/workflow/budget/workflowBudget';
 import {
   WorkflowCompileError,
+  type WorkflowGraph,
   type WorkflowRunId,
   type WorkflowScriptMeta,
 } from '#/agent/workflow/types';
+import { WORKFLOW_DAG_FLAG_ID } from '#/agent/workflow/flag';
 
 import { WorkflowTask, type WorkflowResumeLedger } from './workflowTask';
 import type { WorkflowSpawnHostDeps } from './spawnHost';
@@ -89,12 +102,14 @@ import WORKFLOW_DESCRIPTION from './workflow-doc.md?raw';
 
 /** Storage key the inline script is persisted to: `<sessionDir>/workflows/<runId>/script.js`. */
 export const WORKFLOW_SCRIPT_KEY = 'script.js';
+export const WORKFLOW_GRAPH_KEY = 'graph.json';
 
 const WORKFLOW_PARAMETERS = {
   ...toInputJsonSchema(WorkflowToolInputSchema),
   oneOf: [
     { required: ['script'], not: { required: ['scriptPath'] } },
     { required: ['scriptPath'], not: { required: ['script'] } },
+    { required: ['graph'], not: { anyOf: [{ required: ['script'] }, { required: ['scriptPath'] }] } },
   ],
 };
 const textEncoder = new TextEncoder();
@@ -115,6 +130,12 @@ export class WorkflowTool implements IWorkflowTool {
   private readonly log: ILogService;
   private readonly config: IConfigService;
   private readonly budget: IWorkflowBudgetService;
+  private readonly flags: IFlagService;
+  private readonly profile: IAgentProfileService;
+  private readonly modelCatalog: IModelCatalog;
+  private readonly permissionMode: IAgentPermissionModeService | undefined;
+  private readonly userTools: IAgentUserToolService | undefined;
+  private readonly workspace: ISessionWorkspaceContext | undefined;
   private readonly spawnDeps: WorkflowSpawnHostDeps;
 
   constructor(
@@ -137,6 +158,9 @@ export class WorkflowTool implements IWorkflowTool {
     @IAgentProfileService profile: IAgentProfileService,
     @IModelCatalog modelCatalog: IModelCatalog,
     @IFlagService flags: IFlagService,
+    @IAgentPermissionModeService permissionMode: IAgentPermissionModeService,
+    @IAgentUserToolService userTools: IAgentUserToolService,
+    @ISessionWorkspaceContext workspace: ISessionWorkspaceContext,
   ) {
     this.callerAgentId = scopeContext.agentId;
     this.tasks = tasks;
@@ -150,6 +174,12 @@ export class WorkflowTool implements IWorkflowTool {
     this.log = log;
     this.config = config;
     this.budget = budget;
+    this.flags = flags;
+    this.profile = profile;
+    this.modelCatalog = modelCatalog;
+    this.permissionMode = permissionMode;
+    this.userTools = userTools;
+    this.workspace = workspace;
     this.spawnDeps = {
       callerAgentId: scopeContext.agentId,
       lifecycle,
@@ -176,11 +206,12 @@ export class WorkflowTool implements IWorkflowTool {
   resolveExecution(args: WorkflowToolInput): ToolExecution {
     const inline = args.script?.trim();
     const rawScriptPath = args.scriptPath?.trim();
-    if (inline !== undefined && inline.length > 0 && rawScriptPath !== undefined && rawScriptPath.length > 0) {
-      throw new Error2(ErrorCodes.VALIDATION_FAILED, 'Provide either `script` or `scriptPath`, not both.');
+    const hasGraph = args.graph !== undefined;
+    if ((inline !== undefined && inline.length > 0 ? 1 : 0) + (rawScriptPath !== undefined && rawScriptPath.length > 0 ? 1 : 0) + (hasGraph ? 1 : 0) !== 1) {
+      throw new Error2(ErrorCodes.VALIDATION_FAILED, 'Provide exactly one of `script`, `scriptPath`, and `graph`.');
     }
     const hint = scriptNameHint(args);
-    const scriptPath = this.resolveScriptPath(rawScriptPath);
+    const scriptPath = hasGraph ? undefined : this.resolveScriptPath(rawScriptPath);
     return {
       description: `Running workflow${hint === undefined ? '' : `: ${hint}`}`,
       accesses: scriptPath === undefined ? ToolAccesses.none() : ToolAccesses.readFile(scriptPath),
@@ -194,8 +225,11 @@ export class WorkflowTool implements IWorkflowTool {
     ctx: ExecutableToolContext,
     scriptPath: string | undefined,
   ): Promise<ExecutableToolResult> {
+    let resumeClaim: WorkflowResumeClaimHandle | undefined;
     try {
       ctx.signal.throwIfAborted();
+
+      if (args.graph !== undefined) return await this.executionGraph(args, ctx);
 
       const source = await this.resolveSource(args, scriptPath);
       const compiled = compileWorkflowScript(source);
@@ -208,7 +242,8 @@ export class WorkflowTool implements IWorkflowTool {
       const journal = this.createJournal(runId);
       await this.persistScript(runId, source);
 
-      const resume = await this.loadResume(args.resumeFromRunId, source, scriptSha256);
+      const resume = await this.loadResume(args.resumeFromRunId, runId, source, scriptSha256);
+      resumeClaim = resume?.claim;
 
       const task = new WorkflowTask({
         runId,
@@ -230,16 +265,82 @@ export class WorkflowTool implements IWorkflowTool {
         spawnDeps: this.spawnDeps,
         parentToolCallId: ctx.toolCallId,
         resume,
+        resumeClaim,
       });
 
       const registerOptions: RegisterAgentTaskOptions = {
         detached: true,
       };
       const taskId = this.tasks.registerTask(task, registerOptions);
+      resumeClaim = undefined;
 
       return { output: formatWorkflowLaunch(taskId, runId, compiled.meta) };
     } catch (error) {
+      await resumeClaim?.release().catch((releaseError) => {
+        this.log.warn('workflow resume claim release failed', { error: releaseError });
+      });
       return { output: `workflow error: ${errorMessage(error)}`, isError: true };
+    }
+  }
+
+  private async executionGraph(
+    args: WorkflowToolInput,
+    ctx: ExecutableToolContext,
+  ): Promise<ExecutableToolResult> {
+    if (!this.flags.enabled(WORKFLOW_DAG_FLAG_ID)) {
+      return {
+        output: 'WorkflowGraph execution is disabled. Enable the workflow_dag experimental flag to use graph authoring.',
+        isError: true,
+      };
+    }
+    const fingerprintContext = this.workflowFingerprintContext();
+    const compiled = compileWorkflowGraphResult(args.graph, fingerprintContext);
+    if ('error' in compiled) return { output: formatCompileFailure(compiled.error), isError: true };
+    const graph = compiled.graph;
+    const runId = generateWorkflowRunId();
+    const serialized = JSON.stringify(graph.graph);
+    const scriptSha256 = workflowScriptSha256(serialized);
+    const journal = this.createJournal(runId);
+    await this.persistGraph(runId, serialized);
+    let resumeClaim: WorkflowResumeClaimHandle | undefined;
+    try {
+      const dagResume = await this.loadDagResume(args.resumeFromRunId, runId, (claim) => {
+        resumeClaim = claim;
+      });
+      const meta: WorkflowScriptMeta = {
+        name: graph.graph.name ?? 'Workflow DAG',
+        description: graph.graph.description ?? 'Verified WorkflowGraph execution',
+      };
+      const task = new WorkflowTask({
+        runId,
+        script: serialized,
+        scriptSha256,
+        name: meta.name,
+        description: meta.description,
+        args: args.args,
+        meta,
+        tokenBudgetTotal: this.budget.total(),
+        budget: this.budget.budget(),
+        onSubagentUsage: (usage) => this.budget.recordSubagentUsage(usage),
+        journal,
+        wire: this.wire,
+        telemetry: telemetryWorkflowHook(this.telemetry),
+        log: this.log,
+        spawnDeps: this.spawnDeps,
+        parentToolCallId: ctx.toolCallId,
+        graph,
+        dagResume,
+        resumeClaim,
+        fingerprintContext,
+      });
+      const taskId = this.tasks.registerTask(task, { detached: true });
+      resumeClaim = undefined;
+      return { output: formatWorkflowLaunch(taskId, runId, meta) };
+    } catch (error) {
+      await resumeClaim?.release().catch((releaseError) => {
+        this.log.warn('workflow resume claim release failed', { error: releaseError });
+      });
+      throw error;
     }
   }
 
@@ -254,6 +355,92 @@ export class WorkflowTool implements IWorkflowTool {
       return this.hostFs.readText(resolvedScriptPath);
     }
     throw new Error2(ErrorCodes.VALIDATION_FAILED, 'Workflow requires a `script` (or `scriptPath`).');
+  }
+
+  private async persistGraph(runId: WorkflowRunId, graph: string): Promise<void> {
+    await this.bytes.write(
+      workflowJournalScope(this.session.scope(), runId),
+      WORKFLOW_GRAPH_KEY,
+      textEncoder.encode(graph),
+    );
+  }
+
+  private async loadDagResume(
+    resumeFromRunId: string | undefined,
+    claimedBy: WorkflowRunId,
+    onClaim?: (claim: WorkflowResumeClaimHandle) => void,
+  ): Promise<WorkflowDagJournalSummary | undefined> {
+    if (resumeFromRunId === undefined || resumeFromRunId.trim().length === 0) return undefined;
+    const priorRunId = resumeFromRunId.trim();
+    if (!isWorkflowRunId(priorRunId)) {
+      throw new Error2(ErrorCodes.VALIDATION_FAILED, `Invalid workflow run id: "${priorRunId}"`);
+    }
+    const journal = new WorkflowJournal({
+      runId: priorRunId,
+      dir: workflowJournalDir(this.session.sessionDir, priorRunId),
+      scope: workflowJournalScope(this.session.scope(), priorRunId),
+      log: this.logStore,
+    });
+    let claimed: Awaited<ReturnType<WorkflowJournal['claimResume']>>;
+    try {
+      claimed = await journal.claimResume(claimedBy);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('No workflow run')) {
+        throw new Error2(ErrorCodes.VALIDATION_FAILED, error.message);
+      }
+      throw error;
+    }
+    onClaim?.(claimed);
+    return {
+      runId: claimed.runId,
+      started: true,
+      terminal: claimed.terminal,
+      lease: claimed.lease,
+      ...(claimed.claimedBy === undefined ? {} : { claimedBy: claimed.claimedBy }),
+      graphVersion: claimed.graphVersion,
+      nodes: claimed.nodes,
+      checkpoints: claimed.checkpoints,
+      spent: claimed.spent,
+      reserved: claimed.reserved,
+    };
+  }
+
+  private workflowFingerprintContext(): WorkflowGraphCompileOptions {
+    let data: ReturnType<IAgentProfileService['data']> | undefined;
+    try {
+      data = this.profile?.data();
+    } catch {
+      data = undefined;
+    }
+    let resolvedModel: unknown;
+    if (data?.modelAlias !== undefined) {
+      try {
+        const model = this.modelCatalog?.get(data.modelAlias);
+        resolvedModel = model === undefined ? undefined : model.id;
+      } catch {
+        resolvedModel = undefined;
+      }
+    }
+    const activeTools = data?.activeToolNames;
+    let toolset: unknown = activeTools;
+    if (this.userTools !== undefined) {
+      try {
+        const userToolNames = this.userTools.list().map((tool) => tool.name);
+        toolset = [...(activeTools ?? []), ...userToolNames].sort();
+      } catch {
+        toolset = undefined;
+      }
+    }
+    return {
+      resolvedModel,
+      effort: data?.thinkingLevel,
+      profile: data?.profileName,
+      permission: this.permissionMode?.mode,
+      toolset,
+      tool: this.name,
+      cwd: this.workspace?.workDir ?? this.session.cwd,
+      workspaceRevision: this.workspace?.isolation?.leaseId,
+    };
   }
 
   private resolveScriptPath(rawPath: string | undefined): string | undefined {
@@ -291,6 +478,7 @@ export class WorkflowTool implements IWorkflowTool {
 
   private async loadResume(
     resumeFromRunId: string | undefined,
+    claimedBy: WorkflowRunId,
     source: string,
     scriptSha256: string,
   ): Promise<WorkflowResumeLedger | undefined> {
@@ -305,20 +493,16 @@ export class WorkflowTool implements IWorkflowTool {
       dir: workflowJournalDir(this.session.sessionDir, priorRunId),
       log: this.logStore,
     });
-    const summary = await journal.readJournal();
-    if (summary === undefined) {
-      throw new Error2(
-        ErrorCodes.VALIDATION_FAILED,
-        `No workflow run "${priorRunId}" was found to resume.`,
-      );
+    let claimed: Awaited<ReturnType<WorkflowJournal['claimResume']>>;
+    try {
+      claimed = await journal.claimResume(claimedBy);
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('No workflow run')) {
+        throw new Error2(ErrorCodes.VALIDATION_FAILED, error.message);
+      }
+      throw error;
     }
-    if (summary.status === 'running') {
-      throw new Error2(
-        ErrorCodes.VALIDATION_FAILED,
-        `Workflow run "${priorRunId}" is still running and cannot be resumed.`,
-      );
-    }
-    if (summary.scriptSha256 !== scriptSha256) {
+    if (claimed.scriptSha256 !== scriptSha256) {
       // A changed script is fine — the journal records each agent's cache key
       // (`sha256(prompt, effectiveOpts)`), so unchanged `agent()` calls replay
       // from cache and only edited or new calls re-run.
@@ -326,11 +510,19 @@ export class WorkflowTool implements IWorkflowTool {
         runId: priorRunId,
       });
     }
-    return { sourceRunId: priorRunId, completedByCacheKey: summary.completedByCacheKey };
+    return {
+      sourceRunId: priorRunId,
+      completedByCacheKey: claimed.completedByCacheKey,
+      claim: claimed,
+    };
   }
 }
 
 function scriptNameHint(args: WorkflowToolInput): string | undefined {
+  if (args.graph !== undefined && typeof args.graph === 'object' && args.graph !== null) {
+    const graph = args.graph as Partial<WorkflowGraph>;
+    return typeof graph.name === 'string' ? graph.name : undefined;
+  }
   const source = args.script ?? '';
   const match = /export\s+const\s+meta\s*=\s*\{\s*name\s*:\s*['"]([^'"]+)['"]/.exec(source);
   return match?.[1];

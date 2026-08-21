@@ -17,11 +17,16 @@ import { LifecycleScope } from '#/app/scopes';
 import { ScopeActivation, registerScopedService } from '#/_base/di/scope';
 import { defineState } from '#/_base/state/stateRegistry';
 import { ErrorCodes, Error2 } from '#/errors';
+import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { ISessionContext } from '#/session/sessionContext/sessionContext';
 import { ISessionStateService } from '#/session/state/sessionState';
 import { ISessionWorkspaceInfo } from '#/session/workspaceInfo/workspaceInfo';
 
-import { ISessionWorkspaceContext, type PathAccessOperation } from './workspaceContext';
+import {
+  assertRealPathWithin,
+  ISessionWorkspaceContext,
+  type PathAccessOperation,
+} from './workspaceContext';
 
 export const workspaceContextWorkDirKey = defineState<string>('workspaceContext.workDir', () => '');
 export const workspaceContextAdditionalDirsKey = defineState<string[]>(
@@ -36,6 +41,7 @@ export class SessionWorkspaceContextService extends Service implements ISessionW
     @ISessionStateService private readonly states: ISessionStateService,
     @ISessionContext ctx: ISessionContext,
     @ISessionWorkspaceInfo workspaceInfo: ISessionWorkspaceInfo,
+    @IHostFileSystem private readonly fs?: IHostFileSystem,
   ) {
     super();
     this.states.register(workspaceContextWorkDirKey);
@@ -92,6 +98,22 @@ export class SessionWorkspaceContextService extends Service implements ISessionW
       });
     }
     return target;
+  }
+
+  async assertAllowedRealPath(
+    absPath: string,
+    op: PathAccessOperation,
+    boundaryRoot?: string,
+  ): Promise<string> {
+    const target = this.assertAllowed(absPath, op);
+    if (this.fs === undefined || typeof this.fs.realpath !== 'function') return target;
+    return assertRealPathWithin(
+      this.fs,
+      target,
+      [this._workDir, ...this._additionalDirs],
+      op,
+      boundaryRoot,
+    );
   }
 }
 

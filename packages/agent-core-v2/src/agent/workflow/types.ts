@@ -29,6 +29,8 @@
 
 import { z } from 'zod';
 
+import type { TokenUsage } from '#/kosong/contract/usage';
+
 /** Upper bound (bytes) for a workflow script source. Enforced at compile time. */
 export const WORKFLOW_SCRIPT_MAX_BYTES = 512 * 1024;
 
@@ -72,6 +74,13 @@ export const WorkflowToolInputSchema = z
           'under the session directory; edit that file and re-invoke with the same `scriptPath` to iterate ' +
           'without resending the full script. Provide exactly one of `script` and `scriptPath`.',
       ),
+    graph: z
+      .unknown()
+      .optional()
+      .describe(
+        'Validated WorkflowGraph authoring. Graphs use stable node ids and execute through the DAG runtime. ' +
+          'This entry is gated by the workflow DAG experimental flag.',
+      ),
     resumeFromRunId: z
       .string()
       .regex(/^wf_/)
@@ -86,10 +95,11 @@ export const WorkflowToolInputSchema = z
   .superRefine((value, context) => {
     const hasScript = value.script !== undefined && value.script.trim().length > 0;
     const hasScriptPath = value.scriptPath !== undefined && value.scriptPath.trim().length > 0;
-    if (hasScript === hasScriptPath) {
+    const hasGraph = value.graph !== undefined;
+    if (Number(hasScript) + Number(hasScriptPath) + Number(hasGraph) !== 1) {
       context.addIssue({
         code: z.ZodIssueCode.custom,
-        message: 'Provide exactly one of `script` and `scriptPath`.',
+        message: 'Provide exactly one of `script`, `scriptPath`, and `graph`.',
         path: ['script'],
       });
     }
@@ -159,11 +169,19 @@ export type WorkflowProgressEvent =
       readonly runId: WorkflowRunId;
       readonly meta: WorkflowScriptMeta;
       readonly startedAt: string;
+      readonly taskId?: string;
+      readonly taskPath?: string;
+      readonly nodeId?: string;
+      readonly model?: string;
+      readonly isolationLease?: string;
+      readonly worktreePath?: string;
     }
   | {
       readonly type: 'workflow.phase_changed';
       readonly runId: WorkflowRunId;
       readonly phase: string;
+      readonly nodeId?: string;
+      readonly dependencies?: readonly string[];
     }
   | {
       readonly type: 'workflow.agent_spawned';
@@ -171,6 +189,14 @@ export type WorkflowProgressEvent =
       readonly agentId: string;
       readonly label?: string;
       readonly phase?: string;
+      readonly taskId?: string;
+      readonly taskPath?: string;
+      readonly nodeId?: string;
+      readonly model?: string;
+      readonly isolationLease?: string;
+      readonly worktreePath?: string;
+      readonly cache?: string;
+      readonly replayed?: boolean;
     }
   | {
       readonly type: 'workflow.agent_completed';
@@ -184,6 +210,13 @@ export type WorkflowProgressEvent =
       readonly tokens?: number;
       /** One-line preview of the agent's output (whitespace-collapsed). */
       readonly summary?: string;
+      readonly taskId?: string;
+      readonly taskPath?: string;
+      readonly nodeId?: string;
+      readonly cache?: string;
+      readonly replayed?: boolean;
+      readonly isolationLease?: string;
+      readonly worktreePath?: string;
     }
   | {
       readonly type: 'workflow.log';
@@ -200,6 +233,13 @@ export type WorkflowProgressEvent =
       readonly agentsSpawned?: number;
       readonly tokensSpent?: number;
       readonly durationMs?: number;
+      readonly taskId?: string;
+      readonly taskPath?: string;
+      readonly nodeId?: string;
+      readonly cache?: string;
+      readonly replayed?: boolean;
+      readonly isolationLease?: string;
+      readonly worktreePath?: string;
     };
 
 /**
@@ -380,7 +420,12 @@ export type WorkflowCompileErrorCode =
   | 'workflow.parse_failed'
   | 'workflow.meta_invalid'
   | 'workflow.meta_not_pure_literal'
-  | 'workflow.determinism_violation';
+  | 'workflow.determinism_violation'
+  | 'workflow.graph_invalid'
+  | 'workflow.unsupported_node_kind'
+  | 'workflow.js_not_static_dag'
+  | 'workflow.dag_flag_disabled'
+  | 'workflow.fingerprint_mismatch';
 
 /** A single determinism/sandbox-contract violation found by the compiler. */
 export interface WorkflowDeterminismViolation {
@@ -424,3 +469,177 @@ export class WorkflowCompileError extends Error {
     this.violations = opts.violations;
   }
 }
+
+export type WorkflowGraphVersion = string;
+export type WorkflowNodeId = string;
+
+export type WorkflowNodeKind =
+  | 'agent'
+  | 'map'
+  | 'fanout'
+  | 'sequence'
+  | 'join'
+  | 'verify'
+  | 'condition'
+  | 'approval'
+  | 'gate';
+
+export type WorkflowNodeStatus =
+  | 'planned'
+  | 'ready'
+  | 'running'
+  | 'completed'
+  | 'failed'
+  | 'skipped'
+  | 'blocked'
+  | 'lost';
+
+export interface WorkflowRetryPolicy {
+  readonly maxAttempts?: number;
+  readonly backoffMs?: number;
+  readonly backoffMultiplier?: number;
+  readonly retryOn?: readonly string[];
+}
+
+export interface WorkflowProvenance {
+  readonly authoring: 'ir' | 'js' | 'legacy-js';
+  readonly source?: string;
+  readonly sourceLine?: number;
+  readonly sourceColumn?: number;
+  readonly parentNodeId?: WorkflowNodeId;
+  readonly cacheable?: boolean;
+  readonly unknownInputs?: readonly string[];
+}
+
+export interface WorkflowFingerprintInputs {
+  readonly graphVersion: WorkflowGraphVersion;
+  readonly nodeSpec: unknown;
+  readonly prompt: unknown;
+  readonly schema: unknown;
+  readonly resolvedModel: unknown;
+  readonly effort: unknown;
+  readonly profile: unknown;
+  readonly tool: unknown;
+  readonly permission: unknown;
+  readonly toolset: unknown;
+  readonly cwd: unknown;
+  readonly workspaceRevision: unknown;
+  readonly environment?: unknown;
+}
+
+export interface WorkflowExecutionFingerprint {
+  readonly value: string;
+  readonly inputs: WorkflowFingerprintInputs;
+  readonly cacheable: boolean;
+  readonly unknownInputs: readonly string[];
+}
+
+export type WorkflowFingerprint = WorkflowExecutionFingerprint;
+
+export interface WorkflowConditionSpec {
+  readonly value?: unknown;
+  readonly path?: string;
+  readonly equals?: unknown;
+  readonly notEquals?: unknown;
+}
+
+export interface WorkflowNodeBase {
+  readonly id: WorkflowNodeId;
+  readonly kind: WorkflowNodeKind;
+  readonly dependsOn?: readonly WorkflowNodeId[];
+  readonly dependencies?: readonly WorkflowNodeId[];
+  readonly retry?: WorkflowRetryPolicy;
+  readonly budget?: number;
+  readonly provenance?: WorkflowProvenance;
+  readonly fingerprint?: WorkflowExecutionFingerprint;
+  readonly acceptsSkipped?: boolean;
+}
+
+export interface WorkflowAgentNode extends WorkflowNodeBase {
+  readonly kind: 'agent';
+  readonly prompt: string;
+  readonly schema?: WorkflowSchema;
+  readonly model?: string;
+  readonly effort?: string;
+  readonly profile?: string;
+  readonly tool?: string;
+  readonly permission?: string;
+  readonly cwd?: string;
+  readonly workspaceRevision?: string;
+}
+
+export interface WorkflowMapNode extends WorkflowNodeBase {
+  readonly kind: 'map' | 'fanout';
+  readonly items?: readonly unknown[];
+  readonly itemNodeId?: WorkflowNodeId;
+  readonly maxConcurrency?: number;
+}
+
+export interface WorkflowSequenceNode extends WorkflowNodeBase {
+  readonly kind: 'sequence';
+  readonly children?: readonly WorkflowNodeId[];
+}
+
+export interface WorkflowJoinNode extends WorkflowNodeBase {
+  readonly kind: 'join';
+  readonly children?: readonly WorkflowNodeId[];
+  readonly strategy?: 'all' | 'any' | 'first';
+}
+
+export interface WorkflowVerifyNode extends WorkflowNodeBase {
+  readonly kind: 'verify';
+  readonly schema?: WorkflowSchema;
+  readonly target?: WorkflowNodeId;
+}
+
+export interface WorkflowConditionNode extends WorkflowNodeBase {
+  readonly kind: 'condition';
+  readonly condition?: WorkflowConditionSpec;
+  readonly whenTrue?: WorkflowNodeId;
+  readonly whenFalse?: WorkflowNodeId;
+}
+
+export interface WorkflowApprovalNode extends WorkflowNodeBase {
+  readonly kind: 'approval' | 'gate';
+  readonly prompt?: string;
+  readonly policy?: string;
+}
+
+export type WorkflowNode =
+  | WorkflowAgentNode
+  | WorkflowMapNode
+  | WorkflowSequenceNode
+  | WorkflowJoinNode
+  | WorkflowVerifyNode
+  | WorkflowConditionNode
+  | WorkflowApprovalNode;
+
+export interface WorkflowGraph {
+  readonly version: WorkflowGraphVersion;
+  readonly nodes: readonly WorkflowNode[];
+  readonly root?: WorkflowNodeId;
+  readonly name?: string;
+  readonly description?: string;
+  readonly provenance?: WorkflowProvenance;
+  readonly fingerprint?: WorkflowExecutionFingerprint;
+}
+
+export interface WorkflowGraphValidationResult {
+  readonly graph: WorkflowGraph;
+  readonly order: readonly WorkflowNodeId[];
+}
+
+export interface WorkflowNodeProvenance extends WorkflowProvenance {
+  readonly nodeId: WorkflowNodeId;
+  readonly fingerprint: string;
+}
+
+export interface WorkflowNodeResult<T = unknown> {
+  readonly status: Extract<WorkflowNodeStatus, 'completed' | 'failed' | 'skipped' | 'blocked'>;
+  readonly value?: T;
+  readonly usage?: TokenUsage;
+  readonly error?: { readonly code: string; readonly message: string; readonly details?: unknown };
+  readonly provenance: WorkflowNodeProvenance;
+}
+
+export type NodeResult<T = unknown> = WorkflowNodeResult<T>;

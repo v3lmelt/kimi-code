@@ -38,6 +38,9 @@ import type { IProcess, ISessionProcessRunner } from '#/session/process/processR
 import { type BashInput, BashInputSchema } from '#/agent/tools/os/bash/bash';
 import { BashTool } from '#/agent/tools/os/bash/bashTool';
 import type { ExecutableToolContext, ExecutableToolResult, ToolExecution } from '#/tool/toolContract';
+import { BashParserService } from '#/app/bashParser/bashParserService';
+import type { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import { makeAgentWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
 
 const posixEnv: IHostEnvironment = {
   _serviceBrand: undefined,
@@ -720,8 +723,32 @@ function bashTool(
   background: IAgentTaskService = createFakeTaskService().service,
   toolPolicy: IAgentToolPolicyService = stubToolPolicy(),
   config: IConfigService = stubConfig(),
+  parser?: BashParserService,
+  workspace?: ISessionWorkspaceContext,
 ): BashTool {
-  return new BashTool(runner, env, ctx, background, toolPolicy, config);
+  return new BashTool(runner, env, ctx, background, toolPolicy, config, parser, workspace);
+}
+
+function isolatedWorkspace(
+  mode: 'shared-readonly' | 'dedicated-worktree',
+  writable: boolean,
+): ISessionWorkspaceContext {
+  const base: ISessionWorkspaceContext = {
+    _serviceBrand: undefined,
+    workDir: '/workspace',
+    additionalDirs: [],
+    resolve: (path) => (path.startsWith('/') ? path : `/workspace/${path}`),
+    isWithin: (path) => path === '/workspace' || path.startsWith('/workspace/'),
+    assertAllowed: (path) => path,
+  };
+  return makeAgentWorkspaceContext(base, {
+    leaseId: `lease-${mode}`,
+    mode,
+    state: 'active',
+    path: mode === 'dedicated-worktree' ? '/workspace/.kimi-code/worktrees/lease' : '/workspace',
+    workspaceRoot: '/workspace',
+    writable,
+  });
 }
 
 
@@ -849,6 +876,211 @@ describe('BashTool', () => {
     await executeTool(tool, context({ command: 'pwd', timeout: 60 }));
 
     expect(exec.mock.calls[0]?.[0]).toEqual(['/bin/bash', '-c', "cd '/var/app' && pwd"]);
+  });
+
+  it.each([
+    'bash -c "cat /workspace/outside.txt"',
+    'sh -c "cat /workspace/outside.txt"',
+    String.raw`python -c "open('/workspace/outside.txt')"`,
+    String.raw`node -c "require('fs')"`,
+    String.raw`find . -exec cat /workspace/outside.txt \;`,
+    'printf x | xargs cat /workspace/outside.txt',
+    'eval "cat /workspace/outside.txt"',
+  ])('rejects dynamic shell wrappers in an isolated workspace: %s', (command) => {
+    const { runner, exec } = createTestRunner(processWithOutput());
+    const tool = bashTool(
+      runner,
+      posixEnv,
+      createTestCtx('/workspace'),
+      undefined,
+      undefined,
+      undefined,
+      new BashParserService(),
+      isolatedWorkspace('dedicated-worktree', true),
+    );
+
+    expect(() => tool.resolveExecution({ command })).toThrow(/isolat|dynamic|safely/i);
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('rejects parser errors and aborted parses while isolation is active', () => {
+    const { runner, exec } = createTestRunner(processWithOutput());
+    const parse = vi.fn(() => ({
+      ok: true,
+      hasError: true,
+      root: undefined,
+    }));
+    const parser = {
+      parse,
+    } as unknown as BashParserService;
+    const tool = bashTool(
+      runner,
+      posixEnv,
+      createTestCtx('/workspace'),
+      undefined,
+      undefined,
+      undefined,
+      parser,
+      isolatedWorkspace('shared-readonly', false),
+    );
+
+    expect(() => tool.resolveExecution({ command: 'cat README.md' })).toThrow(/parsed|verified/i);
+    parse.mockReturnValue({ ok: false, reason: 'aborted' } as never);
+    expect(() => tool.resolveExecution({ command: 'cat README.md' })).toThrow(/parsed|verified/i);
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'git --work-tree=/outside status',
+    'git --git-dir=/outside/.git status',
+    'git --work-tree /outside status',
+    'git -C /outside status',
+    'git clone /outside /workspace/.kimi-code/worktrees/lease/repo',
+    'git init /outside',
+    'git worktree add /outside HEAD',
+    'git worktree move /outside /workspace/.kimi-code/worktrees/lease/repo',
+    'git clone --separate-git-dir=/outside /workspace/repository',
+  ])('rejects Git equals-path options outside the lease: %s', (command) => {
+    const { runner, exec } = createTestRunner(processWithOutput());
+    const tool = bashTool(
+      runner,
+      posixEnv,
+      createTestCtx('/workspace'),
+      undefined,
+      undefined,
+      undefined,
+      new BashParserService(),
+      isolatedWorkspace('dedicated-worktree', true),
+    );
+
+    expect(() => tool.resolveExecution({ command })).toThrow(/worktree|workspace|outside/i);
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    'git status',
+    'git commit -m message',
+    'git config --local user.name agent',
+    'git config --global user.name agent',
+    'git hook run pre-commit',
+    'git -C /workspace/.kimi-code/worktrees/lease status',
+  ])('rejects every Git CLI command while an isolation lease is active: %s', (command) => {
+    const { runner, exec } = createTestRunner(processWithOutput());
+    const tool = bashTool(
+      runner,
+      posixEnv,
+      createTestCtx('/workspace'),
+      undefined,
+      undefined,
+      undefined,
+      new BashParserService(),
+      isolatedWorkspace('dedicated-worktree', true),
+    );
+
+    expect(() => tool.resolveExecution({ command })).toThrow(/Git CLI.*not supported.*isolated agent/i);
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('reports the Git isolation denial even when the parser is unavailable', () => {
+    const { runner, exec } = createTestRunner(processWithOutput());
+    const tool = bashTool(
+      runner,
+      posixEnv,
+      createTestCtx('/workspace'),
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      isolatedWorkspace('dedicated-worktree', true),
+    );
+
+    expect(() => tool.resolveExecution({ command: 'git status' })).toThrow(
+      /Git CLI.*not supported.*isolated agent/i,
+    );
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('keeps Git CLI execution unchanged when no isolation lease is present', async () => {
+    const proc = processWithOutput({ stdout: 'ok\n' });
+    const { runner, exec } = createTestRunner(proc);
+    const tool = bashTool(runner, posixEnv, createTestCtx('/workspace'));
+
+    const result = await executeTool(tool, context({ command: 'git commit --no-edit', timeout: 60 }));
+
+    expect(exec).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({ isError: false, output: 'ok\n' });
+  });
+
+  it.each([
+    'grep -R pattern file.txt',
+    'grep -r pattern file.txt',
+    'grep --recursive pattern file.txt',
+    'rg -L pattern file.txt',
+    'rg --follow pattern file.txt',
+    'cp -L source.txt target.txt',
+    'cp --dereference source.txt target.txt',
+    'cp -r source target',
+    'cp --recursive source target',
+    'tar --dereference -c --no-recursion -f archive.tar file.txt',
+    'tar -c -f archive.tar directory',
+    'find . -type f',
+    'ln -s source.txt link.txt',
+    'ln --symbolic source.txt link.txt',
+    'ln --junction source.txt link.txt',
+  ])('rejects recursive or link-following isolation command forms: %s', (command) => {
+    const { runner, exec } = createTestRunner(processWithOutput());
+    const tool = bashTool(
+      runner,
+      posixEnv,
+      createTestCtx('/workspace'),
+      undefined,
+      undefined,
+      undefined,
+      new BashParserService(),
+      isolatedWorkspace('dedicated-worktree', true),
+    );
+
+    expect(() => tool.resolveExecution({ command })).toThrow(/isolat|recurs|link|option|safe/i);
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('allows reads from the shared workspace but rejects shell writes in shared-readonly mode', () => {
+    const { runner, exec } = createTestRunner(processWithOutput());
+    const tool = bashTool(
+      runner,
+      posixEnv,
+      createTestCtx('/workspace'),
+      undefined,
+      undefined,
+      undefined,
+      new BashParserService(),
+      isolatedWorkspace('shared-readonly', false),
+    );
+
+    expect(() => tool.resolveExecution({ command: 'cat /workspace/README.md' })).not.toThrow();
+    expect(() => tool.resolveExecution({ command: 'echo changed > /workspace/README.md' })).toThrow(
+      /read-only|write/i,
+    );
+    expect(() => tool.resolveExecution({ command: 'rm /workspace/README.md' })).toThrow(
+      /read-only|write/i,
+    );
+    expect(exec).not.toHaveBeenCalled();
+  });
+
+  it('rejects dedicated reads that fall back to the original workspace', () => {
+    const { runner } = createTestRunner(processWithOutput());
+    const tool = bashTool(
+      runner,
+      posixEnv,
+      createTestCtx('/workspace'),
+      undefined,
+      undefined,
+      undefined,
+      new BashParserService(),
+      isolatedWorkspace('dedicated-worktree', true),
+    );
+
+    expect(() => tool.resolveExecution({ command: 'cat /workspace/README.md' })).toThrow(/worktree|workspace/i);
   });
 
   it('uses Git Bash semantics on Windows', async () => {

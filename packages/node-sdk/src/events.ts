@@ -4,9 +4,53 @@ import type {
   QuestionRequest,
   QuestionResult,
 } from '@moonshot-ai/agent-core';
+import type { WorkflowProgressEvent } from '@moonshot-ai/agent-core-v2';
 
 // Event union plus shared fields/payloads used across event families.
 export type { KimiErrorPayload, Event } from '@moonshot-ai/agent-core';
+
+/**
+ * v2 workflow progress is an additive event on the SDK wire. It remains
+ * separate from the closed legacy `Event` union so existing consumers keep
+ * their exhaustive switch compatibility while v2 clients can feature-detect
+ * the richer projection. The index signature intentionally preserves future
+ * optional identity fields such as DAG node and isolation metadata.
+ */
+export interface WorkflowProgressEventEnvelope {
+  readonly type: 'workflow.progress';
+  readonly runId: string;
+  readonly event: WorkflowProgressEvent;
+  readonly sessionId?: string;
+  readonly agentId?: string;
+  readonly [key: string]: unknown;
+}
+
+export type SDKEvent = Event | WorkflowProgressEventEnvelope;
+
+export function isWorkflowProgressEventEnvelope(
+  value: unknown,
+): value is WorkflowProgressEventEnvelope {
+  if (typeof value !== 'object' || value === null) return false;
+  const candidate = value as {
+    readonly type?: unknown;
+    readonly runId?: unknown;
+    readonly event?: unknown;
+  };
+  if (
+    candidate.type !== 'workflow.progress' ||
+    typeof candidate.runId !== 'string' ||
+    typeof candidate.event !== 'object' ||
+    candidate.event === null
+  ) {
+    return false;
+  }
+  const progress = candidate.event as { readonly type?: unknown; readonly runId?: unknown };
+  return (
+    typeof progress.type === 'string' &&
+    progress.type.startsWith('workflow.') &&
+    progress.runId === candidate.runId
+  );
+}
 
 export { MCP_OAUTH_AUTHORIZATION_URL_TOOL_UPDATE } from '@moonshot-ai/agent-core';
 

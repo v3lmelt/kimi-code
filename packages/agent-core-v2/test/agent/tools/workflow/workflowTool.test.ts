@@ -39,13 +39,20 @@ import {
   type ExecutableToolResult,
 } from '#/tool/toolContract';
 import { InMemoryStorageService } from '#/persistence/backends/memory/inMemoryStorageService';
-import { workflowJournalScope } from '#/agent/workflow/persist/journal';
+import { AppendLogStore } from '#/persistence/backends/node-fs/appendLogStore';
+import {
+  WorkflowJournal,
+  workflowJournalDir,
+  workflowJournalScope,
+  workflowScriptSha256,
+} from '#/agent/workflow/persist/journal';
 import { IWorkflowBudgetService } from '#/agent/workflow/budget/workflowBudget';
 import {
   WorkflowTool,
   WORKFLOW_SCRIPT_KEY,
+  WORKFLOW_GRAPH_KEY,
 } from '#/agent/tools/workflow/workflowTool';
-import { WorkflowToolInputSchema } from '#/agent/workflow/types';
+import { WorkflowToolInputSchema, type WorkflowToolInput } from '#/agent/workflow/types';
 import { WorkflowTask } from '#/agent/tools/workflow/workflowTask';
 
 const SESSION = makeSessionContext({
@@ -64,6 +71,49 @@ const VALID_SCRIPT = [
   '}',
 ].join('\n');
 
+const RESUME_DAG_RUN_ID = 'wf_1111111111111111' as const;
+
+const RESUME_DAG_GRAPH = {
+  version: '1',
+  name: 'resume-graph',
+  root: 'condition',
+  nodes: [{ id: 'condition', kind: 'condition', condition: { value: true } }],
+};
+
+function resumeDagRecords(terminal: boolean, includeCheckpoint = true): readonly unknown[] {
+  return [
+    {
+      kind: 'workflow.started',
+      runId: RESUME_DAG_RUN_ID,
+      script: JSON.stringify(RESUME_DAG_GRAPH),
+      scriptSha256: 'sha256',
+      name: 'resume-graph',
+      description: 'resume graph',
+      startedAt: '2026-08-20T00:00:00.000Z',
+    },
+    ...(includeCheckpoint
+      ? [{
+          kind: 'checkpoint',
+          runId: RESUME_DAG_RUN_ID,
+          checkpointId: 'checkpoint-1',
+          graphVersion: '1',
+          nodes: [],
+          spent: 0,
+          reserved: 0,
+          at: '2026-08-20T00:00:01.000Z',
+        }]
+      : []),
+    ...(terminal
+      ? [{
+          kind: 'workflow.completed',
+          runId: RESUME_DAG_RUN_ID,
+          ok: true,
+          completedAt: '2026-08-20T00:00:02.000Z',
+        }]
+      : []),
+  ];
+}
+
 const INVALID_SCRIPT = [
   "export const meta = { name: 'bad', description: 'x' };",
   'export async function main() {',
@@ -80,6 +130,7 @@ const noopAppendLog: IAppendLogStore = {
   flush: async () => {},
   close: async () => {},
   acquire: () => toDisposable(() => {}),
+  acquireExclusive: async () => toDisposable(() => {}),
 };
 
 function toolContext(toolCallId = 'tc-1'): ExecutableToolContext {
@@ -92,7 +143,7 @@ function toolContext(toolCallId = 'tc-1'): ExecutableToolContext {
 
 async function runTool(
   tool: WorkflowTool,
-  args: { script?: string; scriptPath?: string; resumeFromRunId?: string },
+  args: WorkflowToolInput,
   ctx: ExecutableToolContext = toolContext(),
 ): Promise<ExecutableToolResult> {
   const execution = tool.resolveExecution(args);
@@ -106,6 +157,8 @@ describe('WorkflowTool', () => {
   let registeredTasks: AgentTask[];
   let bytes: InMemoryStorageService;
   let readText: ReturnType<typeof vi.fn>;
+  let dagEnabled: boolean;
+  let journalRecords: readonly unknown[];
 
   beforeEach(() => {
     disposables = new DisposableStore();
@@ -113,9 +166,16 @@ describe('WorkflowTool', () => {
     bytes = new InMemoryStorageService();
     registeredTasks = [];
     readText = vi.fn(async () => VALID_SCRIPT);
+    dagEnabled = false;
+    journalRecords = [];
 
     ix.stub(IFileSystemStorageService, bytes);
-    ix.set(IAppendLogStore, noopAppendLog);
+    ix.set(IAppendLogStore, {
+      ...noopAppendLog,
+      read: async function* <T>() {
+        for (const record of journalRecords) yield record as T;
+      },
+    });
     ix.stub(IHostFileSystem, { readText } as unknown as IHostFileSystem);
     ix.stub(IHostEnvironment, { pathClass: 'win32' } as unknown as IHostEnvironment);
     ix.stub(ISessionContext, SESSION);
@@ -145,7 +205,7 @@ describe('WorkflowTool', () => {
       budget: () => ({ total: 1_000_000, spent: () => 0, remaining: () => 1_000_000 }),
       recordSubagentUsage: vi.fn(),
     } as unknown as IWorkflowBudgetService);
-    ix.stub(IFlagService, { enabled: vi.fn(() => false) } as unknown as IFlagService);
+    ix.stub(IFlagService, { enabled: vi.fn(() => dagEnabled) } as unknown as IFlagService);
     ix.stub(IAgentLifecycleService, {} as unknown as IAgentLifecycleService);
     ix.stub(ISessionSubagentService, {} as unknown as ISessionSubagentService);
     ix.stub(ISessionAgentProfileCatalog, {
@@ -207,6 +267,77 @@ describe('WorkflowTool', () => {
     expect(registeredTasks).toHaveLength(1);
   });
 
+  it('compiles and launches a graph through the public WorkflowTool entry', async () => {
+    dagEnabled = true;
+    const tool = ix.createInstance(WorkflowTool);
+    const graph = {
+      version: '1',
+      name: 'public-graph',
+      root: 'condition',
+      nodes: [{ id: 'condition', kind: 'condition', condition: { value: true } }],
+    };
+    const result = await runTool(tool, { graph });
+    expect(result.isError).toBeFalsy();
+    expect(registeredTasks).toHaveLength(1);
+    const runId = /run_id: (wf_[a-f0-9]{16})/.exec(String(result.output))?.[1] as `wf_${string}`;
+    const persisted = await bytes.read(workflowJournalScope(SESSION.scope(), runId), WORKFLOW_GRAPH_KEY);
+    const persistedGraph = JSON.parse(new TextDecoder().decode(persisted)) as { nodes: Array<{ provenance?: { cacheable?: boolean; unknownInputs?: string[] } }> };
+    expect(persistedGraph.nodes[0]?.provenance?.cacheable).toBe(false);
+    expect(persistedGraph.nodes[0]?.provenance?.unknownInputs).toContain('resolvedModel');
+  });
+
+  it('rejects an active DAG resume before registering a task', async () => {
+    dagEnabled = true;
+    journalRecords = resumeDagRecords(false, false);
+    const tool = ix.createInstance(WorkflowTool);
+
+    const result = await runTool(tool, {
+      graph: RESUME_DAG_GRAPH,
+      resumeFromRunId: RESUME_DAG_RUN_ID,
+    });
+
+    expect(result.isError).toBe(true);
+    expect(String(result.output)).toContain('still running');
+    expect(registeredTasks).toHaveLength(0);
+  });
+
+  it('accepts a terminal DAG resume through the public WorkflowTool entry', async () => {
+    dagEnabled = true;
+    journalRecords = resumeDagRecords(true);
+    const tool = ix.createInstance(WorkflowTool);
+
+    const result = await runTool(tool, {
+      graph: RESUME_DAG_GRAPH,
+      resumeFromRunId: RESUME_DAG_RUN_ID,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(registeredTasks).toHaveLength(1);
+    expect(String(result.output)).toContain('status: running');
+  });
+
+  it('recovers a terminal DAG resume when the source summary still has a lease', async () => {
+    dagEnabled = true;
+    journalRecords = [
+      ...resumeDagRecords(true),
+      {
+        kind: 'workflow.lease.acquired',
+        runId: RESUME_DAG_RUN_ID,
+        leaseId: 'lease-held',
+        at: '2026-08-20T00:00:03.000Z',
+      },
+    ];
+    const tool = ix.createInstance(WorkflowTool);
+
+    const result = await runTool(tool, {
+      graph: RESUME_DAG_GRAPH,
+      resumeFromRunId: RESUME_DAG_RUN_ID,
+    });
+
+    expect(result.isError).toBeFalsy();
+    expect(registeredTasks).toHaveLength(1);
+  });
+
   it('rejects a scriptPath that escapes the session directory', () => {
     const tool = ix.createInstance(WorkflowTool);
     expect(() => tool.resolveExecution({ scriptPath: '../outside.js' })).toThrow(/escapes the session directory/);
@@ -217,12 +348,13 @@ describe('WorkflowTool', () => {
     expect(() => WorkflowToolInputSchema.parse({})).toThrow(/exactly one/);
     expect(() => WorkflowToolInputSchema.parse({ script: VALID_SCRIPT, scriptPath: 'input.js' })).toThrow(/exactly one/);
     expect(WorkflowToolInputSchema.parse({ scriptPath: 'input.js' })).toMatchObject({ scriptPath: 'input.js' });
-    expect(tool.parameters).toMatchObject({
-      oneOf: [
-        { required: ['script'] },
-        { required: ['scriptPath'] },
-      ],
-    });
+    expect(tool.parameters).toEqual(expect.objectContaining({
+      oneOf: expect.arrayContaining([
+        expect.objectContaining({ required: ['script'] }),
+        expect.objectContaining({ required: ['scriptPath'] }),
+        expect.objectContaining({ required: ['graph'] }),
+      ]),
+    }));
   });
 
   it('fails fast with a compile error for a script that violates the determinism contract', async () => {
@@ -246,5 +378,64 @@ describe('WorkflowTool', () => {
     const output = typeof result.output === 'string' ? result.output : '';
     expect(output).toContain('was found to resume');
     expect(registeredTasks).toHaveLength(0);
+  });
+
+  it('releases a durable resume reservation when registerTask fails so another run can claim it', async () => {
+    const appendLog = new AppendLogStore(new InMemoryStorageService());
+    let lockHeld = false;
+    appendLog.acquireExclusive = async () => {
+      if (lockHeld) throw new Error('test lock is held');
+      lockHeld = true;
+      return toDisposable(() => {
+        lockHeld = false;
+      });
+    };
+    const source = new WorkflowJournal({
+      runId: RESUME_DAG_RUN_ID,
+      dir: workflowJournalDir(SESSION.sessionDir, RESUME_DAG_RUN_ID),
+      scope: workflowJournalScope(SESSION.scope(), RESUME_DAG_RUN_ID),
+      log: appendLog,
+      allowMissingExclusiveLock: true,
+    });
+    source.writeWorkflowStarted({
+      script: VALID_SCRIPT,
+      scriptSha256: workflowScriptSha256(VALID_SCRIPT),
+      name: 'source',
+      description: 'source run',
+      startedAt: '2026-08-20T00:00:00.000Z',
+    });
+    source.writeWorkflowCompleted({ ok: true, completedAt: '2026-08-20T00:00:01.000Z' });
+    await appendLog.flush();
+
+    ix.set(IAppendLogStore, appendLog);
+    ix.stub(IAgentTaskService, {
+      registerTask: () => {
+        throw new Error('task registration failed');
+      },
+      getTask: () => undefined,
+      list: () => [],
+    } as unknown as IAgentTaskService);
+    const tool = ix.createInstance(WorkflowTool);
+    const result = await runTool(tool, {
+      script: VALID_SCRIPT,
+      resumeFromRunId: RESUME_DAG_RUN_ID,
+    });
+    expect(result.isError).toBe(true);
+    expect(String(result.output)).toContain('task registration failed');
+
+    const restarted = new WorkflowJournal({
+      runId: RESUME_DAG_RUN_ID,
+      dir: workflowJournalDir(SESSION.sessionDir, RESUME_DAG_RUN_ID),
+      scope: workflowJournalScope(SESSION.scope(), RESUME_DAG_RUN_ID),
+      log: appendLog,
+      allowMissingExclusiveLock: true,
+    });
+    await expect(restarted.readJournal()).resolves.toMatchObject({
+      resumeClaim: { state: 'released' },
+    });
+    const retry = await restarted.claimResume('wf_2222222222222222');
+    expect(retry.state).toBe('reserved');
+    await retry.release();
+    await appendLog.close();
   });
 });

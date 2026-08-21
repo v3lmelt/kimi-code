@@ -14,6 +14,7 @@ import { CustomEditor } from './components/editor/custom-editor';
 import { DEFAULT_TUI_CONFIG } from './config';
 import { CHROME_GUTTER } from './constant/rendering';
 import type { TasksBrowserState } from './controllers/tasks-browser';
+import type { RuntimeCenterState } from './controllers/tasks-browser';
 import { currentTheme, type Theme } from './theme';
 import { createTerminalState, type TerminalState } from './utils/terminal-state';
 import {
@@ -53,6 +54,8 @@ export interface TUIState {
   sessionsScope: 'cwd' | 'all';
   activeDialog: 'session-picker' | 'help' | 'trust-prompt' | 'cache-hint' | null;
   tasksBrowser: TasksBrowserState | undefined;
+  /** Runtime Center takeover state. Kept separate so legacy /tasks callers and tests remain stable. */
+  runtimeCenter: RuntimeCenterState | undefined;
   externalEditorRunning: boolean;
   queuedMessages: QueuedMessage[];
   /**
@@ -116,6 +119,7 @@ export function createTUIState(options: KimiTUIOptions): TUIState {
     sessionsScope: 'cwd',
     activeDialog: null,
     tasksBrowser: undefined,
+    runtimeCenter: undefined,
     externalEditorRunning: false,
     queuedMessages: [],
     queuedMessageDispatchPending: false,

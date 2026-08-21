@@ -199,9 +199,23 @@ export const BUILTIN_SLASH_COMMANDS = [
   {
     name: 'workflows',
     aliases: ['wf'],
-    description: 'Show saved workflow run trees (ultracode orchestration runs)',
+    description: 'Open the Runtime Center on the Workflows view',
     priority: 90,
     argumentHint: '[runId]',
+    availability: 'always',
+  },
+  {
+    name: 'runtime',
+    aliases: ['center'],
+    description: 'Open the unified Tasks, Agents, and Workflows runtime center',
+    priority: 90,
+    availability: 'always',
+  },
+  {
+    name: 'agents',
+    aliases: ['agent-tree'],
+    description: 'Browse the runtime agent tree',
+    priority: 85,
     availability: 'always',
   },
   {

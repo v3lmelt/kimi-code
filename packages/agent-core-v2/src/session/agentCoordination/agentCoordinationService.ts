@@ -7,9 +7,10 @@
  * for idle or completed targets. Context snapshots contain plain user and
  * assistant text with internal origins and tool payloads removed. The service
  * borrows Agent-scope handles only during operations, and intersects a child
- * profile's active tools and denylist with its parent's policy. Logs failed
- * cleanup after a partially completed spawn through `log`. Bound at Session
- * scope.
+ * profile's active tools and denylist with its parent's policy. Workspace
+ * isolation leases are exposed on task metadata and released at run
+ * boundaries. Logs failed cleanup after a partially completed spawn through
+ * `log`. Bound at Session scope.
  */
 
 import { Disposable } from '#/_base/di/lifecycle';
@@ -31,6 +32,7 @@ import { IAgentLifecycleService } from '#/session/agentLifecycle/agentLifecycle'
 import { ISessionMetadata } from '#/session/sessionMetadata/sessionMetadata';
 import { ISessionSubagentService } from '#/session/subagent/subagent';
 import { abortError } from '#/_base/utils/abort';
+import type { WorkspaceIsolationLease } from '#/workspace/workspaceIsolation/workspaceIsolation';
 
 import {
   type AgentAddress,
@@ -64,6 +66,7 @@ interface MutableTask {
   status: AgentCoordinationStatus;
   mailboxCount: number;
   contextPolicy: ContextPolicy;
+  workspaceIsolation: WorkspaceIsolationLease | undefined;
   pathPinned: boolean;
   readonly createdAt: number;
   updatedAt: number;
@@ -168,6 +171,7 @@ export class AgentCoordinationService
         existing.updatedAt = Date.now();
         this.publish(existing);
       }
+      existing.workspaceIsolation = this.lifecycle.getIsolationLease?.(handle.id);
       return this.toInfo(existing);
     }
 
@@ -189,6 +193,7 @@ export class AgentCoordinationService
       status: 'idle',
       mailboxCount: 0,
       contextPolicy: normalizePolicy(options.contextPolicy ?? DEFAULT_CONTEXT_POLICY),
+      workspaceIsolation: this.lifecycle.getIsolationLease?.(handle.id),
       pathPinned: options.taskPath !== undefined,
       createdAt: now,
       updatedAt: now,
@@ -213,6 +218,7 @@ export class AgentCoordinationService
       handle = await this.lifecycle.create({
         agentId: options.agentId,
         binding: options.binding,
+        isolation: options.isolation,
         labels: {
           parentAgentId: options.callerAgentId,
           taskPath,
@@ -235,6 +241,7 @@ export class AgentCoordinationService
         throw new Error2(ErrorCodes.AGENT_NOT_FOUND, `Agent "${handle.id}" does not exist`);
       }
       task.claimedPaths.add(taskPath);
+      task.workspaceIsolation = this.lifecycle.getIsolationLease?.(handle.id);
       this.enforceCapabilitySubset(parent.handle, handle);
       this.applyContextPolicy(options.callerAgentId, handle, policy);
       await this.persistTaskMetadata(task);
@@ -325,6 +332,9 @@ export class AgentCoordinationService
       );
     }
     signal.throwIfAborted();
+    task.workspaceIsolation = await this.lifecycle.ensureIsolation?.(task.agentId);
+    task.updatedAt = Date.now();
+    this.publish(task);
     const policy = normalizePolicy(contextPolicy ?? { kind: 'fresh' });
     task.contextPolicy = policy;
     this.applyContextPolicy(sender.agentId, targetHandle, policy);
@@ -337,6 +347,7 @@ export class AgentCoordinationService
       );
       const completion = await run.completion;
       this.markRunFinished(task.agentId, 'completed');
+      await this.releaseTaskIsolation(task);
       return {
         task: this.toInfo(task),
         summary: completion.summary,
@@ -344,6 +355,7 @@ export class AgentCoordinationService
       };
     } catch (error) {
       this.markRunFinished(task.agentId, signal.aborted ? 'interrupted' : 'failed');
+      await this.releaseTaskIsolation(task);
       throw error;
     }
   }
@@ -362,6 +374,7 @@ export class AgentCoordinationService
     }
     loop.cancel(undefined, abortError('Agent interrupted'));
     this.setStatus(task, 'interrupted');
+    await this.releaseTaskIsolation(task);
     return this.toInfo(task);
   }
 
@@ -404,8 +417,12 @@ export class AgentCoordinationService
   ): AgentCoordinationTaskInfo | undefined {
     const task = this.tasksByAgentId.get(agentId);
     if (task === undefined) return undefined;
-    if (task.status === 'interrupted' && status !== 'interrupted') return this.toInfo(task);
+    if (task.status === 'interrupted' && status !== 'interrupted') {
+      void this.releaseTaskIsolation(task);
+      return this.toInfo(task);
+    }
     this.setStatus(task, status);
+    void this.releaseTaskIsolation(task);
     return this.toInfo(task);
   }
 
@@ -637,6 +654,27 @@ export class AgentCoordinationService
     task.status = status;
     task.updatedAt = Date.now();
     this.publish(task);
+    if (status === 'completed' || status === 'failed' || status === 'interrupted') {
+      void this.releaseTaskIsolation(task);
+    }
+  }
+
+  private async releaseTaskIsolation(task: MutableTask): Promise<void> {
+    try {
+      const lease = await this.lifecycle.releaseIsolation?.(task.agentId);
+      if (lease === undefined && task.workspaceIsolation === undefined) return;
+      task.workspaceIsolation = lease;
+      task.updatedAt = Date.now();
+      this.publish(task);
+      await this.persistTaskMetadata(task);
+    } catch (error) {
+      this.log?.warn('agent workspace isolation release failed', {
+        agentId: task.agentId,
+        taskPath: task.taskPath,
+        leaseId: task.workspaceIsolation?.id,
+        error,
+      });
+    }
   }
 
   private async persistTaskMetadata(task: MutableTask): Promise<void> {
@@ -644,11 +682,18 @@ export class AgentCoordinationService
     if (typeof this.metadata.registerAgent !== 'function') return;
     const metadata = await this.metadata.read();
     const existing = metadata.agents?.[task.agentId];
-    const labels = {
+    const labels: Record<string, string> = {
       ...(existing?.labels ?? {}),
       taskPath: task.taskPath,
       taskName: task.taskName,
     };
+    const lease = task.workspaceIsolation;
+    if (lease !== undefined) {
+      labels['isolationLeaseId'] = lease.id;
+      labels['isolationMode'] = lease.mode;
+      labels['isolationState'] = lease.state;
+      labels['isolationPath'] = lease.path;
+    }
     await this.metadata.registerAgent(task.agentId, {
       ...existing,
       type: existing?.type ?? (task.agentId === 'main' ? 'main' : 'sub'),
@@ -775,6 +820,7 @@ export class AgentCoordinationService
       status: task.status,
       mailboxCount: task.mailboxCount,
       contextPolicy: task.contextPolicy,
+      workspaceIsolation: task.workspaceIsolation,
       createdAt: task.createdAt,
       updatedAt: task.updatedAt,
     };

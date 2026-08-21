@@ -14,6 +14,10 @@ import type { IAgentScopeHandle } from '#/_base/di/scope';
 import type { ContextMessage } from '#/agent/contextMemory/types';
 import type { BindAgentInput } from '#/agent/profile/profile';
 import type { TokenUsage } from '#/kosong/contract/usage';
+import type {
+  WorkspaceIsolationLease,
+  WorkspaceIsolationMode,
+} from '#/workspace/workspaceIsolation/workspaceIsolation';
 
 export type AgentCoordinationStatus =
   | 'running'
@@ -41,6 +45,7 @@ export interface AgentCoordinationTaskInfo {
   readonly status: AgentCoordinationStatus;
   readonly mailboxCount: number;
   readonly contextPolicy: ContextPolicy;
+  readonly workspaceIsolation?: WorkspaceIsolationLease;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -51,6 +56,7 @@ export interface AgentCoordinationSpawnOptions {
   readonly agentId?: string;
   readonly binding?: BindAgentInput;
   readonly contextPolicy?: ContextPolicy;
+  readonly isolation?: WorkspaceIsolationMode;
 }
 
 export interface AgentCoordinationSpawnResult {

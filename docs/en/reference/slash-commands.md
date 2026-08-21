@@ -29,7 +29,7 @@ Some commands are only available in the idle state. Executing these commands whi
 | --- | --- | --- | --- |
 | `/new` | `/clear` | Start a fresh session, discarding the current context | No |
 | `/sessions` | `/resume` | Browse historical sessions and switch to / restore one | No |
-| `/tasks` | `/task` | Browse the background task list | Yes |
+| `/tasks` | `/task` | Open the legacy background-task browser | Yes |
 | `/fork` | — | Fork a new session from the current one, preserving the full conversation history; you stay in the current session | No |
 | `/title [<text>]` | `/rename` | Without arguments, display the current session title; with an argument, set a new title (max 200 characters) | Yes |
 | `/compact [<instruction>]` | — | Compact the current conversation context to free up token usage; an optional custom instruction can hint to the model what to preserve | No |
@@ -103,13 +103,33 @@ Prompt mode exits with code `0` when the goal completes, `3` when it blocks, and
 | --- | --- | --- | --- |
 | `/help` | `/h`, `/?` | Show keyboard shortcuts and all available commands | Yes |
 | `/btw [question]` | — | Open a side conversation in a forked sub-Agent without affecting the current main Agent turn; without a question, opens the panel first to wait for input | Yes |
-| `/workflows [<runId>]` | `/wf` | Show workflow run trees, live progress, agent status, token usage, and failures; pass a run ID to focus one run | Yes |
+| `/runtime` | `/center` | Open the unified Runtime Center on the Tasks view | Yes |
+| `/agents` | `/agent-tree` | Open the Runtime Center on the Agents view | Yes |
+| `/workflows [<runId>]` | `/wf` | Open the Runtime Center on the Workflows view; show workflow run trees, live progress, agent status, token usage, and failures, and pass a run ID to focus one run | Yes |
 | `/usage` | — | Show token usage, context consumption, and quota information | Yes |
 | `/status` | — | Show the current session runtime state: version, model, working directory, permission mode, etc. | Yes |
 | `/mcp` | — | List MCP servers and their connection status in the current session | Yes |
 | `/plugins` | — | Open the interactive plugin manager | Yes |
 | `/version` | — | Display the Hasu CLI version number | Yes |
 | `/feedback` | `/bug` | Submit feedback with optional diagnostic logs and codebase context | Yes |
+
+## Runtime Center
+
+The Runtime Center is a live TUI panel for inspecting tasks, agents, and workflows in the current session. `/runtime` opens Tasks, `/agents` opens Agents, and `/workflows [<runId>]` opens Workflows and can focus a specific run; all three commands remain available while the session is streaming.
+
+- **Tasks**: Inspect background-task status, descriptions, and runtime identifiers.
+- **Agents**: Inspect the agent tree, current activity, and owning task when available.
+- **Workflows**: Inspect run trees, phases, DAG nodes and dependencies when available, token usage, failures, and runtime identifiers.
+
+Select an item to inspect its detail pane. The pane shows status and activity, and adds model, token usage, duration, cache, and isolation details when they are available. Press `Tab` to cycle views, `R` to refresh, and `Esc` to close. Press `O` to open output for a task, or for an agent or workflow with an owning background task; `Enter` opens output for task and agent entries.
+
+To stop a stoppable background task, select its task entry and press `S`; press `Y` to confirm, and any other key cancels. Foreground tasks and tasks in a terminal state cannot be stopped from the Runtime Center.
+
+The current SDK does not expose `resume`, `retry`, `message`, `followup`, `interrupt`, or `transcript` actions. Runtime Center marks these actions as `unavailable` and does not claim to execute them.
+
+::: tip
+The `/runtime`, `/agents`, and `/workflows` viewers do not require an experimental flag. Explicit DAG graph authoring for the `Workflow` tool is separately gated by the `workflow_dag` experimental feature. Set `KIMI_CODE_EXPERIMENTAL_WORKFLOW_DAG=1` before starting Hasu, or set `KIMI_CODE_EXPERIMENTAL_FLAG=1` to enable all registered experimental features.
+:::
 
 ## Exit
 

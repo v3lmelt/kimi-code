@@ -47,7 +47,10 @@ import { IHostFileSystem } from '#/os/interface/hostFileSystem';
 import { IHostProcessService } from '#/os/interface/hostProcess';
 import { unwrapErrorCause } from '#/_base/errors/errors';
 import { ISessionSkillCatalog } from '#/session/sessionSkillCatalog/skillCatalog';
-import { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
+import {
+  assertWorkspacePathBeforeIO,
+  ISessionWorkspaceContext,
+} from '#/session/workspaceContext/workspaceContext';
 import {
   extendWorkspaceWithSkillRoots,
   resolvePathAccessPath,
@@ -114,6 +117,10 @@ export class GrepTool implements IGrepTool {
       {
         workspaceDir: this.workspaceCtx.workDir,
         additionalDirs: this.workspaceCtx.additionalDirs,
+        assertIsolationAllowed: (path, operation) =>
+          this.workspaceCtx.isolation === undefined
+            ? path
+            : this.workspaceCtx.assertAllowed(path, operation === 'search' ? 'read' : operation),
       },
       this.skillCatalog?.catalog.getSkillRoots() ?? [],
       this.env.pathClass,
@@ -149,6 +156,14 @@ export class GrepTool implements IGrepTool {
   ): Promise<ExecutableToolResult> {
     if (signal.aborted) {
       return { isError: true, output: 'Aborted before search started' };
+    }
+
+    try {
+      searchPaths = await Promise.all(
+        searchPaths.map((path) => assertWorkspacePathBeforeIO(this.workspaceCtx, path, 'read')),
+      );
+    } catch (error) {
+      return { isError: true, output: error instanceof Error ? error.message : String(error) };
     }
 
     const pathClass = this.env.pathClass;

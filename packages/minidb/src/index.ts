@@ -13,7 +13,7 @@
 
 export * from './mini-db.js';
 export { UniqueViolationError } from './index-manager.js';
-export { LockError } from './lockfile.js';
+export { LockFile, LockError } from './lockfile.js';
 // The close-gate + in-flight-count lifecycle primitive, shared with embedders
 // that run lifecycle-managed background work (kap-server's search service).
 export { OpTracker } from './op-tracker.js';

@@ -163,6 +163,15 @@ export interface StorageReadRange {
 export interface IFileSystemStorageService {
   readonly _serviceBrand: undefined;
 
+  /**
+   * Local filesystem identity used by access-pattern stores that need a
+   * process-shared coordination primitive. Non-filesystem backends leave
+   * these capabilities absent rather than pretending to provide a
+   * cross-process lock.
+   */
+  readonly physicalRoot?: string;
+  physicalPath?(scope: string, key: string): string;
+
   read(scope: string, key: string): Promise<Uint8Array | undefined>;
   /** Current byte length of the stored value; `undefined` when `(scope, key)` does not exist. */
   size(scope: string, key: string): Promise<number | undefined>;

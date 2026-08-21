@@ -34,6 +34,7 @@ import type {
   TurnStepUsageEvent,
   TokenUsage,
   WarningEvent,
+  WorkflowProgressEventEnvelope,
 } from '@moonshot-ai/kimi-code-sdk';
 
 import { MoonLoader } from '../components/chrome/moon-loader';
@@ -96,7 +97,9 @@ import { createGoal as startGoalCommand } from '../commands/goal';
 import {
   applyWorkflowProgressEvent,
   extractWorkflowProgressEvent,
+  WORKFLOW_LEDGER_LIMITS,
 } from '../utils/workflow-model';
+import { mergeWorkflowTaskSnapshots, type RuntimeCenterTaskInfo } from '../utils/runtime-center-model';
 
 /**
  * Coalesces footer agent-row refreshes from high-frequency events
@@ -170,7 +173,9 @@ export class SessionEventHandler {
 
   // Runtime state – owned by this handler, reset between sessions.
   backgroundTasks: Map<string, BackgroundTaskInfo> = new Map();
-  private readonly workflowBackgroundTasks = new Map<string, { readonly status: string }>();
+  /** Workflow task records are kept separate from the legacy task browser but
+   * are exposed to the Runtime Center projection. */
+  readonly workflowBackgroundTasks = new Map<string, RuntimeCenterTaskInfo>();
   backgroundTaskTranscriptedTerminal: Set<string> = new Set();
 
   renderedSkillActivationIds: Set<string> = new Set();
@@ -210,6 +215,8 @@ export class SessionEventHandler {
 
   resetRuntimeState(): void {
     this.backgroundTasks.clear();
+    this.workflowBackgroundTasks.clear();
+    this.host.setAppState({ workflowRuns: [] });
     this.backgroundTaskTranscriptedTerminal.clear();
     this.subAgentEventHandler.resetRuntimeState();
     this.renderedSkillActivationIds.clear();
@@ -284,7 +291,7 @@ export class SessionEventHandler {
     host.sessionEventUnsubscribe?.();
     const mcpOAuthOpener = new McpOAuthAuthorizationUrlOpener(openUrl);
     const { sessionId } = host.state.appState;
-    host.sessionEventUnsubscribe = session.onEvent((event) => {
+    const unsubscribeLegacy = session.onEvent((event) => {
       if (host.aborted) return;
       if (event.sessionId !== sessionId) return;
       if (event.type === 'tool.progress') {
@@ -292,6 +299,27 @@ export class SessionEventHandler {
       }
       this.handleEvent(event, sendQueued);
     });
+    // Workflow progress is intentionally delivered through its own additive
+    // channel. Keep the legacy Event subscription closed so exhaustive event
+    // switches never receive a v2-only discriminator.
+    const workflowSession = session as Session & {
+      readonly onWorkflowProgress?: (
+        listener: (event: WorkflowProgressEventEnvelope) => void,
+      ) => () => void;
+    };
+    const unsubscribeWorkflow =
+      typeof workflowSession.onWorkflowProgress === 'function'
+        ? workflowSession.onWorkflowProgress.call(session, (event) => {
+            if (host.aborted) return;
+            if (event.sessionId !== sessionId) return;
+            const progress = extractWorkflowProgressEvent(event);
+            if (progress !== undefined) this.handleWorkflowProgress(progress);
+          })
+        : undefined;
+    host.sessionEventUnsubscribe = () => {
+      unsubscribeLegacy();
+      unsubscribeWorkflow?.();
+    };
     void this.syncMcpServerStatusSnapshot(session);
   }
 
@@ -335,18 +363,6 @@ export class SessionEventHandler {
       if (event.type === 'agent.status.updated') {
         this.syncRunningAgentsFooter();
       }
-      return;
-    }
-
-    // The engine's `workflow.progress` wire event reaches the client through
-    // the SDK event channel (a closed v1 union, hence the runtime extract).
-    // Fold it into appState.workflowRuns so the /workflows command renders live
-    // run progress without polling. Deliberately handled before the turn-scoped
-    // block below: workflow runs are background tasks and may settle outside
-    // any in-flight turn.
-    const workflowProgress = extractWorkflowProgressEvent(event);
-    if (workflowProgress !== undefined) {
-      this.handleWorkflowProgress(workflowProgress);
       return;
     }
 
@@ -1372,7 +1388,9 @@ export class SessionEventHandler {
     // only their lifecycle for the footer badge; the background-task browser
     // and transcript cards accept the legacy process/agent/question union.
     if (info.kind === 'workflow') {
-      this.workflowBackgroundTasks.set(info.taskId, info);
+      this.setWorkflowBackgroundTask(info);
+      const workflowRuns = mergeWorkflowTaskSnapshots(state.appState.workflowRuns, [info]);
+      if (workflowRuns !== state.appState.workflowRuns) this.host.setAppState({ workflowRuns });
       this.syncBackgroundTaskBadge();
       this.syncRunningAgentsFooter();
       return;
@@ -1438,6 +1456,15 @@ export class SessionEventHandler {
       this.syncRunningAgentsFooter();
     }
     this.host.tasksBrowserController.repaint();
+  }
+
+  setWorkflowBackgroundTask(info: RuntimeCenterTaskInfo): void {
+    this.workflowBackgroundTasks.set(info.taskId, info);
+    while (this.workflowBackgroundTasks.size > WORKFLOW_LEDGER_LIMITS.runs) {
+      const oldestTaskId = this.workflowBackgroundTasks.keys().next().value;
+      if (oldestTaskId === undefined) break;
+      this.workflowBackgroundTasks.delete(oldestTaskId);
+    }
   }
 
   private appendBackgroundTaskEntry(info: BackgroundTaskInfo): void {

@@ -51,7 +51,11 @@ import {
   type ISessionScopeHandle,
 } from '@moonshot-ai/agent-core-v2';
 
-import { translateDomainEvent } from '#/v2/event-mapper';
+import {
+  translateDomainEvent,
+  translateWorkflowProgressEvent,
+} from '#/v2/event-mapper';
+import type { WorkflowProgressEventEnvelope } from '#/events';
 
 /**
  * The client surface the wiring drives — the base class's own public methods,
@@ -59,6 +63,7 @@ import { translateDomainEvent } from '#/v2/event-mapper';
  */
 export interface SessionEventSink {
   receiveEvent(event: Event): void;
+  receiveWorkflowProgress(event: WorkflowProgressEventEnvelope): void;
   requestApproval(
     request: ApprovalRequest & { sessionId: string; agentId: string },
   ): Promise<ApprovalResponse>;
@@ -153,6 +158,17 @@ export class SessionEventWiring {
       agent.accessor.get(IEventBus).subscribe((event) => {
         const enriched =
           event.type === 'agent.status.updated' ? withStatusSnapshot(agent, event) : event;
+        if (enriched.type === 'workflow.progress') {
+          const workflowProgress = translateWorkflowProgressEvent(
+            enriched,
+            sessionId,
+            agentId,
+          );
+          if (workflowProgress !== undefined) {
+            this.sink.receiveWorkflowProgress(workflowProgress);
+          }
+          return;
+        }
         const translated = translateDomainEvent(enriched, sessionId, agentId);
         if (translated !== undefined) this.sink.receiveEvent(translated);
       }),

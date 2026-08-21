@@ -22,7 +22,12 @@ import {
 } from '@moonshot-ai/agent-core';
 import type { Kaos } from '@moonshot-ai/kaos';
 
-import type { ApprovalHandler, QuestionHandler } from '#/events';
+import {
+  isWorkflowProgressEventEnvelope,
+  type ApprovalHandler,
+  type QuestionHandler,
+  type WorkflowProgressEventEnvelope,
+} from '#/events';
 import type {
   AddAdditionalDirInput,
   AddAdditionalDirResult,
@@ -150,6 +155,9 @@ type ResolvedCoreAPI = RPCMethods<CoreAPI>;
 export abstract class SDKRpcClientBase {
   private readonly interactiveAgentScope = new AsyncLocalStorage<string>();
   private readonly eventListeners = new Set<(event: Event) => void>();
+  private readonly workflowProgressListeners = new Set<
+    (event: WorkflowProgressEventEnvelope) => void
+  >();
   private readonly approvalHandlers = new Map<string, ApprovalHandler>();
   private readonly questionHandlers = new Map<string, QuestionHandler>();
 
@@ -918,8 +926,24 @@ export abstract class SDKRpcClientBase {
     };
   }
 
+  onWorkflowProgress(
+    listener: (event: WorkflowProgressEventEnvelope) => void,
+  ): Unsubscribe {
+    this.workflowProgressListeners.add(listener);
+    return () => {
+      this.workflowProgressListeners.delete(listener);
+    };
+  }
+
   receiveEvent(event: Event): void {
     for (const listener of this.eventListeners) {
+      listener(event);
+    }
+  }
+
+  receiveWorkflowProgress(event: WorkflowProgressEventEnvelope): void {
+    if (!isWorkflowProgressEventEnvelope(event)) return;
+    for (const listener of this.workflowProgressListeners) {
       listener(event);
     }
   }

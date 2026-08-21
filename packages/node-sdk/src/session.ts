@@ -6,7 +6,12 @@ import {
   type SwarmModeTrigger,
 } from '@moonshot-ai/agent-core';
 
-import { type ApprovalHandler, type Event, type QuestionHandler } from '#/events';
+import {
+  type ApprovalHandler,
+  type Event,
+  type QuestionHandler,
+  type WorkflowProgressEventEnvelope,
+} from '#/events';
 import type { SDKRpcClientBase } from '#/rpc';
 import type {
   AddAdditionalDirOptions,
@@ -117,6 +122,20 @@ export class Session {
       if (event.sessionId === this.id) {
         listener(event);
       }
+    });
+  }
+
+  /**
+   * Subscribe to v2 workflow progress without widening the closed legacy
+   * `Event` stream. The envelope is stamped by the session wiring and filtered
+   * here so a Session never observes another session's run.
+   */
+  onWorkflowProgress(
+    listener: (event: WorkflowProgressEventEnvelope) => void,
+  ): Unsubscribe {
+    this.ensureOpen();
+    return this.rpc.onWorkflowProgress((event) => {
+      if (event.sessionId === this.id) listener(event);
     });
   }
 

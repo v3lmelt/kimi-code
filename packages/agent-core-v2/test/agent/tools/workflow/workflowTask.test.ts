@@ -103,6 +103,7 @@ describe('WorkflowTask', () => {
       scope: testWireScope('wf', runId),
       dir: `wf-dir/${runId}`,
       log: logStore,
+      allowMissingExclusiveLock: true,
     });
   }
 
@@ -178,6 +179,68 @@ describe('WorkflowTask', () => {
     expect(summary?.agents[0]?.result).toBe('cached-summary');
     expect(summary?.agents[0]?.ok).toBe(true);
     expect(summary?.completedAgentIds).toEqual(['a1']);
+    expect(summary?.lease).toEqual({ state: 'available', held: false });
+  });
+
+  it('commits a resume claim after the destination workflow.started record is durable', async () => {
+    const sourceRunId = 'wf_fedcba9876543210' as WorkflowRunId;
+    const source = makeJournal(sourceRunId);
+    source.writeWorkflowStarted({
+      script: SCRIPT,
+      scriptSha256: workflowScriptSha256(SCRIPT),
+      name: 'source',
+      description: 'source run',
+      startedAt: '2026-08-14T00:00:00.000Z',
+    });
+    source.writeWorkflowCompleted({ ok: true, completedAt: '2026-08-14T00:00:01.000Z' });
+    await logStore.flush();
+    const claim = await source.claimResume(RUN_ID);
+    const destination = makeJournal();
+
+    const task = new WorkflowTask({
+      runId: RUN_ID,
+      script: SCRIPT,
+      scriptSha256: workflowScriptSha256(SCRIPT),
+      name: META.name,
+      description: 'Workflow: resume-demo',
+      phases: META.phases,
+      meta: META,
+      tokenBudgetTotal: 1000,
+      journal: destination,
+      wire,
+      telemetry: { launched: vi.fn(), completed: vi.fn() },
+      log: { info: vi.fn(), warn: vi.fn() } as unknown as ILogService,
+      spawnDeps: {} as unknown as WorkflowSpawnHostDeps,
+      parentToolCallId: 'tc-1',
+      resume: {
+        sourceRunId,
+        completedByCacheKey: new Map([
+          [workflowAgentCacheKey('gather', undefined), {
+            agentId: 'cached-source-agent',
+            spawnedAt: '2026-01-01T00:00:00.000Z',
+            ok: true,
+            result: 'cached-summary',
+            durationMs: 5,
+          }],
+        ]),
+      },
+      resumeClaim: claim,
+    });
+
+    const { sink, settle } = makeSink();
+    await task.start(sink);
+    expect(settle).toHaveBeenCalledWith({ status: 'completed' });
+    expect(claim.state).toBe('committed');
+
+    const sourceSummary = await source.readJournal();
+    expect(sourceSummary?.resumeClaim).toMatchObject({ state: 'committed', claimedBy: RUN_ID });
+
+    const records: Array<{ readonly kind?: string }> = [];
+    for await (const record of logStore.read<{ readonly kind?: string }>(destination.scope, 'journal.jsonl')) records.push(record);
+    const releaseIndex = records.findIndex((record) => record.kind === 'workflow.lease.released');
+    const terminalIndex = records.findIndex((record) => record.kind === 'workflow.completed');
+    expect(releaseIndex).toBeGreaterThanOrEqual(0);
+    expect(terminalIndex).toBeGreaterThan(releaseIndex);
   });
 
   it('settles failed when the script throws and journals the terminal failure', async () => {

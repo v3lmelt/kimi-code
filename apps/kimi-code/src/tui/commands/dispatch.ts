@@ -406,7 +406,15 @@ async function handleBuiltInSlashCommand(
       void host.showSessionPicker();
       return;
     case 'tasks':
+      // Keep /tasks on the legacy background-task browser. Runtime Center is
+      // entered only through /runtime, /agents, or /workflows.
       void host.tasksBrowserController.show();
+      return;
+    case 'runtime':
+      void host.tasksBrowserController.showRuntimeCenter('tasks');
+      return;
+    case 'agents':
+      void host.tasksBrowserController.showRuntimeCenter('agents');
       return;
     case 'mcp':
       void showMcpServers(host);
@@ -491,7 +499,10 @@ async function handleBuiltInSlashCommand(
       await handleUltracodeCommand(host, args);
       return;
     case 'workflows':
-      await handleWorkflowsCommand(host, args);
+      void host.tasksBrowserController.showRuntimeCenter(
+        'workflows',
+        args.trim().length > 0 ? `workflow:${args.trim()}` : undefined,
+      );
       return;
     case 'compact':
       await handleCompactCommand(host, args);

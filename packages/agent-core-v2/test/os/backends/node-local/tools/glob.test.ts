@@ -19,7 +19,10 @@ import { ensureRgPath, type RgProbe } from '#/os/backends/node-local/tools/rgLoc
 import { PathSecurityError, type PathClass } from '#/tool/path-access';
 import { noopTelemetryService } from '#/app/telemetry/telemetry';
 import type { ISessionWorkspaceContext } from '#/session/workspaceContext/workspaceContext';
-import { stubWorkspaceContext } from '../../../../session/workspaceContext/stub-workspace-context';
+import {
+  stubAgentWorkspaceContext,
+  stubWorkspaceContext,
+} from '../../../../session/workspaceContext/stub-workspace-context';
 import {
   type GlobInput,
   GlobInputSchema,
@@ -231,6 +234,14 @@ function makeTool(
 }
 
 describe('GlobTool', () => {
+  it('rejects a dedicated search outside the leased worktree', () => {
+    const { tool } = makeTool(stubAgentWorkspaceContext('dedicated-worktree'));
+
+    expect(() => tool.resolveExecution({ pattern: '*.ts', path: '/workspace/outside' })).toThrow(
+      /worktree|workspace/i,
+    );
+  });
+
   it('exposes current metadata and schema', () => {
     const { tool } = makeTool(workspace);
 
@@ -948,7 +959,8 @@ describe('GlobTool integration (real ripgrep)', () => {
 
       const result = await execute(tool, { pattern: '*.ts', path: externalDir });
 
-      expect(result.output).toBe(extFile);
+      const output = typeof result.output === 'string' ? result.output : '';
+      expect(output.replaceAll('\\', '/')).toBe(extFile.replaceAll('\\', '/'));
     } finally {
       await fs.rm(externalDir, { recursive: true, force: true });
     }

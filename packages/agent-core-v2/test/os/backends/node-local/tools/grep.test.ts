@@ -44,7 +44,10 @@ import {
 } from '#/agent/tools/os/grep/grep';
 import { GrepTool as ProductionGrepTool } from '#/agent/tools/os/grep/grepTool';
 import { ensureRgPath } from '#/os/backends/node-local/tools/rgLocator';
-import { stubWorkspaceContext } from '../../../../session/workspaceContext/stub-workspace-context';
+import {
+  stubAgentWorkspaceContext,
+  stubWorkspaceContext,
+} from '../../../../session/workspaceContext/stub-workspace-context';
 import { recordingTelemetry, type TelemetryRecord } from '../../../../app/telemetry/stubs';
 import { registerStateServices } from '../../../../state/stubs';
 
@@ -174,12 +177,16 @@ class GrepTool extends ProductionGrepTool {
     kaos: FakeKaos,
     workspaceConfig: WorkspaceConfig,
     telemetry: ITelemetryService = noopTelemetryService,
+    workspaceContext: ISessionWorkspaceContext = stubWorkspaceContext(
+      workspaceConfig.workspaceDir,
+      workspaceConfig.additionalDirs,
+    ),
   ) {
     super(
       createTestProcessService(kaos),
       createTestFs(kaos),
       createTestEnv(kaos),
-      stubWorkspaceContext(workspaceConfig.workspaceDir, workspaceConfig.additionalDirs),
+      workspaceContext,
       telemetry,
     );
   }
@@ -296,6 +303,19 @@ afterEach(() => {
 });
 
 describe('GrepTool', () => {
+  it('rejects a dedicated search outside the leased worktree', () => {
+    const tool = new GrepTool(
+      createFakeKaos(),
+      workspace,
+      noopTelemetryService,
+      stubAgentWorkspaceContext('dedicated-worktree'),
+    );
+
+    expect(() => tool.resolveExecution({ pattern: 'needle', path: '/workspace/outside' })).toThrow(
+      /worktree|workspace/i,
+    );
+  });
+
   it('registers contribution metadata through the production DI path', async () => {
     const savedContributions = [...getAgentToolContributions()];
     const disposables = new DisposableStore();
